@@ -7,5 +7,14 @@ members = [
 ]
 
 [workspace.dependencies]
+candle-core = { version = "0.11" }
+candle-nn = { version = "0.11" }
+candle-transformers = { version = "0.11" }
+clap = { version = "4", features = ["derive"] }
+hf-hub = { version = "1", features = ["blocking"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+snafu = { version = "0.9" }
 sourcetrait_almost_compat = { path = "crates/sourcetrait_almost_compat" }
 sourcetrait_almost_lib = { path = "crates/sourcetrait_almost_lib" }
+tokenizers = { version = "0.23" }
