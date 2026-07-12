@@ -9,6 +9,7 @@ pub(crate) mod model;
 pub(crate) mod rope;
 pub mod run;
 pub(crate) mod token_stream;
+pub(crate) mod verify;
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -77,4 +78,5 @@ pub(crate) use crate::{
     model::Model,
     rope::RopeTables,
     token_stream::TokenStream,
+    verify::VerifyOptions,
 };

@@ -59,6 +59,21 @@ impl Model {
 
     /// Logits for the LAST position only, shape (batch, 1, vocab).
     pub(crate) fn forward(&mut self, input_ids: &candle_core::Tensor, seqlen_offset: usize) -> CompatResult<candle_core::Tensor> {
+        self.forward_inner(input_ids, seqlen_offset, false)
+    }
+
+    /// Logits for EVERY input position, shape (batch, seq, vocab); the
+    /// dump/verify path (costs seq * vocab activation memory).
+    pub(crate) fn forward_all(&mut self, input_ids: &candle_core::Tensor, seqlen_offset: usize) -> CompatResult<candle_core::Tensor> {
+        self.forward_inner(input_ids, seqlen_offset, true)
+    }
+
+    fn forward_inner(
+        &mut self,
+        input_ids: &candle_core::Tensor,
+        seqlen_offset: usize,
+        all_positions: bool,
+    ) -> CompatResult<candle_core::Tensor> {
         let (b_size, seq_len) = input_ids.dims2()?;
         snafu::ensure_whatever!(
             seqlen_offset + seq_len <= self.max_position_embeddings,
@@ -82,11 +97,12 @@ impl Model {
             };
             xs = layer.forward(&xs, mask, seqlen_offset)?;
         }
-        let logits = xs
-            .narrow(1, seq_len - 1, 1)?
-            .apply(&self.norm)?
-            .apply(&self.lm_head)?;
-        Ok(logits)
+        let xs = if all_positions {
+            xs
+        } else {
+            xs.narrow(1, seq_len - 1, 1)?
+        };
+        Ok(xs.apply(&self.norm)?.apply(&self.lm_head)?)
     }
 
     /// Unused by the one-shot bin; kept as olmo2-parity API for reuse.

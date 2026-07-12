@@ -42,6 +42,32 @@ pub(crate) enum Command {
         dtype: Option<String>,
         #[arg(long, default_value_t = 299792458)]
         seed: u64,
+        /// Write a parity dump (logits over every fed position) here
+        #[arg(long)]
+        dump_logits: Option<PathBuf>,
+        #[arg(long, default_value = consts::DEFAULT_MODEL_ID)]
+        model_id: String,
+        #[arg(long)]
+        model_dir: Option<PathBuf>,
+    },
+    /// Run the internal equivalence battery against the checkpoint
+    Verify {
+        /// Use a prompt longer than the sliding window (exercises the
+        /// decode slice path and the banded window mask together)
+        #[arg(long)]
+        long: bool,
+        /// Also diff against a cpu f32 run (informational)
+        #[arg(long)]
+        cross_device: bool,
+        /// Trailing positions covered by the incremental-decode check
+        #[arg(long, default_value_t = 16)]
+        decode_steps: usize,
+        /// Force CPU even when CUDA is available
+        #[arg(long)]
+        cpu: bool,
+        /// bf16 or f32; defaults to bf16 on cuda and f32 on cpu
+        #[arg(long)]
+        dtype: Option<String>,
         #[arg(long, default_value = consts::DEFAULT_MODEL_ID)]
         model_id: String,
         #[arg(long)]

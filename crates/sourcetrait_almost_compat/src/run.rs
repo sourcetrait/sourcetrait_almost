@@ -31,6 +31,7 @@ fn dispatch(cli: Cli) -> CompatResult<()> {
             cpu,
             dtype,
             seed,
+            dump_logits,
             model_id,
             model_dir,
         } => {
@@ -57,8 +58,29 @@ fn dispatch(cli: Cli) -> CompatResult<()> {
                 top_p,
                 sample_len,
                 seed,
+                dump_logits,
             };
             generate(&mut model, &tokenizer, &text, &opts, &device)
+        }
+        Command::Verify {
+            long,
+            cross_device,
+            decode_steps,
+            cpu,
+            dtype,
+            model_id,
+            model_dir,
+        } => {
+            let dir = model_dir.unwrap_or_else(|| default_model_dir(&model_id));
+            let paths = ensure_model(&model_id, &dir)?;
+            let device = pick_device(cpu)?;
+            let dtype = pick_dtype(dtype.as_deref(), &device)?;
+            let opts = VerifyOptions {
+                long,
+                cross_device,
+                decode_steps,
+            };
+            verify::verify(&paths, &device, dtype, &opts)
         }
     }
 }

@@ -3,15 +3,19 @@ resolver = "3"
 members = [
   "crates/sourcetrait_almost_lib",
   "crates/sourcetrait_almost_compat",
+  "crates/sourcetrait_almost_heat",
   "crates/sourcetrait_almost_cli",
 ]
 
 [workspace.dependencies]
+burn = { version = "0.21", features = ["ndarray"] }
 candle-core = { version = "0.11" }
 candle-nn = { version = "0.11" }
 candle-transformers = { version = "0.11" }
 clap = { version = "4", features = ["derive"] }
+half = { version = "2" }
 hf-hub = { version = "1", features = ["blocking"] }
+safetensors = { version = "0.8" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 snafu = { version = "0.9" }
