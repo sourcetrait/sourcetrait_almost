@@ -19,6 +19,10 @@ pub(crate) enum Command {
         /// Output dump path
         #[arg(long)]
         out: PathBuf,
+        /// cpu (ndarray f32, reference grade) or cuda (bf16, fast grade;
+        /// needs a --features cuda build)
+        #[arg(long, default_value = "cpu")]
+        device: String,
         /// Checkpoint directory (config.json + safetensors); defaults to
         /// lmst's default model dir
         #[arg(long)]

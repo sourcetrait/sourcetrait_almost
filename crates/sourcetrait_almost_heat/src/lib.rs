@@ -42,8 +42,12 @@ pub(crate) use crate::{
     model::HeatModel,
 };
 
-pub(crate) type Back = burn::backend::NdArray<f32>;
-pub(crate) type BackDevice = burn::backend::ndarray::NdArrayDevice;
-pub(crate) type Tensor1 = burn::tensor::Tensor<Back, 1>;
-pub(crate) type Tensor2 = burn::tensor::Tensor<Back, 2>;
-pub(crate) type Tensor3 = burn::tensor::Tensor<Back, 3>;
+/// Reference backend: deterministic host f32, fully isolated from the CUDA
+/// stack the oracle checks.
+pub(crate) type CpuBack = burn::backend::NdArray<f32>;
+
+/// Fast-oracle backend: bf16 element type so the weights fit Tier-A VRAM.
+/// Isolation caveat: shares the driver/toolkit chain with the system under
+/// test, and bf16 precision is comparison-grade, not reference-grade.
+#[cfg(feature = "cuda")]
+pub(crate) type CudaBack = burn::backend::Cuda<burn::tensor::bf16>;

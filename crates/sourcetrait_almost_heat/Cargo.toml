@@ -14,6 +14,9 @@ keywords = ["sourcetrait", "almost", "heat", "olmo", "burn"]
 name = "heat"
 path = "src/main.rs"
 
+[features]
+cuda = ["burn/cuda", "burn/autotune"]
+
 [dependencies]
 burn.workspace = true
 clap.workspace = true

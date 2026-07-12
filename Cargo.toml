@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.dependencies]
-burn = { version = "0.21", features = ["ndarray"] }
+burn = { version = "0.21", default-features = false, features = ["std", "ndarray"] }
 candle-core = { version = "0.11" }
 candle-nn = { version = "0.11" }
 candle-transformers = { version = "0.11" }

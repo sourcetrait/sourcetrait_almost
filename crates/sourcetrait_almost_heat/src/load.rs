@@ -43,7 +43,11 @@ impl Weights {
 
     /// A pytorch Linear weight (out, in), pre-transposed to (in, out) so the
     /// forward pass is a plain x.matmul(w).
-    pub(crate) fn take_linear_transposed(&mut self, name: &str, device: &BackDevice) -> HeatResult<Tensor2> {
+    pub(crate) fn take_linear_transposed<B: burn::tensor::backend::Backend>(
+        &mut self,
+        name: &str,
+        device: &B::Device,
+    ) -> HeatResult<burn::tensor::Tensor<B, 2>> {
         let (shape, values) = self.take(name)?;
         snafu::ensure_whatever!(shape.len() == 2, "{name}: expected rank 2, got {shape:?}");
         let (rows, cols) = (shape[0], shape[1]);
@@ -54,16 +58,20 @@ impl Weights {
             }
         }
         let data = burn::tensor::TensorData::new(transposed, [cols, rows]);
-        Ok(Tensor2::from_data(data, device))
+        Ok(burn::tensor::Tensor::from_data(data, device))
     }
 
     /// A rank-1 weight vector (norm scales).
-    pub(crate) fn take_vector(&mut self, name: &str, device: &BackDevice) -> HeatResult<Tensor1> {
+    pub(crate) fn take_vector<B: burn::tensor::backend::Backend>(
+        &mut self,
+        name: &str,
+        device: &B::Device,
+    ) -> HeatResult<burn::tensor::Tensor<B, 1>> {
         let (shape, values) = self.take(name)?;
         snafu::ensure_whatever!(shape.len() == 1, "{name}: expected rank 1, got {shape:?}");
         let length = shape[0];
         let data = burn::tensor::TensorData::new(values, [length]);
-        Ok(Tensor1::from_data(data, device))
+        Ok(burn::tensor::Tensor::from_data(data, device))
     }
 
     /// Raw host values of a rank-2 tensor (the embedding table stays on the

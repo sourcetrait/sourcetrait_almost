@@ -1,15 +1,21 @@
 use crate::*;
 
-/// Stateless Olmo 3 forward on burn/ndarray f32: no KV cache, no offsets,
-/// no decode path - every call is one full-sequence prefill over all
-/// positions. Deliberately structured unlike the candle implementation so
-/// the two stacks share no incremental machinery.
-pub(crate) struct HeatModel {
+use burn::tensor::backend::Backend;
+
+type FloatTensor<B, const D: usize> = burn::tensor::Tensor<B, D>;
+
+/// Stateless Olmo 3 forward on burn: no KV cache, no offsets, no decode
+/// path - every call is one full-sequence prefill over all positions.
+/// Deliberately structured unlike the candle implementation so the two
+/// stacks share no incremental machinery. Generic over the burn backend:
+/// CpuBack (ndarray f32) is the reference grade, CudaBack (bf16) the fast
+/// grade.
+pub(crate) struct HeatModel<B: Backend> {
     embed_rows: Vec<f32>,
     embed_hidden: usize,
-    layers: Vec<HeatLayer>,
-    final_norm: Tensor1,
-    lm_head_transposed: Tensor2,
+    layers: Vec<HeatLayer<B>>,
+    final_norm: FloatTensor<B, 1>,
+    lm_head_transposed: FloatTensor<B, 2>,
     cos_full: Vec<f32>,
     sin_full: Vec<f32>,
     cos_sliding: Vec<f32>,
@@ -19,18 +25,17 @@ pub(crate) struct HeatModel {
     window: usize,
     eps: f64,
     max_positions: usize,
-    device: BackDevice,
+    device: B::Device,
 }
 
-impl HeatModel {
-    pub(crate) fn new(config: &HeatConfig, mut weights: Weights) -> HeatResult<Self> {
+impl<B: Backend> HeatModel<B> {
+    pub(crate) fn new(config: &HeatConfig, mut weights: Weights, device: B::Device) -> HeatResult<Self> {
         let kv_heads = config.num_key_value_heads.unwrap_or(config.num_attention_heads);
         snafu::ensure_whatever!(
             kv_heads == config.num_attention_heads,
             "heat supports MHA only (num_key_value_heads {kv_heads} != heads {})",
             config.num_attention_heads
         );
-        let device = BackDevice::default();
         let head_dim = config.head_dim();
 
         let (vocab, embed_hidden, embed_rows) = weights.take_host_matrix("model.embed_tokens.weight")?;
@@ -43,12 +48,12 @@ impl HeatModel {
         for index in 0..config.num_hidden_layers {
             layers.push(HeatLayer::new(index, config, &mut weights, &device)?);
         }
-        let final_norm = weights.take_vector("model.norm.weight", &device)?;
+        let final_norm = weights.take_vector::<B>("model.norm.weight", &device)?;
         let lm_head_transposed = if config.tie_word_embeddings {
             let data = burn::tensor::TensorData::new(embed_rows.clone(), [vocab, embed_hidden]);
-            Tensor2::from_data(data, &device).swap_dims(0, 1)
+            FloatTensor::<B, 2>::from_data(data, &device).swap_dims(0, 1)
         } else {
-            weights.take_linear_transposed("lm_head.weight", &device)?
+            weights.take_linear_transposed::<B>("lm_head.weight", &device)?
         };
 
         let (full_inv_freq, attention_factor) = match &config.rope_scaling {
@@ -105,7 +110,7 @@ impl HeatModel {
             let start = (*id as usize) * self.embed_hidden;
             gathered.extend_from_slice(&self.embed_rows[start..start + self.embed_hidden]);
         }
-        let mut x = Tensor2::from_data(
+        let mut x = FloatTensor::<B, 2>::from_data(
             burn::tensor::TensorData::new(gathered, [n, self.embed_hidden]),
             &self.device,
         );
@@ -125,7 +130,8 @@ impl HeatModel {
 
         let x = rms_norm(x, &self.final_norm, self.eps);
         let logits = x.matmul(self.lm_head_transposed.clone());
-        let values = match logits.into_data().to_vec::<f32>() {
+        let data = logits.into_data().convert::<f32>();
+        let values = match data.to_vec::<f32>() {
             Ok(values) => values,
             Err(error) => snafu::whatever!("logits extraction failed: {error:?}"),
         };
@@ -134,7 +140,7 @@ impl HeatModel {
 
     /// Additive 0/-inf visibility mask (n, n); window w hides keys more
     /// than w-1 positions back.
-    fn mask(&self, n: usize, window: Option<usize>) -> Tensor2 {
+    fn mask(&self, n: usize, window: Option<usize>) -> FloatTensor<B, 2> {
         let mut values = vec![0f32; n * n];
         for query in 0..n {
             for key in 0..n {
@@ -145,16 +151,16 @@ impl HeatModel {
                 }
             }
         }
-        Tensor2::from_data(burn::tensor::TensorData::new(values, [n, n]), &self.device)
+        FloatTensor::<B, 2>::from_data(burn::tensor::TensorData::new(values, [n, n]), &self.device)
     }
 
-    fn table_slice(&self, cos: &[f32], sin: &[f32], n: usize) -> (Tensor2, Tensor2) {
+    fn table_slice(&self, cos: &[f32], sin: &[f32], n: usize) -> (FloatTensor<B, 2>, FloatTensor<B, 2>) {
         let width = self.head_dim;
-        let cos = Tensor2::from_data(
+        let cos = FloatTensor::<B, 2>::from_data(
             burn::tensor::TensorData::new(cos[..n * width].to_vec(), [n, width]),
             &self.device,
         );
-        let sin = Tensor2::from_data(
+        let sin = FloatTensor::<B, 2>::from_data(
             burn::tensor::TensorData::new(sin[..n * width].to_vec(), [n, width]),
             &self.device,
         );
@@ -162,46 +168,51 @@ impl HeatModel {
     }
 }
 
-struct HeatLayer {
-    q_transposed: Tensor2,
-    k_transposed: Tensor2,
-    v_transposed: Tensor2,
-    o_transposed: Tensor2,
-    q_norm: Tensor1,
-    k_norm: Tensor1,
-    gate_transposed: Tensor2,
-    up_transposed: Tensor2,
-    down_transposed: Tensor2,
-    post_attention_norm: Tensor1,
-    post_feedforward_norm: Tensor1,
+struct HeatLayer<B: Backend> {
+    q_transposed: FloatTensor<B, 2>,
+    k_transposed: FloatTensor<B, 2>,
+    v_transposed: FloatTensor<B, 2>,
+    o_transposed: FloatTensor<B, 2>,
+    q_norm: FloatTensor<B, 1>,
+    k_norm: FloatTensor<B, 1>,
+    gate_transposed: FloatTensor<B, 2>,
+    up_transposed: FloatTensor<B, 2>,
+    down_transposed: FloatTensor<B, 2>,
+    post_attention_norm: FloatTensor<B, 1>,
+    post_feedforward_norm: FloatTensor<B, 1>,
     kind: LayerKind,
 }
 
-impl HeatLayer {
+impl<B: Backend> HeatLayer<B> {
     fn new(
         index: usize,
         config: &HeatConfig,
         weights: &mut Weights,
-        device: &BackDevice,
+        device: &B::Device,
     ) -> HeatResult<Self> {
         let prefix = format!("model.layers.{index}");
-        let take = |weights: &mut Weights, suffix: &str| -> HeatResult<Tensor2> {
-            weights.take_linear_transposed(&format!("{prefix}.{suffix}"), device)
-        };
+        fn linear<B: Backend>(
+            weights: &mut Weights,
+            prefix: &str,
+            suffix: &str,
+            device: &B::Device,
+        ) -> HeatResult<FloatTensor<B, 2>> {
+            weights.take_linear_transposed::<B>(&format!("{prefix}.{suffix}"), device)
+        }
         Ok(Self {
-            q_transposed: take(weights, "self_attn.q_proj.weight")?,
-            k_transposed: take(weights, "self_attn.k_proj.weight")?,
-            v_transposed: take(weights, "self_attn.v_proj.weight")?,
-            o_transposed: take(weights, "self_attn.o_proj.weight")?,
-            q_norm: weights.take_vector(&format!("{prefix}.self_attn.q_norm.weight"), device)?,
-            k_norm: weights.take_vector(&format!("{prefix}.self_attn.k_norm.weight"), device)?,
-            gate_transposed: take(weights, "mlp.gate_proj.weight")?,
-            up_transposed: take(weights, "mlp.up_proj.weight")?,
-            down_transposed: take(weights, "mlp.down_proj.weight")?,
+            q_transposed: linear::<B>(weights, &prefix, "self_attn.q_proj.weight", device)?,
+            k_transposed: linear::<B>(weights, &prefix, "self_attn.k_proj.weight", device)?,
+            v_transposed: linear::<B>(weights, &prefix, "self_attn.v_proj.weight", device)?,
+            o_transposed: linear::<B>(weights, &prefix, "self_attn.o_proj.weight", device)?,
+            q_norm: weights.take_vector::<B>(&format!("{prefix}.self_attn.q_norm.weight"), device)?,
+            k_norm: weights.take_vector::<B>(&format!("{prefix}.self_attn.k_norm.weight"), device)?,
+            gate_transposed: linear::<B>(weights, &prefix, "mlp.gate_proj.weight", device)?,
+            up_transposed: linear::<B>(weights, &prefix, "mlp.up_proj.weight", device)?,
+            down_transposed: linear::<B>(weights, &prefix, "mlp.down_proj.weight", device)?,
             post_attention_norm: weights
-                .take_vector(&format!("{prefix}.post_attention_layernorm.weight"), device)?,
+                .take_vector::<B>(&format!("{prefix}.post_attention_layernorm.weight"), device)?,
             post_feedforward_norm: weights
-                .take_vector(&format!("{prefix}.post_feedforward_layernorm.weight"), device)?,
+                .take_vector::<B>(&format!("{prefix}.post_feedforward_layernorm.weight"), device)?,
             kind: config.layer_kind(index)?,
         })
     }
@@ -210,14 +221,14 @@ impl HeatLayer {
     #[allow(clippy::too_many_arguments)]
     fn forward(
         &self,
-        x: Tensor2,
-        mask: &Tensor2,
-        cos: &Tensor2,
-        sin: &Tensor2,
+        x: FloatTensor<B, 2>,
+        mask: &FloatTensor<B, 2>,
+        cos: &FloatTensor<B, 2>,
+        sin: &FloatTensor<B, 2>,
         heads: usize,
         head_dim: usize,
         eps: f64,
-    ) -> Tensor2 {
+    ) -> FloatTensor<B, 2> {
         let n = x.dims()[0];
         let hidden = heads * head_dim;
         let residual = x.clone();
@@ -254,12 +265,17 @@ impl HeatLayer {
 }
 
 /// (n, hidden) -> (heads, n, head_dim).
-fn to_heads(x: Tensor2, n: usize, heads: usize, head_dim: usize) -> Tensor3 {
+fn to_heads<B: Backend>(x: FloatTensor<B, 2>, n: usize, heads: usize, head_dim: usize) -> FloatTensor<B, 3> {
     x.reshape([n, heads, head_dim]).swap_dims(0, 1)
 }
 
 /// HF rotate-half rope: t*cos + rotate_half(t)*sin, cos/sin (n, head_dim).
-fn apply_rope(t: Tensor3, cos: &Tensor2, sin: &Tensor2, heads: usize) -> Tensor3 {
+fn apply_rope<B: Backend>(
+    t: FloatTensor<B, 3>,
+    cos: &FloatTensor<B, 2>,
+    sin: &FloatTensor<B, 2>,
+    heads: usize,
+) -> FloatTensor<B, 3> {
     let [_, n, head_dim] = t.dims();
     let half = head_dim / 2;
     let first = t.clone().slice_dim(2, 0..half);
@@ -270,8 +286,8 @@ fn apply_rope(t: Tensor3, cos: &Tensor2, sin: &Tensor2, heads: usize) -> Tensor3
     t * cos + rotated * sin
 }
 
-/// HF RMSNorm: x * rsqrt(mean(x^2) + eps) * weight (all f32 here).
-fn rms_norm(x: Tensor2, weight: &Tensor1, eps: f64) -> Tensor2 {
+/// HF RMSNorm: x * rsqrt(mean(x^2) + eps) * weight.
+fn rms_norm<B: Backend>(x: FloatTensor<B, 2>, weight: &FloatTensor<B, 1>, eps: f64) -> FloatTensor<B, 2> {
     let [n, width] = x.dims();
     let mean_square = (x.clone() * x.clone()).mean_dim(1);
     let scale = (mean_square + eps).sqrt().recip().expand([n, width]);

@@ -14,10 +14,16 @@ fn dispatch(cli: Cli) -> HeatResult<()> {
         Command::Dump {
             ids_from,
             out,
+            device,
             model_dir,
         } => {
+            let device = match device.as_str() {
+                "cpu" => dump::OracleDevice::Cpu,
+                "cuda" => dump::OracleDevice::Cuda,
+                other => snafu::whatever!("unsupported device {other}; use cpu or cuda"),
+            };
             let dir = model_dir.unwrap_or_else(cli::default_model_dir);
-            dump::dump(&dir, &ids_from, &out)
+            dump::dump(&dir, &ids_from, &out, device)
         }
         Command::Diff {
             candidate,
