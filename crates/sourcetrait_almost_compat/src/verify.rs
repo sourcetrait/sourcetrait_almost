@@ -43,11 +43,13 @@ pub(crate) fn verify(
     };
     let ids = build_ids(&tokenizer, opts.long, config.sliding_window)?;
     let n = ids.len();
-    // Bars pinned from first measurements (2026-07-12, quick mode): bf16
-    // path-vs-path wobble reads 1.1-2.2e-4 nmse (reduction-order, one-ulp
-    // max_abs, argmax stable); f32 reads ~0. Real cache/mask/offset bugs
-    // sit orders above either bar and break argmax agreement.
-    let same_device_bar = if dtype == candle_core::DType::F32 { 1e-9 } else { 5e-4 };
+    // Bars pinned from measurements (2026-07-12): bf16 path-vs-path wobble
+    // reads 1.1-2.2e-4 nmse (reduction-order, one-ulp max_abs, argmax
+    // stable) -> 5e-4. f32 reads bitwise-0 on short sequences but 1.2e-9 on
+    // a 4352-token chunked prefill (f32 accumulation-order at length) ->
+    // 1e-8. Real cache/mask/offset bugs sit orders above either bar and
+    // break argmax agreement.
+    let same_device_bar = if dtype == candle_core::DType::F32 { 1e-8 } else { 5e-4 };
     eprintln!(
         "lmst verify: {n} tokens, device {device:?}, dtype {dtype:?}, mode {}",
         if opts.long { "long (window exceeded)" } else { "quick" }
