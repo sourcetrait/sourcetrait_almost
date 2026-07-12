@@ -4,6 +4,7 @@ version = "0.0.0-1"
 edition = "2024"
 description = "Shared library for sourcetrait_almost"
 authors = ["SourceTrait <development@sourcetrait.com>"]
+license = "AGPL-3.0-or-later"
 repository = "https://github.com/sourcetrait/sourcetrait_almost"
 homepage = "https://sourcetrait.com"
 categories = []
