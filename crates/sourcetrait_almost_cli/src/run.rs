@@ -1,2 +1,111 @@
+use crate::*;
+
+/// Binary entry: parse, dispatch, exit non-zero on error. stdout carries
+/// payload only (generated text, verify table); diagnostics go to stderr.
 pub fn run() {
+    let cli = <Cli as clap::Parser>::parse();
+    if let Err(error) = dispatch(cli) {
+        eprintln!("almost: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
+    match cli.command {
+        Command::Pull { model_id, model_dir } => {
+            let dir = model_dir.unwrap_or_else(|| lib::default_model_dir(&model_id));
+            let paths = lib::ensure_model(&model_id, &dir)?;
+            eprintln!(
+                "almost: model ready at {} ({} shards)",
+                dir.display(),
+                paths.shards.len()
+            );
+            Ok(())
+        }
+        Command::Prompt {
+            prompt,
+            raw,
+            greedy,
+            temperature,
+            top_p,
+            sample_len,
+            cpu,
+            dtype,
+            seed,
+            dump_logits,
+            model_id,
+            model_dir,
+        } => {
+            let dir = model_dir.unwrap_or_else(|| lib::default_model_dir(&model_id));
+            let paths = lib::ensure_model(&model_id, &dir)?;
+            let device = lib::pick_device(cpu)?;
+            let dtype = lib::pick_dtype(dtype.as_deref(), &device)?;
+            eprintln!("almost: device {device:?}, dtype {dtype:?}");
+
+            let loaded = lib::load_model(&paths, &device, dtype, lib::Settings::default())?;
+            eprintln!("almost: weights loaded in {:.1}s", loaded.load_seconds);
+            let mut model = loaded.model;
+
+            let text = if raw { prompt } else { lib::chat_wrap(&prompt) };
+            let options = lib::GenerateOptions {
+                greedy,
+                temperature,
+                top_p,
+                sample_len,
+                seed,
+                dump_logits,
+            };
+            let mut generation = model.generate(&loaded.tokenizer, &text, &options)?;
+            for step in &mut generation {
+                let step = step?;
+                if let Some(chunk) = step.chunk {
+                    print!("{chunk}");
+                    io::stdout().flush()?;
+                }
+            }
+            let report = generation.finish()?;
+            if let Some(rest) = &report.rest {
+                print!("{rest}");
+            }
+            println!();
+            if let Some(path) = &options.dump_logits {
+                eprintln!("almost: logits dumped to {}", path.display());
+            }
+            eprintln!(
+                "almost: prefill {} tokens in {:.2}s ({:.1} tok/s); decode {} tokens in {:.2}s ({:.1} tok/s); stopped by {}",
+                report.prompt_token_count,
+                report.prefill_seconds,
+                report.prompt_token_count as f64 / report.prefill_seconds.max(f64::EPSILON),
+                report.generated_token_count,
+                report.decode_seconds,
+                report.generated_token_count as f64 / report.decode_seconds.max(f64::EPSILON),
+                match report.finish_reason {
+                    Some(lib::FinishReason::StopToken) => "stop token",
+                    Some(lib::FinishReason::SampleLen) => "sample_len",
+                    None => "early stop",
+                },
+            );
+            Ok(())
+        }
+        Command::Verify {
+            long,
+            cross_device,
+            decode_steps,
+            cpu,
+            dtype,
+            model_id,
+            model_dir,
+        } => {
+            let dir = model_dir.unwrap_or_else(|| lib::default_model_dir(&model_id));
+            let paths = lib::ensure_model(&model_id, &dir)?;
+            let device = lib::pick_device(cpu)?;
+            let dtype = lib::pick_dtype(dtype.as_deref(), &device)?;
+            let opts = lib::VerifyOptions {
+                long,
+                cross_device,
+                decode_steps,
+            };
+            lib::verify(&paths, &device, dtype, &opts)
+        }
+    }
 }

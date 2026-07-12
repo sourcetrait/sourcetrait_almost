@@ -1,13 +1,24 @@
 [package]
 name = "sourcetrait_almost_lib"
-version = "0.0.0-1"
+version = "0.0.0-2"
 edition = "2024"
-description = "Shared library for sourcetrait_almost"
+description = "The almost engine: Olmo 3 7B Instruct port and program library on candle"
 authors = ["SourceTrait <development@sourcetrait.com>"]
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/sourcetrait/sourcetrait_almost"
 homepage = "https://sourcetrait.com"
 categories = []
-keywords = ["sourcetrait", "almost", "lib"]
+keywords = ["sourcetrait", "almost", "lib", "olmo"]
+
+[features]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 
 [dependencies]
+candle-core.workspace = true
+candle-nn.workspace = true
+candle-transformers.workspace = true
+hf-hub.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+snafu.workspace = true
+tokenizers.workspace = true

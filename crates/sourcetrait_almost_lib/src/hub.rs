@@ -2,16 +2,16 @@ use crate::*;
 
 /// Local paths of a complete pulled checkpoint.
 #[derive(Debug, Clone)]
-pub(crate) struct ModelPaths {
-    pub(crate) config: PathBuf,
-    pub(crate) tokenizer: PathBuf,
-    pub(crate) shards: Vec<PathBuf>,
+pub struct ModelPaths {
+    pub config: PathBuf,
+    pub tokenizer: PathBuf,
+    pub shards: Vec<PathBuf>,
 }
 
 /// $XDG_CACHE_HOME/huggingface/model/<owner>--<name>, with ~/.cache as the
 /// cache-home fallback when the variable is unset or empty (the XDG spec's
 /// own default).
-pub(crate) fn default_model_dir(model_id: &str) -> PathBuf {
+pub fn default_model_dir(model_id: &str) -> PathBuf {
     let base = match std::env::var("XDG_CACHE_HOME") {
         Ok(cache_home) if !cache_home.is_empty() => PathBuf::from(cache_home),
         _ => {
@@ -26,17 +26,17 @@ pub(crate) fn default_model_dir(model_id: &str) -> PathBuf {
 
 /// Ensure every checkpoint file exists under dir, downloading what is
 /// missing (files already present are trusted; delete a file to re-pull it).
-pub(crate) fn ensure_model(model_id: &str, dir: &Path) -> CompatResult<ModelPaths> {
+pub fn ensure_model(model_id: &str, dir: &Path) -> AlmostResult<ModelPaths> {
     fn fetch(
         repo: &hf_hub::HFRepositorySync<hf_hub::RepoTypeModel>,
         dir: &Path,
         filename: &str,
-    ) -> CompatResult<PathBuf> {
+    ) -> AlmostResult<PathBuf> {
         let target = dir.join(filename);
         if target.exists() {
             return Ok(target);
         }
-        eprintln!("lmst: pulling {filename}");
+        eprintln!("almost: pulling {filename}");
         let path = repo
             .download_file()
             .filename(filename)

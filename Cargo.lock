@@ -5908,11 +5908,15 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_almost_cli"
-version = "0.0.0-1"
+version = "0.0.0-2"
+dependencies = [
+ "clap",
+ "sourcetrait_almost_lib",
+]
 
 [[package]]
 name = "sourcetrait_almost_compat"
-version = "0.0.0-1"
+version = "0.0.0-2"
 dependencies = [
  "candle-core 0.11.0",
  "candle-nn",
@@ -5927,7 +5931,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_almost_heat"
-version = "0.0.0-1"
+version = "0.0.0-2"
 dependencies = [
  "burn",
  "clap",
@@ -5940,7 +5944,17 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_almost_lib"
-version = "0.0.0-1"
+version = "0.0.0-2"
+dependencies = [
+ "candle-core 0.11.0",
+ "candle-nn",
+ "candle-transformers",
+ "hf-hub",
+ "serde",
+ "serde_json",
+ "snafu",
+ "tokenizers 0.23.1",
+]
 
 [[package]]
 name = "spin"

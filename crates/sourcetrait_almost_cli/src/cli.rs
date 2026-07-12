@@ -1,8 +1,8 @@
 use crate::*;
 
-/// lmst: generic Olmo 3 checkpoint runner on candle (compat baseline).
+/// almost: the Olmo 3 7B Instruct engine (thin drivers over the lib port).
 #[derive(Debug, clap::Parser)]
-#[command(name = "lmst", version, about)]
+#[command(name = "almost", version, about)]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: Command,
@@ -12,7 +12,7 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     /// Download the checkpoint (config, tokenizer, safetensors shards)
     Pull {
-        #[arg(long, default_value = consts::DEFAULT_MODEL_ID)]
+        #[arg(long, default_value = lib::consts::DEFAULT_MODEL_ID)]
         model_id: String,
         /// Defaults to $XDG_CACHE_HOME/huggingface/model/<owner>--<name>
         #[arg(long)]
@@ -27,9 +27,9 @@ pub(crate) enum Command {
         /// Argmax decoding (deterministic); overrides temperature/top-p
         #[arg(long)]
         greedy: bool,
-        #[arg(long, default_value_t = consts::DEFAULT_TEMPERATURE)]
+        #[arg(long, default_value_t = lib::consts::DEFAULT_TEMPERATURE)]
         temperature: f64,
-        #[arg(long, default_value_t = consts::DEFAULT_TOP_P)]
+        #[arg(long, default_value_t = lib::consts::DEFAULT_TOP_P)]
         top_p: f64,
         /// Maximum new tokens to generate
         #[arg(long, default_value_t = 256)]
@@ -45,15 +45,15 @@ pub(crate) enum Command {
         /// Write a parity dump (logits over every fed position) here
         #[arg(long)]
         dump_logits: Option<PathBuf>,
-        #[arg(long, default_value = consts::DEFAULT_MODEL_ID)]
+        #[arg(long, default_value = lib::consts::DEFAULT_MODEL_ID)]
         model_id: String,
         #[arg(long)]
         model_dir: Option<PathBuf>,
     },
     /// Run the internal equivalence battery against the checkpoint
     Verify {
-        /// Use a prompt longer than the sliding window (exercises the
-        /// decode slice path and the banded window mask together)
+        /// Use a prompt longer than the sliding window (exercises the D3
+        /// trim, the banded window mask, and the yarn/vanilla split)
         #[arg(long)]
         long: bool,
         /// Also diff against a cpu f32 run (informational)
@@ -68,7 +68,7 @@ pub(crate) enum Command {
         /// bf16 or f32; defaults to bf16 on cuda and f32 on cpu
         #[arg(long)]
         dtype: Option<String>,
-        #[arg(long, default_value = consts::DEFAULT_MODEL_ID)]
+        #[arg(long, default_value = lib::consts::DEFAULT_MODEL_ID)]
         model_id: String,
         #[arg(long)]
         model_dir: Option<PathBuf>,

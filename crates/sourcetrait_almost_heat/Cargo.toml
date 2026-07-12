@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_almost_heat"
-version = "0.0.0-1"
+version = "0.0.0-2"
 edition = "2024"
 description = "Independent burn-based Olmo 3 parity oracle for almost"
 authors = ["SourceTrait <development@sourcetrait.com>"]

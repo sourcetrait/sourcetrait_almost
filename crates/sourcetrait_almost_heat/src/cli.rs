@@ -38,14 +38,18 @@ pub(crate) enum Command {
     },
 }
 
-/// Mirrors lmst's default layout so the two binaries share a checkpoint.
+/// Mirrors lmst's default layout so the two binaries share a checkpoint:
+/// $XDG_CACHE_HOME/huggingface/model/<owner>--<name>, ~/.cache the fallback
+/// when the variable is unset or empty (the XDG spec's own default).
 pub(crate) fn default_model_dir() -> PathBuf {
-    let base = match std::env::var("HF_HOME") {
-        Ok(home) => PathBuf::from(home),
-        Err(_) => {
+    let base = match std::env::var("XDG_CACHE_HOME") {
+        Ok(cache_home) if !cache_home.is_empty() => PathBuf::from(cache_home),
+        _ => {
             let home = std::env::var("HOME").unwrap_or_else(|_| String::from("."));
-            PathBuf::from(home).join(".cache").join("huggingface")
+            PathBuf::from(home).join(".cache")
         }
     };
-    base.join("lmst").join("allenai--Olmo-3-7B-Instruct")
+    base.join("huggingface")
+        .join("model")
+        .join("allenai--Olmo-3-7B-Instruct")
 }

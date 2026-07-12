@@ -9,11 +9,6 @@ pub(crate) mod rope;
 pub mod run;
 pub(crate) mod tensor_io;
 
-#[cfg(test)]
-pub(crate) mod tests {
-    pub(crate) mod rope;
-}
-
 pub(crate) use std::{
     collections::HashMap,
     path::{
@@ -51,3 +46,8 @@ pub(crate) type CpuBack = burn::backend::NdArray<f32>;
 /// test, and bf16 precision is comparison-grade, not reference-grade.
 #[cfg(feature = "cuda")]
 pub(crate) type CudaBack = burn::backend::Cuda<burn::tensor::bf16>;
+
+#[cfg(test)]
+pub(crate) mod tests {
+    pub(crate) mod rope;
+}
