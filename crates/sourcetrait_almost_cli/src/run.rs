@@ -26,6 +26,7 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
             prompt,
             raw,
             greedy,
+            flash,
             temperature,
             top_p,
             sample_len,
@@ -40,9 +41,15 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
             let paths = lib::ensure_model(&model_id, &dir)?;
             let device = lib::pick_device(cpu)?;
             let dtype = lib::pick_dtype(dtype.as_deref(), &device)?;
-            eprintln!("almost: device {device:?}, dtype {dtype:?}");
+            eprintln!(
+                "almost: device {device:?}, dtype {dtype:?}{}",
+                if flash { ", flash" } else { "" }
+            );
 
-            let loaded = lib::load_model(&paths, &device, dtype, lib::Settings::default())?;
+            let settings = lib::Settings {
+                use_flash_attn: flash,
+            };
+            let loaded = lib::load_model(&paths, &device, dtype, settings)?;
             eprintln!("almost: weights loaded in {:.1}s", loaded.load_seconds);
             let mut model = loaded.model;
 
@@ -89,6 +96,7 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
         }
         Command::Verify {
             long,
+            flash,
             cross_device,
             decode_steps,
             cpu,
@@ -104,6 +112,7 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
                 long,
                 cross_device,
                 decode_steps,
+                use_flash_attn: flash,
             };
             lib::verify(&paths, &device, dtype, &opts)
         }

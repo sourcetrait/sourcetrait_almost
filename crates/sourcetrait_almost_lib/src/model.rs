@@ -92,6 +92,21 @@ impl Model {
             cfg.num_kv_heads(),
             cfg.num_attention_heads
         );
+        if settings.use_flash_attn {
+            snafu::ensure_whatever!(
+                cfg!(feature = "flash-attn"),
+                "this build carries no flash-attn support (rebuild with --features flash-attn)"
+            );
+            snafu::ensure_whatever!(
+                vb.device().is_cuda(),
+                "flash attention requires a cuda device"
+            );
+            snafu::ensure_whatever!(
+                matches!(vb.dtype(), candle_core::DType::BF16 | candle_core::DType::F16),
+                "flash attention requires bf16 or f16, got {:?}",
+                vb.dtype()
+            );
+        }
         let vb_m = vb.pp("model");
         let embed_tokens = candle_nn::embedding(cfg.vocab_size, cfg.hidden_size, vb_m.pp("embed_tokens"))?;
         let full_rope = std::sync::Arc::new(RopeTables::for_full_layers(cfg, vb.dtype(), vb_m.device())?);
@@ -110,7 +125,7 @@ impl Model {
                 LayerType::Full => full_rope.clone(),
                 LayerType::Sliding => sliding_rope.clone(),
             };
-            layers.push(DecoderLayer::new(rotary, layer_type, cfg, vb_l.pp(layer_idx))?);
+            layers.push(DecoderLayer::new(rotary, layer_type, cfg, settings.use_flash_attn, vb_l.pp(layer_idx))?);
         }
         let norm = candle_nn::rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb_m.pp("norm"))?;
         let lm_head = if cfg.tie_word_embeddings {
@@ -239,13 +254,14 @@ impl DecoderLayer {
         rotary: std::sync::Arc<RopeTables>,
         layer_type: LayerType,
         cfg: &Olmo3Config,
+        use_flash_attn: bool,
         vb: candle_nn::VarBuilder,
     ) -> AlmostResult<Self> {
         let sliding_window = match layer_type {
             LayerType::Sliding => Some(cfg.sliding_window),
             LayerType::Full => None,
         };
-        let self_attn = Attention::new(rotary, sliding_window, cfg, vb.pp("self_attn"))?;
+        let self_attn = Attention::new(rotary, sliding_window, cfg, use_flash_attn, vb.pp("self_attn"))?;
         let mlp = Mlp::new(cfg, vb.pp("mlp"))?;
         let post_attention_layernorm =
             candle_nn::rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("post_attention_layernorm"))?;
@@ -288,6 +304,32 @@ impl DecoderLayer {
 /// what OOMs an otherwise-fitting 32K run on Tier A.
 const FULL_CACHE_STEP: usize = 8192;
 
+/// D6 flash dispatch: (b, seq, heads, head_dim) operands, softmax computed
+/// in-kernel (f32 accumulators), causal masking bottom-right aligned so a
+/// q block that is the tail of kv gets absolute-position causality (the
+/// cached/chunked-prefill shape; R1-probed on candle 0.11).
+#[cfg(feature = "flash-attn")]
+fn flash_attn(
+    q: &candle_core::Tensor,
+    k: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    softmax_scale: f32,
+    causal: bool,
+) -> AlmostResult<candle_core::Tensor> {
+    Ok(r::flash::flash_attn(q, k, v, softmax_scale, causal)?)
+}
+
+#[cfg(not(feature = "flash-attn"))]
+fn flash_attn(
+    _q: &candle_core::Tensor,
+    _k: &candle_core::Tensor,
+    _v: &candle_core::Tensor,
+    _softmax_scale: f32,
+    _causal: bool,
+) -> AlmostResult<candle_core::Tensor> {
+    snafu::whatever!("this build carries no flash-attn support (rebuild with --features flash-attn)")
+}
+
 #[derive(Debug, Clone)]
 struct Attention {
     q_proj: candle_nn::Linear,
@@ -298,6 +340,7 @@ struct Attention {
     k_norm: candle_nn::RmsNorm,
     rotary: std::sync::Arc<RopeTables>,
     sliding_window: Option<usize>,
+    use_flash_attn: bool,
     kv_cache: Option<(candle_core::Tensor, candle_core::Tensor)>,
     full_key_buffer: Option<candle_core::Tensor>,
     full_value_buffer: Option<candle_core::Tensor>,
@@ -312,6 +355,7 @@ impl Attention {
         rotary: std::sync::Arc<RopeTables>,
         sliding_window: Option<usize>,
         cfg: &Olmo3Config,
+        use_flash_attn: bool,
         vb: candle_nn::VarBuilder,
     ) -> AlmostResult<Self> {
         let num_heads = cfg.num_attention_heads;
@@ -332,6 +376,7 @@ impl Attention {
             k_norm,
             rotary,
             sliding_window,
+            use_flash_attn,
             kv_cache: None,
             full_key_buffer: None,
             full_value_buffer: None,
@@ -444,17 +489,31 @@ impl Attention {
         };
 
         let scale = 1f64 / f64::sqrt(self.head_dim as f64);
-        let mut attn_weights = (query_states.matmul(&key_states.transpose(2, 3)?)? * scale)?;
-        if let Some(mask) = attention_mask.tensor() {
-            attn_weights = attn_weights.broadcast_add(mask)?;
-        }
-        // HF computes softmax in f32 and casts back; match it for parity.
-        let attn_weights = if dtype == candle_core::DType::F32 {
-            candle_nn::ops::softmax_last_dim(&attn_weights)?
+        // D5 drives dispatch: Causal prefill blocks go flash; Window is
+        // the band the fused kernel cannot express (eager only); decode
+        // (q_len 1) stays eager - candle-flash-attn 0.11 has no split-kv
+        // decode kernel, so a lone q block underfills the SMs and loses
+        // to the eager gemv on long kv (measured: -11% at 2K to -19% at
+        // 32K, winning only under ~few-hundred kv).
+        let attn_output = if self.use_flash_attn && q_len > 1 && !matches!(attention_mask, AttnMask::Window(_)) {
+            let q = query_states.transpose(1, 2)?;
+            let k = key_states.transpose(1, 2)?;
+            let v = value_states.transpose(1, 2)?;
+            let causal = matches!(attention_mask, AttnMask::Causal(_));
+            flash_attn(&q, &k, &v, scale as f32, causal)?.transpose(1, 2)?
         } else {
-            candle_nn::ops::softmax_last_dim(&attn_weights.to_dtype(candle_core::DType::F32)?)?.to_dtype(dtype)?
+            let mut attn_weights = (query_states.matmul(&key_states.transpose(2, 3)?)? * scale)?;
+            if let Some(mask) = attention_mask.tensor() {
+                attn_weights = attn_weights.broadcast_add(mask)?;
+            }
+            // HF computes softmax in f32 and casts back; match it for parity.
+            let attn_weights = if dtype == candle_core::DType::F32 {
+                candle_nn::ops::softmax_last_dim(&attn_weights)?
+            } else {
+                candle_nn::ops::softmax_last_dim(&attn_weights.to_dtype(candle_core::DType::F32)?)?.to_dtype(dtype)?
+            };
+            attn_weights.matmul(&value_states)?
         };
-        let attn_output = attn_weights.matmul(&value_states)?;
         Ok(attn_output
             .transpose(1, 2)?
             .reshape((b_size, q_len, self.hidden_size))?

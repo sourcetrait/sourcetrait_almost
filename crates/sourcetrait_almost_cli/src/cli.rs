@@ -27,6 +27,10 @@ pub(crate) enum Command {
         /// Argmax decoding (deterministic); overrides temperature/top-p
         #[arg(long)]
         greedy: bool,
+        /// Flash attention (needs a flash-attn build, cuda, bf16/f16;
+        /// errors otherwise). Sliding prefills past the window stay eager.
+        #[arg(long)]
+        flash: bool,
         #[arg(long, default_value_t = lib::consts::DEFAULT_TEMPERATURE)]
         temperature: f64,
         #[arg(long, default_value_t = lib::consts::DEFAULT_TOP_P)]
@@ -56,6 +60,10 @@ pub(crate) enum Command {
         /// trim, the banded window mask, and the yarn/vanilla split)
         #[arg(long)]
         long: bool,
+        /// Run the battery through the flash path (needs a flash-attn
+        /// build, cuda, bf16/f16; errors otherwise)
+        #[arg(long)]
+        flash: bool,
         /// Also diff against a cpu f32 run (informational)
         #[arg(long)]
         cross_device: bool,

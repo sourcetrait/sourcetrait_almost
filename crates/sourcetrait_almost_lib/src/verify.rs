@@ -11,6 +11,9 @@ pub struct VerifyOptions {
     pub cross_device: bool,
     /// How many trailing positions the incremental-decode check covers.
     pub decode_steps: usize,
+    /// Run the battery through the flash path (T5); the cross-device
+    /// cpu reference model always stays eager.
+    pub use_flash_attn: bool,
 }
 
 struct Comparison {
@@ -57,7 +60,10 @@ pub fn verify(
 
     let load_start = Instant::now();
     let vb = unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&paths.shards, dtype, device)? };
-    let mut model = Model::new(&config, Settings::default(), vb)?;
+    let settings = Settings {
+        use_flash_attn: opts.use_flash_attn,
+    };
+    let mut model = Model::new(&config, settings, vb)?;
     eprintln!("almost verify: weights loaded in {:.1}s", load_start.elapsed().as_secs_f32());
 
     let mut results: Vec<Comparison> = Vec::new();

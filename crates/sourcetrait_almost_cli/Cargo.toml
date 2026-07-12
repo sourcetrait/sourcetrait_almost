@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_almost_cli"
-version = "0.0.0-2"
+version = "0.0.0-3"
 edition = "2024"
 description = "almost: the command-line interface over sourcetrait_almost_lib"
 authors = ["SourceTrait <development@sourcetrait.com>"]
@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [features]
 cuda = ["sourcetrait_almost_lib/cuda"]
+flash-attn = ["cuda", "sourcetrait_almost_lib/flash-attn"]
 
 [dependencies]
 clap.workspace = true

@@ -43,6 +43,10 @@ pub(crate) mod r {
             Sampling,
         };
     }
+    #[cfg(feature = "flash-attn")]
+    pub(crate) mod flash {
+        pub(crate) use candle_flash_attn::flash_attn;
+    }
 }
 
 #[allow(unused_imports)]
