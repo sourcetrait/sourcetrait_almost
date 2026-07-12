@@ -1,0 +1,12 @@
+[package]
+name = "sourcetrait_almost_lib"
+version = "0.0.0-1"
+edition = "2024"
+description = "Shared library for sourcetrait_almost"
+authors = ["SourceTrait <development@sourcetrait.com>"]
+repository = "https://github.com/sourcetrait/sourcetrait_almost"
+homepage = "https://sourcetrait.com"
+categories = []
+keywords = ["sourcetrait", "almost", "lib"]
+
+[dependencies]

@@ -1,0 +1,11 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/sourcetrait_almost_lib",
+  "crates/sourcetrait_almost_compat",
+  "crates/sourcetrait_almost_cli",
+]
+
+[workspace.dependencies]
+sourcetrait_almost_compat = { path = "crates/sourcetrait_almost_compat" }
+sourcetrait_almost_lib = { path = "crates/sourcetrait_almost_lib" }
