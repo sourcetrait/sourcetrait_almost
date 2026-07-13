@@ -98,14 +98,19 @@ impl Model {
         let mut dump_rows: Vec<candle_core::Tensor> = Vec::new();
 
         self.clear_kv_cache();
-        // Chunked prefill (consts::PREFILL_CHUNK): logit-exact vs a single
-        // forward, and the only way a window-exceeding prompt fits the
-        // eager attention transient on Tier A.
+        // Chunked prefill: logit-exact vs a single forward. The eager
+        // chunk bounds the attention transient; the flash chunk is sized
+        // for throughput (consts).
+        let prefill_chunk = if self.flash_enabled() {
+            consts::PREFILL_CHUNK_FLASH
+        } else {
+            consts::PREFILL_CHUNK_EAGER
+        };
         let prefill_start = Instant::now();
         let mut last_logits: Option<candle_core::Tensor> = None;
         let mut chunk_start = 0usize;
         while chunk_start < prompt_ids.len() {
-            let chunk_end = (chunk_start + consts::PREFILL_CHUNK).min(prompt_ids.len());
+            let chunk_end = (chunk_start + prefill_chunk).min(prompt_ids.len());
             let input =
                 candle_core::Tensor::new(&prompt_ids[chunk_start..chunk_end], self.device())?.unsqueeze(0)?;
             let chunk_logits = if dumping {

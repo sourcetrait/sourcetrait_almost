@@ -8,10 +8,17 @@ pub const STOP_TOKENS: [&str; 2] = ["<|im_end|>", "<|endoftext|>"];
 pub const DEFAULT_TEMPERATURE: f64 = 0.6;
 pub const DEFAULT_TOP_P: f64 = 0.95;
 
-/// Prompt prefill chunk (tokens per forward). Bounds the eager attention
-/// transient - scores plus the f32-softmax parity copies scale with
-/// chunk * context: ~1.3 GiB at 32K bf16, which beside the weights
+/// Eager prompt-prefill chunk (tokens per forward). Bounds the eager
+/// attention transient - scores plus the f32-softmax parity copies scale
+/// with chunk * context: ~1.3 GiB at 32K bf16, which beside the weights
 /// (13.6 GiB), the trimmed KV (~5.5 GiB at 32K), the cat-growth double
 /// buffer, and a display-loaded card still fits Tier A. Chunked prefill
 /// is logit-exact vs single-shot (the battery pins it).
-pub const PREFILL_CHUNK: usize = 128;
+pub const PREFILL_CHUNK_EAGER: usize = 128;
+
+/// Flash prompt-prefill chunk. Fused attention materializes no score
+/// matrix, so the transient bound disappears and the chunk is sized for
+/// throughput instead: each chunk re-streams the full weights, so bigger
+/// chunks amortize weight traffic until per-chunk attention cost
+/// dominates (swept on Tier A at 8K/32K).
+pub const PREFILL_CHUNK_FLASH: usize = 2048;

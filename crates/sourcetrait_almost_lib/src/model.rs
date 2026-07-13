@@ -8,23 +8,32 @@ pub struct Settings {
     pub use_flash_attn: bool,
 }
 
-/// Why a mask exists (or does not), so flash dispatch (D6) can pick the
-/// fused path safely: None = single-position decode with nothing to hide
-/// (D4); Causal = plain causality, flash-eligible - including an in-window
-/// sliding prefill, which degenerates to it; Window = a sliding band the
-/// fused kernel cannot express (eager only).
+/// Why visibility is limited (or is not), so flash dispatch (D6) can pick
+/// the fused path: None = single-position decode with nothing to hide
+/// (D4); Causal = plain causality - including an in-window sliding
+/// prefill, which degenerates to it; Window = the sliding band. The
+/// tensor is present only when an eager consumer will read it - a
+/// flash-active forward carries tensor-less descriptors (the kernels take
+/// the semantics as parameters), skipping the per-chunk mask build
+/// entirely.
 #[derive(Debug, Clone)]
 pub(crate) enum AttnMask {
     None,
-    Causal(candle_core::Tensor),
-    Window(candle_core::Tensor),
+    Causal(Option<candle_core::Tensor>),
+    Window(Option<candle_core::Tensor>),
 }
 
 impl AttnMask {
-    fn tensor(&self) -> Option<&candle_core::Tensor> {
+    /// The eager path's read: kinds that limit visibility MUST carry a
+    /// tensor there; reaching a descriptor without one is a dispatch bug,
+    /// never a silent full-visibility pass.
+    fn eager_tensor(&self) -> AlmostResult<Option<&candle_core::Tensor>> {
         match self {
-            AttnMask::None => None,
-            AttnMask::Causal(mask) | AttnMask::Window(mask) => Some(mask),
+            AttnMask::None => Ok(None),
+            AttnMask::Causal(Some(mask)) | AttnMask::Window(Some(mask)) => Ok(Some(mask)),
+            AttnMask::Causal(None) | AttnMask::Window(None) => {
+                snafu::whatever!("eager attention reached a tensor-less mask descriptor")
+            }
         }
     }
 }
@@ -80,7 +89,6 @@ pub struct Model {
     max_position_embeddings: usize,
     device: candle_core::Device,
     dtype: candle_core::DType,
-    #[allow(dead_code)]
     settings: Settings,
 }
 
@@ -170,7 +178,8 @@ impl Model {
             seqlen_offset + seq_len,
             self.max_position_embeddings
         );
-        let (full_mask, sliding_mask) = self.prefill_masks(b_size, seqlen_offset, seq_len)?;
+        let flash_active = self.settings.use_flash_attn && seq_len > 1;
+        let (full_mask, sliding_mask) = self.prefill_masks(b_size, seqlen_offset, seq_len, flash_active)?;
         let mut xs = self.embed_tokens.forward(input_ids)?;
         for layer in self.layers.iter_mut() {
             let mask = match layer.layer_type {
@@ -208,21 +217,45 @@ impl Model {
         &self.device
     }
 
+    pub(crate) fn flash_enabled(&self) -> bool {
+        self.settings.use_flash_attn
+    }
+
     /// D4: decode (seq_len <= 1) builds no masks on any layer; masks exist
     /// only on prefill forwards, once per type. The sliding mask reuses the
-    /// causal tensor when the whole span sits inside the window (D5).
-    fn prefill_masks(&self, b_size: usize, offset: usize, seq_len: usize) -> AlmostResult<(AttnMask, AttnMask)> {
+    /// causal tensor when the whole span sits inside the window (D5). A
+    /// flash-active forward gets tensor-less descriptors - the kernels
+    /// carry the semantics, so no mask values are built or uploaded.
+    fn prefill_masks(
+        &self,
+        b_size: usize,
+        offset: usize,
+        seq_len: usize,
+        flash_active: bool,
+    ) -> AlmostResult<(AttnMask, AttnMask)> {
         if seq_len <= 1 {
             return Ok((AttnMask::None, AttnMask::None));
         }
+        let in_window = offset + seq_len <= self.sliding_window;
+        if flash_active {
+            // Sliding layers stay on the WINDOWED kernel even in-window
+            // (identical visibility): mixing kernel families across chunk
+            // boundaries lets per-layer bf16 accumulation differences
+            // compound through the depth - measured 1.3e-2 nmse on the
+            // long battery's chunked-vs-single when chunk A ran causal
+            // against a windowed single reference.
+            return Ok((AttnMask::Causal(None), AttnMask::Window(None)));
+        }
         let causal = self.mask_tensor(b_size, offset, seq_len, 0, None)?;
-        let sliding = if offset + seq_len <= self.sliding_window {
-            AttnMask::Causal(causal.clone())
+        let sliding = if in_window {
+            AttnMask::Causal(Some(causal.clone()))
         } else {
             let kv_start = offset - offset.min(self.sliding_window - 1);
-            AttnMask::Window(self.mask_tensor(b_size, offset, seq_len, kv_start, Some(self.sliding_window))?)
+            AttnMask::Window(Some(
+                self.mask_tensor(b_size, offset, seq_len, kv_start, Some(self.sliding_window))?,
+            ))
         };
-        Ok((AttnMask::Causal(causal), sliding))
+        Ok((AttnMask::Causal(Some(causal)), sliding))
     }
 
     fn mask_tensor(
@@ -326,6 +359,39 @@ fn flash_attn(
     _v: &candle_core::Tensor,
     _softmax_scale: f32,
     _causal: bool,
+) -> AlmostResult<candle_core::Tensor> {
+    snafu::whatever!("this build carries no flash-attn support (rebuild with --features flash-attn)")
+}
+
+/// The sliding band as a fused kernel: local attention with
+/// window_size_left = window-1 and window_size_right = 0, bottom-right
+/// aligned like the causal case, so a trimmed-cache q block still gets
+/// absolute [p-w+1, p] visibility (probed).
+#[cfg(feature = "flash-attn")]
+fn flash_attn_windowed(
+    q: &candle_core::Tensor,
+    k: &candle_core::Tensor,
+    v: &candle_core::Tensor,
+    softmax_scale: f32,
+    window: usize,
+) -> AlmostResult<candle_core::Tensor> {
+    Ok(r::flash::flash_attn_windowed(
+        q,
+        k,
+        v,
+        softmax_scale,
+        Some(window - 1),
+        Some(0),
+    )?)
+}
+
+#[cfg(not(feature = "flash-attn"))]
+fn flash_attn_windowed(
+    _q: &candle_core::Tensor,
+    _k: &candle_core::Tensor,
+    _v: &candle_core::Tensor,
+    _softmax_scale: f32,
+    _window: usize,
 ) -> AlmostResult<candle_core::Tensor> {
     snafu::whatever!("this build carries no flash-attn support (rebuild with --features flash-attn)")
 }
@@ -489,21 +555,28 @@ impl Attention {
         };
 
         let scale = 1f64 / f64::sqrt(self.head_dim as f64);
-        // D5 drives dispatch: Causal prefill blocks go flash; Window is
-        // the band the fused kernel cannot express (eager only); decode
-        // (q_len 1) stays eager - candle-flash-attn 0.11 has no split-kv
-        // decode kernel, so a lone q block underfills the SMs and loses
-        // to the eager gemv on long kv (measured: -11% at 2K to -19% at
-        // 32K, winning only under ~few-hundred kv).
-        let attn_output = if self.use_flash_attn && q_len > 1 && !matches!(attention_mask, AttnMask::Window(_)) {
+        // D5 drives dispatch: Causal prefill blocks go flash, Window
+        // bands go windowed flash; decode (q_len 1) stays eager -
+        // candle-flash-attn 0.11 has no split-kv decode kernel, so a lone
+        // q block underfills the SMs and loses to the eager gemv on long
+        // kv (measured: -11% at 2K to -19% at 32K, winning only under
+        // ~few-hundred kv).
+        let attn_output = if self.use_flash_attn && q_len > 1 {
             let q = query_states.transpose(1, 2)?;
             let k = key_states.transpose(1, 2)?;
             let v = value_states.transpose(1, 2)?;
-            let causal = matches!(attention_mask, AttnMask::Causal(_));
-            flash_attn(&q, &k, &v, scale as f32, causal)?.transpose(1, 2)?
+            let fused = match attention_mask {
+                AttnMask::Window(_) => match self.sliding_window {
+                    Some(window) => flash_attn_windowed(&q, &k, &v, scale as f32, window)?,
+                    None => snafu::whatever!("window descriptor on a full-attention layer"),
+                },
+                AttnMask::Causal(_) => flash_attn(&q, &k, &v, scale as f32, true)?,
+                AttnMask::None => flash_attn(&q, &k, &v, scale as f32, false)?,
+            };
+            fused.transpose(1, 2)?
         } else {
             let mut attn_weights = (query_states.matmul(&key_states.transpose(2, 3)?)? * scale)?;
-            if let Some(mask) = attention_mask.tensor() {
+            if let Some(mask) = attention_mask.eager_tensor()? {
                 attn_weights = attn_weights.broadcast_add(mask)?;
             }
             // HF computes softmax in f32 and casts back; match it for parity.

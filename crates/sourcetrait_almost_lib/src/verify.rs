@@ -23,6 +23,8 @@ struct Comparison {
     nmse: f64,
     argmax_match: f64,
     bar: Option<f64>,
+    /// (row, max_abs) worst offenders; printed when a check fails.
+    worst_rows: Vec<(usize, f32)>,
 }
 
 const QUICK_PROMPT: &str =
@@ -47,11 +49,22 @@ pub fn verify(
     };
     let ids = build_ids(&tokenizer, opts.long, config.sliding_window)?;
     let n = ids.len();
-    // Bars pinned from compat's measurements (parent 05): bf16
-    // path-vs-path wobble reads 1.1-2.2e-4 nmse -> 5e-4; f32 reads
-    // bitwise-0 short but ~1.2e-9 on a 4352-token chunked prefill -> 1e-8.
-    // Real cache/mask/offset bugs sit orders above either bar.
-    let same_device_bar = if dtype == candle_core::DType::F32 { 1e-8 } else { 5e-4 };
+    // Bars pinned from measurement AT THE LENGTH THEY GUARD. f32: bitwise
+    // short, ~1.2e-9 at 4352 (accumulation order at length) -> 1e-8.
+    // bf16 quick (~53 rows): path-vs-path wobble 1.1-2.2e-4 -> 5e-4.
+    // bf16 long (4352+ rows): drift COMPOUNDS with depth x length -
+    // chunk-boundary changes alone read 1.28e-2 nmse, two valid bf16
+    // stacks (flash vs eager, same ids) read 2.49e-2, and each sits
+    // ~4.4-4.7e-2 from f32 truth at argmax 0.9986 (oracle-anchored,
+    // 4407 rows) -> 5e-2. Real cache/mask/offset bugs still sit orders
+    // above every bar (a visibility error reads order-1).
+    let same_device_bar = if dtype == candle_core::DType::F32 {
+        1e-8
+    } else if opts.long {
+        5e-2
+    } else {
+        5e-4
+    };
     let cache_cap = config.sliding_window - 1;
     eprintln!(
         "almost verify: {n} tokens, device {device:?}, dtype {dtype:?}, mode {}",
@@ -158,6 +171,11 @@ pub fn verify(
             "{} | {} | {:.3e} | {:.3e} | {:.4} | {}",
             result.label, result.rows, result.max_abs, result.nmse, result.argmax_match, verdict
         );
+        if verdict.starts_with("FAIL") {
+            for (row, row_max) in &result.worst_rows {
+                println!("  worst row {row} | max_abs {row_max:.3e}");
+            }
+        }
     }
     let bound_verdict = if cache_bound_breaches.is_empty() {
         String::from("PASS")
@@ -269,14 +287,25 @@ fn compare(
     }
     let nmse = if reference_sq > 0.0 { diff_sq / reference_sq } else { 0.0 };
     let mut matches = 0usize;
+    let mut row_peaks: Vec<(usize, f32)> = Vec::with_capacity(rows);
     for row in 0..rows {
         let range = row * vocab..(row + 1) * vocab;
         let argmax_a = argmax(&a[range.clone()]);
-        let argmax_b = argmax(&b[range]);
+        let argmax_b = argmax(&b[range.clone()]);
         if argmax_a == argmax_b {
             matches += 1;
         }
+        let mut row_max = 0f32;
+        for (x, y) in a[range.clone()].iter().zip(b[range].iter()) {
+            let diff = (x - y).abs();
+            if diff > row_max {
+                row_max = diff;
+            }
+        }
+        row_peaks.push((row, row_max));
     }
+    row_peaks.sort_by(|left, right| right.1.total_cmp(&left.1));
+    row_peaks.truncate(8);
     Ok(Comparison {
         label: String::from(label),
         rows,
@@ -284,6 +313,7 @@ fn compare(
         nmse,
         argmax_match: matches as f64 / rows as f64,
         bar,
+        worst_rows: row_peaks,
     })
 }
 
