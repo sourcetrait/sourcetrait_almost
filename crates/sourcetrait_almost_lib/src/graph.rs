@@ -251,15 +251,13 @@ pub(crate) struct DecodeStage {
     ring_masks: HashMap<usize, candle_core::Tensor>,
     /// Captured decode graphs keyed by (full_bucket, ring_bucket).
     pub(crate) graphs: GraphCache,
-    /// Replay switch. OFF BY DEFAULT: capture of candle op sequences
-    /// is REFUTED on this stack (driver 580 / CUDA 13 / cudarc
-    /// 0.19.8) - a pageable-host H2D staging copy inside the captured
-    /// graph replays stale data, so replays compute garbage
-    /// (ILLEGAL_ADDRESS at model scale). Evidence: the ignored
-    /// capture_replays_attention_shaped_chain contract test (mode x
-    /// hold matrix, dot-dump hook). The capture machinery stays for
-    /// the diagnostic path and for when the platform (or a static
-    /// workspace, E8) unblocks it.
+    /// Replay switch (on by default; verify's uncaptured reference
+    /// legs turn it off). Capture is viable ONLY under the pinned
+    /// recipe - candle's param-cache guard + a warmup run before
+    /// recording (Model::capture_decode_graph; understood 06):
+    /// without the cache, strided/broadcast kernels' dims/strides
+    /// uploads replay from dead temporary host memory (the root cause
+    /// the capture contract test pins).
     pub(crate) capture_enabled: bool,
     /// Whether generate() has armed stepping for the current cache
     /// state (clear/restore epochs unset it; rearm sets it).
@@ -317,7 +315,7 @@ impl DecodeStage {
             full_masks,
             ring_masks,
             graphs: GraphCache::default(),
-            capture_enabled: false,
+            capture_enabled: true,
             armed: true,
             // The creator records the true capacity right after
             // construction (kept out of the signature for arity).
@@ -388,7 +386,7 @@ impl DecodeStage {
             self.dtype,
             &self.device,
         )?;
-        self.capture_enabled = false;
+        self.capture_enabled = true;
         self.armed = true;
         Ok(())
     }

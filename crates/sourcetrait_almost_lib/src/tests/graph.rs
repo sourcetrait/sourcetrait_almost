@@ -75,20 +75,21 @@ fn slot_write_follows_restaged_index() {
     assert_eq!(sums, vec![8.0, 0.0, 0.0, 16.0, 8.0, 0.0, 0.0, 16.0]);
 }
 
-/// Phase C capture contract, minimally: an attention-shaped candle op
-/// chain over persistent buffers - slot_write appends, bucket narrows,
-/// matmul, additive mask, f32 softmax, matmul, a persistent-output
-/// write - must replay exactly what the uncaptured chain computes.
-/// IGNORED: refuted on this stack (driver 580 / CUDA 13 / cudarc
-/// 0.19.8) - every (mode x hold) variant fails; a pageable-host H2D
-/// staging copy inside the captured graph replays stale data (the
-/// verbose dot dump via ALMOST_CAPTURE_DOT shows it). Run manually
-/// with --ignored to re-test after a platform/candle change; env
+/// Phase C capture contract: an attention-shaped candle op chain over
+/// persistent buffers - slot_write appends, bucket narrows, matmul,
+/// additive mask, f32 softmax, matmul, a persistent-output write -
+/// must replay exactly what the uncaptured chain computes. Pins the
+/// RECIPE: candle's param-cache guard enabled BEFORE a warmup run
+/// (strided/broadcast kernels upload dims/strides from temporary host
+/// Vecs - uncached, a captured copy replays dead memory; a cache miss
+/// during active capture is a designed hard error), then capture with
+/// intermediates dropping in-recording (free nodes). Diagnostic env
 /// knobs: ALMOST_CAPTURE_MODE=thread_local|relaxed|global,
-/// ALMOST_CAPTURE_HOLD=0|1, ALMOST_CAPTURE_DOT=<path>. One variant
-/// per process - a broken capture can wedge the CUDA context.
+/// ALMOST_CAPTURE_HOLD=inside|1|0 ("0" = the known-bad drop-after-
+/// capture shape), ALMOST_CAPTURE_DOT=<dot dump path>. Run variant
+/// sweeps one per process - a broken capture can wedge the CUDA
+/// context.
 #[test]
-#[ignore = "capture refuted on driver 580/cuda13 + cudarc 0.19.8 (see lib journal REV 21); run with --ignored to re-test"]
 fn capture_replays_attention_shaped_chain() {
     if !crate::r::candle::cuda_is_available() {
         return;
@@ -149,6 +150,11 @@ fn capture_replays_attention_shaped_chain() {
         tensor.flatten_all().unwrap().to_vec1::<f32>().unwrap()
     }
 
+    // candle's capture contract: enable the param cache FIRST, then a
+    // WARMUP run populates it (content-keyed dims/strides vectors);
+    // only then capture - a cache miss during active capture is a
+    // hard error by design.
+    let _htod_cache = cuda_device.enable_cuda_graph_htod_cache();
     let _ = chain().unwrap();
     let expected = snap(&out);
 
@@ -158,9 +164,12 @@ fn capture_replays_attention_shaped_chain() {
     use cudarc::driver::sys::CUstreamCaptureMode;
     let mode_name =
         std::env::var("ALMOST_CAPTURE_MODE").unwrap_or_else(|_| String::from("thread_local"));
-    let hold = std::env::var("ALMOST_CAPTURE_HOLD")
-        .map(|value| value == "1")
-        .unwrap_or(true);
+    // "inside" = drop intermediates WHILE STILL CAPTURING (recorded
+    // free nodes - the production sequence's shape, the default);
+    // "1" = hold them for the graph's lifetime; "0" = drop after
+    // end_capture (live frees of graph-epoch VAs - the known-bad
+    // shape, expected to fail).
+    let hold = std::env::var("ALMOST_CAPTURE_HOLD").unwrap_or_else(|_| String::from("inside"));
     let mode = match mode_name.as_str() {
         "thread_local" => CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL,
         "relaxed" => CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED,
@@ -173,16 +182,28 @@ fn capture_replays_attention_shaped_chain() {
     let stream = cuda_device.cuda_stream();
     stream.begin_capture(mode).unwrap();
     let chain_result = chain();
+    // "inside" drops while the stream is still capturing (frees record
+    // as in-graph free nodes - the production sequence's shape);
+    // everything else stays alive across end_capture.
+    let mut held: Option<Vec<candle_core::Tensor>> = match chain_result {
+        Ok(intermediates) => {
+            if hold == "inside" {
+                drop(intermediates);
+                None
+            } else {
+                Some(intermediates)
+            }
+        }
+        Err(error) => panic!("chain failed during capture: {error}"),
+    };
     let end_result = stream.end_capture(
         cudarc::driver::sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
     );
-    let intermediates = chain_result.unwrap();
-    let held = if hold {
-        Some(intermediates)
-    } else {
-        drop(intermediates);
-        None
-    };
+    if hold == "0" {
+        // Known-bad shape: live frees of graph-epoch VAs after the
+        // capture ended.
+        held = None;
+    }
     let graph = end_result.unwrap().unwrap();
     eprintln!("{label}: captured");
 

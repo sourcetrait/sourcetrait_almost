@@ -384,15 +384,15 @@ fn argmax(values: &[f32]) -> usize {
     best
 }
 
-/// E4 gate: staged graph-mode decode vs classic on the same ids at 2K
-/// and 32K prefixes (quick bf16 bar with argmax identity -
-/// padded-width f32 reductions regroup sums, so NOT bitwise),
-/// graph-mode self-determinism at exactly zero, and an eviction leg
-/// where decode-overflow epochs fire mid-run (self-determinism plus
-/// the store-cap assert - the epoch's in-place mask reset is what
-/// keeps stale columns hidden). The staged path runs UNCAPTURED:
-/// capture+replay is refuted on this stack (graph.rs carries the
-/// finding; the ignored capture contract test is the diagnostic).
+/// E4 gate (phases A+C): CAPTURED graph-mode decode vs classic on the
+/// same ids at 2K and 32K prefixes (quick bf16 bar with argmax
+/// identity - padded-width f32 reductions regroup sums, so NOT
+/// bitwise), captured vs uncaptured staged decode at EXACTLY zero
+/// (the phase C bar; the 2K leg crosses a ring bucket mid-run,
+/// switching graphs), captured self-determinism at exactly zero, and
+/// an eviction leg where decode-overflow epochs fire mid-replay
+/// (captured vs uncaptured exactly zero, store cap asserted - the
+/// epoch's in-place mask reset is what keeps stale columns hidden).
 /// cuda-only, self-arming (like the needle battery's observation
 /// pass).
 pub fn verify_graph(paths: &ModelPaths) -> AlmostResult<()> {
@@ -422,9 +422,9 @@ pub fn verify_graph(paths: &ModelPaths) -> AlmostResult<()> {
         load_start.elapsed().as_secs_f32()
     );
 
-    // (comparison, argmax_gated): the graph-vs-classic rows also
-    // demand argmax identity; the determinism rows demand exactly
-    // zero.
+    // (comparison, argmax_gated): the captured-vs-classic rows also
+    // demand argmax identity; the captured-vs-uncaptured and
+    // determinism rows demand exactly zero.
     let mut results: Vec<(Comparison, bool)> = Vec::new();
     for &target in &[2048usize, 32768] {
         let (prefix, continuation) = graph_ids(&tokenizer, target, GRAPH_CHECK_STEPS)?;
@@ -433,18 +433,22 @@ pub fn verify_graph(paths: &ModelPaths) -> AlmostResult<()> {
         let classic = decode_rows_classic(&mut model, &continuation, prefix.len(), &device)?;
         chunked_prefill(&mut model, &prefix, &device)?;
         model.arm_graph_decode(prefix.len() + continuation.len() + 1)?;
-        let graph_first = decode_rows_graph(&mut model, &continuation, prefix.len())?;
+        model.set_graph_capture(false)?;
+        let uncaptured = decode_rows_graph(&mut model, &continuation, prefix.len())?;
         chunked_prefill(&mut model, &prefix, &device)?;
         model.arm_graph_decode(prefix.len() + continuation.len() + 1)?;
-        let graph_second = decode_rows_graph(&mut model, &continuation, prefix.len())?;
+        let captured_first = decode_rows_graph(&mut model, &continuation, prefix.len())?;
+        chunked_prefill(&mut model, &prefix, &device)?;
+        model.arm_graph_decode(prefix.len() + continuation.len() + 1)?;
+        let captured_second = decode_rows_graph(&mut model, &continuation, prefix.len())?;
         eprintln!(
             "almost verify-graph: {target}-token legs done ({:.0}s elapsed)",
             leg_start.elapsed().as_secs_f32()
         );
         results.push((
             compare(
-                &format!("graph vs classic @{target}"),
-                &graph_first,
+                &format!("captured vs classic @{target}"),
+                &captured_first,
                 &classic,
                 Some(5e-4),
             )?,
@@ -452,9 +456,18 @@ pub fn verify_graph(paths: &ModelPaths) -> AlmostResult<()> {
         ));
         results.push((
             compare(
-                &format!("graph self-determinism @{target}"),
-                &graph_second,
-                &graph_first,
+                &format!("captured vs uncaptured @{target}"),
+                &captured_first,
+                &uncaptured,
+                Some(0.0),
+            )?,
+            false,
+        ));
+        results.push((
+            compare(
+                &format!("captured self-determinism @{target}"),
+                &captured_second,
+                &captured_first,
                 Some(0.0),
             )?,
             false,
@@ -463,9 +476,9 @@ pub fn verify_graph(paths: &ModelPaths) -> AlmostResult<()> {
 
     // Eviction epoch leg: decode-overflow compactions fire mid-run as
     // epoch breaks (classic compaction + the in-place mask reset that
-    // hides stale columns past the shrunk store). Two identical
-    // uncaptured runs must agree exactly and the store must hold the
-    // cap.
+    // hides stale columns past the shrunk store, the SAME captured
+    // graph resumed). Captured and uncaptured staged decode must agree
+    // exactly and the store must hold the cap.
     drop(model);
     let evict_settings = Settings {
         use_flash_attn: cfg!(feature = "flash-attn"),
@@ -486,11 +499,12 @@ pub fn verify_graph(paths: &ModelPaths) -> AlmostResult<()> {
     chunked_prefill(&mut model, &prefix, &device)?;
     model.compact_full_caches()?;
     model.arm_graph_decode(prefix.len() + continuation.len() + 1)?;
-    let evict_first = decode_rows_graph(&mut model, &continuation, prefix.len())?;
+    model.set_graph_capture(false)?;
+    let evict_uncaptured = decode_rows_graph(&mut model, &continuation, prefix.len())?;
     chunked_prefill(&mut model, &prefix, &device)?;
     model.compact_full_caches()?;
     model.arm_graph_decode(prefix.len() + continuation.len() + 1)?;
-    let evict_second = decode_rows_graph(&mut model, &continuation, prefix.len())?;
+    let evict_captured = decode_rows_graph(&mut model, &continuation, prefix.len())?;
     eprintln!(
         "almost verify-graph: eviction epoch legs done ({:.0}s elapsed)",
         leg_start.elapsed().as_secs_f32()
@@ -503,9 +517,9 @@ pub fn verify_graph(paths: &ModelPaths) -> AlmostResult<()> {
     );
     results.push((
         compare(
-            "graph determinism (evicted, epochs fired)",
-            &evict_second,
-            &evict_first,
+            "captured vs uncaptured (evicted, epochs fired)",
+            &evict_captured,
+            &evict_uncaptured,
             Some(0.0),
         )?,
         false,

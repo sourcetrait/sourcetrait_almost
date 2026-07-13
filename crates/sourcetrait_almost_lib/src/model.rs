@@ -601,6 +601,22 @@ impl Model {
         self.graph_stage.as_ref().is_some_and(|stage| stage.armed)
     }
 
+    /// Gate-side switch between capture+replay and uncaptured staged
+    /// stepping (verify's reference legs).
+    #[cfg(feature = "cuda")]
+    pub(crate) fn set_graph_capture(&mut self, enabled: bool) -> AlmostResult<()> {
+        let Some(stage) = &mut self.graph_stage else {
+            snafu::whatever!("no graph stage to configure (arm first)");
+        };
+        stage.capture_enabled = enabled;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    pub(crate) fn set_graph_capture(&mut self, _enabled: bool) -> AlmostResult<()> {
+        snafu::whatever!("this build carries no cuda support (decode graphs need --features cuda)")
+    }
+
     /// Largest full-layer store length currently held (the eviction
     /// gate's cap assertion; mirror of max_sliding_cache_len).
     pub(crate) fn max_full_cache_len(&self) -> usize {
@@ -737,44 +753,52 @@ impl Model {
             return self.graph_forward_sequence(stage);
         }
         let key = (stage.full_bucket, stage.ring_bucket);
-        let graph = match stage.graphs.get(key) {
-            Some(graph) => graph,
-            None => {
-                let captured = self.capture_decode_graph(stage)?;
-                stage.graphs.insert(key, captured);
-                match stage.graphs.get(key) {
-                    Some(graph) => graph,
-                    None => snafu::whatever!("captured graph missing after insert"),
+        match stage.graphs.get(key) {
+            Some(graph) => {
+                if let Err(error) = graph.launch() {
+                    snafu::whatever!("decode graph launch failed: {error}");
                 }
             }
-        };
-        // The replay IS the step: capture only records.
-        if let Err(error) = graph.launch() {
-            snafu::whatever!("decode graph launch failed: {error}");
+            None => {
+                // First step at this bucket pair: the capture's WARMUP
+                // run performs this step's real work (and populates
+                // candle's param cache); the recording that follows
+                // only records - launching here would execute the step
+                // twice (and double the eviction scores).
+                let captured = self.capture_decode_graph(stage)?;
+                stage.graphs.insert(key, captured);
+            }
         }
         Ok(())
     }
 
     /// Capture the current bucket pair's decode sequence into an
     /// instantiated CUDA graph on candle's created stream (the legacy
-    /// default stream cannot capture). The recording performs no
-    /// work; the caller launches the instantiated graph to execute
-    /// the step. THREAD_LOCAL capture fails loudly on any
-    /// capture-illegal call from this thread. AUTO_FREE_ON_LAUNCH is
-    /// the correct relaunch semantic for any in-graph memory nodes
-    /// (and a no-op without them); it is also one of the two flags
-    /// cuGraphInstantiateWithFlags accepts (UPLOAD is WithParams-only
-    /// and measured CUDA_ERROR_INVALID_VALUE here), so the exec is
-    /// pre-uploaded explicitly instead.
+    /// default stream cannot capture). The pinned recipe (understood
+    /// 06): hold candle's param-cache guard, WARMUP-run the sequence
+    /// uncaptured (populates the content-keyed dims/strides cache - a
+    /// miss during active capture is a designed hard error - and
+    /// performs this step's real work), then record; the recording
+    /// performs no work and its intermediates drop as in-graph free
+    /// nodes. THREAD_LOCAL capture fails loudly on capture-illegal
+    /// calls from this thread. AUTO_FREE_ON_LAUNCH is the correct
+    /// relaunch semantic for the in-graph memory nodes and one of the
+    /// two flags cuGraphInstantiateWithFlags accepts (UPLOAD is
+    /// WithParams-only and measured CUDA_ERROR_INVALID_VALUE here), so
+    /// the exec is pre-uploaded explicitly instead.
     #[cfg(feature = "cuda")]
     fn capture_decode_graph(
         &mut self,
         stage: &graph::DecodeStage,
     ) -> AlmostResult<cudarc::driver::CudaGraph> {
-        let stream = match &self.device {
-            candle_core::Device::Cuda(cuda_device) => cuda_device.cuda_stream(),
+        let cuda_device = match &self.device {
+            candle_core::Device::Cuda(cuda_device) => cuda_device.clone(),
             _ => snafu::whatever!("graph capture requires a cuda device"),
         };
+        let stream = cuda_device.cuda_stream();
+        let _htod_cache = cuda_device.enable_cuda_graph_htod_cache();
+        // Warmup: the real step, param cache populated.
+        self.graph_forward_sequence(stage)?;
         if let Err(error) = stream.begin_capture(
             cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL,
         ) {
