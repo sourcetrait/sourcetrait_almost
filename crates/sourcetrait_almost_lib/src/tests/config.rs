@@ -68,6 +68,7 @@ fn settings_patch_overlays_only_present_fields() {
         use_flash_attn: true,
         profile_attn: false,
         eviction: None,
+        graph: false,
     };
     let patch: SettingsPatch = toml::from_str("use_flash_attn = false").unwrap();
     patch.apply(&mut settings);

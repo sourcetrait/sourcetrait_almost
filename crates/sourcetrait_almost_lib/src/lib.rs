@@ -5,6 +5,8 @@ pub mod consts;
 pub(crate) mod error;
 pub(crate) mod evict;
 pub(crate) mod generate;
+#[cfg(feature = "cuda")]
+pub(crate) mod graph;
 pub(crate) mod hub;
 pub(crate) mod load;
 pub(crate) mod model;
@@ -21,6 +23,8 @@ pub(crate) mod tests {
     pub(crate) mod chat;
     pub(crate) mod config;
     pub(crate) mod evict;
+    #[cfg(feature = "cuda")]
+    pub(crate) mod graph;
     pub(crate) mod model;
     pub(crate) mod needle;
     #[cfg(feature = "attn-profile")]

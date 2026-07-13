@@ -12,7 +12,7 @@ keywords = ["sourcetrait", "almost", "lib", "olmo"]
 
 [features]
 attn-profile = []
-cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "dep:cudarc"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "dep:cudarc", "dep:half"]
 flash-attn = ["cuda", "dep:candle-flash-attn"]
 
 [dependencies]
@@ -21,6 +21,7 @@ candle-flash-attn = { workspace = true, optional = true }
 candle-nn.workspace = true
 candle-transformers.workspace = true
 cudarc = { workspace = true, optional = true }
+half = { workspace = true, optional = true }
 hf-hub.workspace = true
 serde.workspace = true
 serde_json.workspace = true

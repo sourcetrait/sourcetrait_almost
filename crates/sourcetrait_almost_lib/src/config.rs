@@ -134,6 +134,7 @@ impl Settings {
             use_flash_attn: cfg!(feature = "flash-attn") && device_is_cuda && dtype_supports_flash,
             profile_attn: false,
             eviction: config.eviction.and_then(EvictionConfig::to_settings),
+            graph: false,
         }
     }
 }
@@ -145,6 +146,7 @@ impl Settings {
 pub(crate) struct SettingsPatch {
     pub(crate) use_flash_attn: Option<bool>,
     pub(crate) profile_attn: Option<bool>,
+    pub(crate) graph: Option<bool>,
 }
 
 impl SettingsPatch {
@@ -154,6 +156,9 @@ impl SettingsPatch {
         }
         if let Some(profile_attn) = self.profile_attn {
             settings.profile_attn = profile_attn;
+        }
+        if let Some(graph) = self.graph {
+            settings.graph = graph;
         }
     }
 }

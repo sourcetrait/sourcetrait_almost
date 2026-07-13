@@ -11,6 +11,10 @@ pub struct Settings {
     pub use_flash_attn: bool,
     pub profile_attn: bool,
     pub eviction: Option<EvictionSettings>,
+    /// E4 decode-graph capture (cuda builds; settings-profile-armed).
+    /// Inert until the graph-mode decode path lands - validated here so
+    /// profiles can carry it from day one.
+    pub graph: bool,
 }
 
 /// Why visibility is limited (or is not), so flash dispatch (D6) can pick
@@ -193,6 +197,20 @@ impl Model {
             snafu::ensure_whatever!(
                 settings.eviction.is_none(),
                 "attention profiling measures the exact configuration; eviction must be off"
+            );
+        }
+        if settings.graph {
+            snafu::ensure_whatever!(
+                cfg!(feature = "cuda"),
+                "this build carries no cuda support (decode graphs need --features cuda)"
+            );
+            snafu::ensure_whatever!(
+                vb.device().is_cuda(),
+                "decode graphs require a cuda device"
+            );
+            snafu::ensure_whatever!(
+                !settings.profile_attn,
+                "the observation pass reads the classic eager decode; graphs must be off"
             );
         }
         if let Some(eviction) = &settings.eviction {

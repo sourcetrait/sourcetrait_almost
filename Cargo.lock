@@ -5963,6 +5963,7 @@ dependencies = [
  "candle-nn",
  "candle-transformers",
  "cudarc 0.19.8",
+ "half",
  "hf-hub",
  "serde",
  "serde_json",
