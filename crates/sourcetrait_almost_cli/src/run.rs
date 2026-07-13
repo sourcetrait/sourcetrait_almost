@@ -10,6 +10,20 @@ pub fn run() {
     }
 }
 
+fn eviction_from_flags(
+    prefill_cap: Option<usize>,
+    decode_cap: Option<usize>,
+    recent_keep: usize,
+    sink_keep: usize,
+) -> Option<lib::EvictionSettings> {
+    prefill_cap.map(|prefill_cap| lib::EvictionSettings {
+        prefill_cap,
+        decode_cap,
+        sink_keep,
+        recent_keep,
+    })
+}
+
 fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
     match cli.command {
         Command::Pull { model_id, model_dir } => {
@@ -28,6 +42,10 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
             greedy,
             flash,
             speculate,
+            evict_prefill_cap,
+            evict_decode_cap,
+            evict_recent,
+            evict_sink,
             temperature,
             top_p,
             sample_len,
@@ -50,6 +68,12 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
             let settings = lib::Settings {
                 use_flash_attn: flash,
                 profile_attn: false,
+                eviction: eviction_from_flags(
+                    evict_prefill_cap,
+                    evict_decode_cap,
+                    evict_recent,
+                    evict_sink,
+                ),
             };
             let loaded = lib::load_model(&paths, &device, dtype, settings)?;
             eprintln!("almost: weights loaded in {:.1}s", loaded.load_seconds);
@@ -117,6 +141,10 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
             needle,
             needle_out,
             profile_out,
+            evict_prefill_cap,
+            evict_decode_cap,
+            evict_recent,
+            evict_sink,
             seed,
             cpu,
             dtype,
@@ -133,6 +161,12 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
                     seed,
                     out: needle_out,
                     profile_out,
+                    eviction: eviction_from_flags(
+                        evict_prefill_cap,
+                        evict_decode_cap,
+                        evict_recent,
+                        evict_sink,
+                    ),
                 };
                 return lib::needle(&paths, &device, dtype, &opts);
             }

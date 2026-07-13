@@ -2,6 +2,7 @@ pub(crate) mod chat;
 pub(crate) mod config;
 pub mod consts;
 pub(crate) mod error;
+pub(crate) mod evict;
 pub(crate) mod generate;
 pub(crate) mod hub;
 pub(crate) mod load;
@@ -17,6 +18,7 @@ pub(crate) mod verify;
 #[cfg(test)]
 pub(crate) mod tests {
     pub(crate) mod chat;
+    pub(crate) mod evict;
     pub(crate) mod model;
     pub(crate) mod needle;
     #[cfg(feature = "attn-profile")]
@@ -88,6 +90,7 @@ pub use crate::{
         AlmostError,
         AlmostResult,
     },
+    evict::EvictionSettings,
     generate::{
         FinishReason,
         GenerateOptions,

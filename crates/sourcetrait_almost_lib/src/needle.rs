@@ -14,6 +14,8 @@ pub struct NeedleOptions {
     /// (attn-profile build, eager only: long lengths, single mode, fewer
     /// keys) and write the per-head attention-mass profile here as JSON.
     pub profile_out: Option<PathBuf>,
+    /// A3 eviction config the battery runs under; None = exact config.
+    pub eviction: Option<EvictionSettings>,
 }
 
 /// Context lengths (total prompt tokens) the battery targets.
@@ -242,6 +244,7 @@ pub fn needle(
     let settings = Settings {
         use_flash_attn: opts.use_flash_attn,
         profile_attn: profiling,
+        eviction: opts.eviction,
     };
     let mut model = Model::new(&config, settings, vb)?;
     eprintln!(

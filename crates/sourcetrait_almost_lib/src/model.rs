@@ -4,11 +4,13 @@ use crate::*;
 /// grow without signature churn. use_flash_attn is wired by D6 (slice 2)
 /// and inert in the eager core. profile_attn arms the A2 observation pass
 /// (an attn-profile build, eager only): full layers accumulate per-head
-/// attention-mass partitions for retrieval-head ranking.
+/// attention-mass partitions for retrieval-head ranking. eviction arms the
+/// A3 two-stage KV cap on full layers; None is the exact configuration.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Settings {
     pub use_flash_attn: bool,
     pub profile_attn: bool,
+    pub eviction: Option<EvictionSettings>,
 }
 
 /// Why visibility is limited (or is not), so flash dispatch (D6) can pick
@@ -188,6 +190,22 @@ impl Model {
                 !settings.use_flash_attn,
                 "attention profiling reads the eager softmax weights; flash must be off"
             );
+            snafu::ensure_whatever!(
+                settings.eviction.is_none(),
+                "attention profiling measures the exact configuration; eviction must be off"
+            );
+        }
+        if let Some(eviction) = &settings.eviction {
+            eviction.validate()?;
+            // The in-window sliding prefill reuses the full-layer causal
+            // mask; that reuse is sound only while eviction cannot have
+            // fired inside the window span.
+            snafu::ensure_whatever!(
+                eviction.prefill_cap >= cfg.sliding_window,
+                "eviction prefill cap {} must be >= the sliding window {}",
+                eviction.prefill_cap,
+                cfg.sliding_window
+            );
         }
         let vb_m = vb.pp("model");
         let embed_tokens = candle_nn::embedding(cfg.vocab_size, cfg.hidden_size, vb_m.pp("embed_tokens"))?;
@@ -309,10 +327,18 @@ impl Model {
         self.settings.use_flash_attn
     }
 
+    pub(crate) fn settings(&self) -> Settings {
+        self.settings
+    }
+
     /// Checkpoint the caches before a speculative verification forward
     /// of `span` tokens at `offset` (E5a). Cost: span ring slots per
     /// sliding layer.
     pub(crate) fn cache_mark(&self, offset: usize, span: usize) -> AlmostResult<CacheMark> {
+        snafu::ensure_whatever!(
+            self.settings.eviction.is_none(),
+            "speculation rollback under eviction is not supported yet (run eviction-off)"
+        );
         snafu::ensure_whatever!(
             span >= 2,
             "a verification span of {span} would not take the prefill path the rollback undoes"
@@ -327,6 +353,10 @@ impl Model {
     /// E2: persist the current cache state (the standing prefix) as one
     /// safetensors file. Returns the snapshotted context length.
     pub(crate) fn snapshot_caches(&self, path: &Path) -> AlmostResult<usize> {
+        snafu::ensure_whatever!(
+            self.settings.eviction.is_none(),
+            "snapshots under eviction are not supported yet (scores are not persisted)"
+        );
         let mut context_len: Option<usize> = None;
         let mut tensors: HashMap<String, candle_core::Tensor> = HashMap::new();
         for (layer_idx, layer) in self.layers.iter().enumerate() {
@@ -362,6 +392,10 @@ impl Model {
     /// E2: load a snapshot back into the caches, replacing their state.
     /// Returns the restored context length (the offset to continue at).
     pub(crate) fn restore_caches(&mut self, path: &Path) -> AlmostResult<usize> {
+        snafu::ensure_whatever!(
+            self.settings.eviction.is_none(),
+            "snapshots under eviction are not supported yet (scores are not persisted)"
+        );
         let tensors = candle_core::safetensors::load(path, &self.device)?;
         let Some(meta) = tensors.get("meta") else {
             snafu::whatever!("snapshot carries no meta tensor");
@@ -387,6 +421,26 @@ impl Model {
             layer.self_attn.import_cache(key, value)?;
         }
         Ok(context_len)
+    }
+
+    /// A3 stage 2: compact full-layer stores to the decode cap - the
+    /// question-informed cut, run once after prefill. No-op without
+    /// eviction, without a decode cap, or when already within it.
+    pub(crate) fn compact_full_caches(&mut self) -> AlmostResult<()> {
+        let Some(eviction) = self.settings.eviction else {
+            return Ok(());
+        };
+        let Some(decode_cap) = eviction.decode_cap else {
+            return Ok(());
+        };
+        for layer in self.layers.iter_mut() {
+            if layer.self_attn.eviction.is_some() {
+                layer
+                    .self_attn
+                    .evict_to(decode_cap, eviction, evict::EvictRanking::LastPass)?;
+            }
+        }
+        Ok(())
     }
 
     /// Drain the observation accumulators (attn-profile builds, armed
@@ -448,7 +502,26 @@ impl Model {
             // against a windowed single reference.
             return Ok((AttnMask::Causal(None), AttnMask::Window(None)));
         }
-        let causal = self.mask_tensor(b_size, offset, seq_len, 0, None)?;
+        let causal = if self.settings.eviction.is_some() {
+            // Evicted full-layer stores: the store columns are all past
+            // (always visible), the trailing chunk block is causal. While
+            // the store is un-evicted this equals the plain causal mask,
+            // so the in-window sliding reuse below stays sound (the
+            // prefill cap is >= the window by validation, so eviction
+            // cannot have fired inside the window span).
+            let store_len = self
+                .layers
+                .iter()
+                .find(|layer| layer.layer_type == LayerType::Full)
+                .map(|layer| layer.self_attn.cached_len())
+                .unwrap_or(0);
+            let total = store_len + seq_len;
+            let values = evict::evicted_mask_values(seq_len, store_len);
+            let mask = candle_core::Tensor::from_vec(values, (seq_len, total), &self.device)?;
+            mask.expand((b_size, 1, seq_len, total))?.to_dtype(self.dtype)?
+        } else {
+            self.mask_tensor(b_size, offset, seq_len, 0, None)?
+        };
         let sliding = if in_window {
             AttnMask::Causal(Some(causal.clone()))
         } else {
@@ -627,6 +700,17 @@ struct Attention {
     full_key_buffer: Option<candle_core::Tensor>,
     full_value_buffer: Option<candle_core::Tensor>,
     full_cache_len: usize,
+    /// A3 per-entry cumulative received-mass scores, parallel to the full
+    /// buffers ((b, h, capacity) f32); present iff eviction is armed on
+    /// this (full) layer.
+    full_scores: Option<candle_core::Tensor>,
+    /// A3 per-entry mass from the most recent scoring pass alone (the
+    /// SnapKV observation-window signal).
+    full_last_mass: Option<candle_core::Tensor>,
+    /// A3 per-entry observation-pass counts (f32 for uniform arithmetic).
+    full_counts: Option<candle_core::Tensor>,
+    /// A3 eviction config; armed on full layers only.
+    eviction: Option<EvictionSettings>,
     num_heads: usize,
     head_dim: usize,
     hidden_size: usize,
@@ -670,6 +754,14 @@ impl Attention {
             full_key_buffer: None,
             full_value_buffer: None,
             full_cache_len: 0,
+            full_scores: None,
+            full_last_mass: None,
+            full_counts: None,
+            eviction: if sliding_window.is_none() {
+                settings.eviction
+            } else {
+                None
+            },
             num_heads,
             head_dim,
             hidden_size: cfg.hidden_size,
@@ -708,6 +800,28 @@ impl Attention {
         }
         self.full_key_buffer = Some(new_key);
         self.full_value_buffer = Some(new_value);
+        if self.eviction.is_some() {
+            fn grow_aux(
+                old: &Option<candle_core::Tensor>,
+                len: usize,
+                shape: (usize, usize, usize),
+                device: &candle_core::Device,
+            ) -> AlmostResult<candle_core::Tensor> {
+                let fresh =
+                    candle_core::Tensor::zeros(shape, candle_core::DType::F32, device)?;
+                if len > 0
+                    && let Some(old) = old
+                {
+                    fresh.slice_set(&old.narrow(2, 0, len)?.contiguous()?, 2, 0)?;
+                }
+                Ok(fresh)
+            }
+            let len = self.full_cache_len;
+            let shape = (b_size, self.num_heads, capacity);
+            self.full_scores = Some(grow_aux(&self.full_scores, len, shape, device)?);
+            self.full_last_mass = Some(grow_aux(&self.full_last_mass, len, shape, device)?);
+            self.full_counts = Some(grow_aux(&self.full_counts, len, shape, device)?);
+        }
         Ok(())
     }
 
@@ -722,6 +836,13 @@ impl Attention {
         if self.sliding_window.is_some() {
             return Ok(());
         }
+        // Under eviction the store never exceeds the prefill cap plus one
+        // flash chunk of appended headroom; reserving the full prompt
+        // would defeat the peak bound.
+        let total_len = match &self.eviction {
+            Some(eviction) => total_len.min(eviction.prefill_cap + consts::PREFILL_CHUNK_FLASH),
+            None => total_len,
+        };
         let capacity = total_len.div_ceil(FULL_CACHE_RESERVE_GRAIN) * FULL_CACHE_RESERVE_GRAIN;
         self.full_grow(1, capacity, dtype, device)
     }
@@ -754,6 +875,20 @@ impl Attention {
         };
         key_buffer.slice_set(&key_states, 2, self.full_cache_len)?;
         value_buffer.slice_set(&value_states, 2, self.full_cache_len)?;
+        if let Some(scores) = &self.full_scores {
+            // Fresh entries start unscored and unobserved; their slot
+            // range may hold stale values from a prior compaction.
+            let zeros = candle_core::Tensor::zeros(
+                (b_size, self.num_heads, seq_len),
+                candle_core::DType::F32,
+                key_states.device(),
+            )?;
+            scores.slice_set(&zeros, 2, self.full_cache_len)?;
+            if let (Some(last_mass), Some(counts)) = (&self.full_last_mass, &self.full_counts) {
+                last_mass.slice_set(&zeros, 2, self.full_cache_len)?;
+                counts.slice_set(&zeros, 2, self.full_cache_len)?;
+            }
+        }
         self.full_cache_len = needed;
         Ok((
             key_buffer.narrow(2, 0, needed)?,
@@ -803,6 +938,9 @@ impl Attention {
         };
 
         let scale = 1f64 / f64::sqrt(self.head_dim as f64);
+        // A3 scoring taps the eager weights when they exist; the flash
+        // path re-scores from the chunk tail inside evict_update.
+        let mut eager_score_weights: Option<candle_core::Tensor> = None;
         // D5 drives dispatch: Causal prefill blocks go flash, Window
         // bands go windowed flash; decode (q_len 1) stays eager -
         // candle-flash-attn 0.11 has no split-kv decode kernel, so a lone
@@ -837,6 +975,9 @@ impl Attention {
             if let Some(profile) = &mut self.profile {
                 profile.observe(&weights_f32, seqlen_offset)?;
             }
+            if self.eviction.is_some() {
+                eager_score_weights = Some(weights_f32.clone());
+            }
             let attn_weights = if dtype == candle_core::DType::F32 {
                 weights_f32
             } else {
@@ -844,6 +985,9 @@ impl Attention {
             };
             attn_weights.matmul(&value_states)?
         };
+        if let Some(eviction) = self.eviction {
+            self.evict_update(&query_states, eager_score_weights.as_ref(), q_len, scale, eviction)?;
+        }
         Ok(attn_output
             .transpose(1, 2)?
             .reshape((b_size, q_len, self.hidden_size))?
@@ -971,6 +1115,168 @@ impl Attention {
         self.ring_head = 0;
         self.ring_len = keep;
         Ok((key_states, value_states))
+    }
+
+    /// A3 score update + overflow eviction for one forward on an
+    /// eviction-armed (full) layer. Eager forwards score every key's
+    /// received mass from the materialized weights; flash prefill chunks
+    /// re-score via the chunk's last SCORE_TAIL post-rope queries against
+    /// the whole store (SnapKV's observation window, applied per chunk).
+    /// Prefill overflow evicts to the prefill cap each chunk; decode
+    /// overflow evicts to the decode-phase cap with slack (amortized).
+    fn evict_update(
+        &mut self,
+        query_states: &candle_core::Tensor,
+        eager_weights: Option<&candle_core::Tensor>,
+        q_len: usize,
+        scale: f64,
+        eviction: EvictionSettings,
+    ) -> AlmostResult<()> {
+        let len = self.full_cache_len;
+        let (Some(scores), Some(key_buffer)) = (&self.full_scores, &self.full_key_buffer) else {
+            snafu::whatever!("eviction armed but score/key buffers are absent");
+        };
+        let mass = match eager_weights {
+            Some(weights) => weights.sum(2)?,
+            None => {
+                // Sliced over the query tail: each row's softmax is
+                // row-independent, so slicing changes only the transient
+                // footprint (the full (tail, len) f32 chain beside full
+                // prefill KV was measured to breach the peak contract).
+                let tail = evict::SCORE_TAIL.min(q_len);
+                let k_store = key_buffer.narrow(2, 0, len)?;
+                let k_transposed = k_store.transpose(2, 3)?;
+                let mut total: Option<candle_core::Tensor> = None;
+                let mut done = 0usize;
+                while done < tail {
+                    let slice = evict::SCORE_TAIL_SLICE.min(tail - done);
+                    let q_slice = query_states
+                        .narrow(2, q_len - tail + done, slice)?
+                        .contiguous()?;
+                    let logits = (q_slice.matmul(&k_transposed)? * scale)?;
+                    let slice_mass = candle_nn::ops::softmax_last_dim(
+                        &logits.to_dtype(candle_core::DType::F32)?,
+                    )?
+                    .sum(2)?;
+                    total = Some(match total {
+                        Some(accumulated) => (accumulated + slice_mass)?,
+                        None => slice_mass,
+                    });
+                    done += slice;
+                }
+                let Some(total) = total else {
+                    snafu::whatever!("score tail produced no mass (q_len {q_len})");
+                };
+                total
+            }
+        };
+        let updated = (scores.narrow(2, 0, len)? + &mass)?;
+        scores.slice_set(&updated, 2, 0)?;
+        let (Some(last_mass), Some(counts)) = (&self.full_last_mass, &self.full_counts) else {
+            snafu::whatever!("eviction armed but auxiliary score buffers are absent");
+        };
+        last_mass.slice_set(&mass.contiguous()?, 2, 0)?;
+        let bumped = (counts.narrow(2, 0, len)? + 1.0)?;
+        counts.slice_set(&bumped, 2, 0)?;
+
+        // Both overflow paths rank on the stable, age-fair signal; the
+        // question-informed LastPass ranking belongs to the one-shot
+        // stage-2 compaction (a single decode row is too noisy to rank
+        // by).
+        let (cap, slack) = if q_len > 1 {
+            (eviction.prefill_cap, 0)
+        } else {
+            (eviction.decode_phase_cap(), evict::DECODE_EVICT_SLACK)
+        };
+        let ranking = evict::EvictRanking::NormalizedCumulative;
+        if len > cap + slack {
+            self.evict_to(cap, eviction, ranking)?;
+        }
+        Ok(())
+    }
+
+    /// Compact the store to `cap` entries per head, preserving store
+    /// order: the sink prefix and recent suffix are protected, the middle
+    /// keeps its top entries under `ranking` (evict::keep_set per head).
+    fn evict_to(
+        &mut self,
+        cap: usize,
+        eviction: EvictionSettings,
+        ranking: evict::EvictRanking,
+    ) -> AlmostResult<()> {
+        let len = self.full_cache_len;
+        if len <= cap {
+            return Ok(());
+        }
+        let (Some(key_buffer), Some(value_buffer), Some(scores), Some(last_mass), Some(counts)) = (
+            &self.full_key_buffer,
+            &self.full_value_buffer,
+            &self.full_scores,
+            &self.full_last_mass,
+            &self.full_counts,
+        ) else {
+            snafu::whatever!("eviction armed but buffers are absent");
+        };
+        let (b_size, heads, _capacity, _d) = key_buffer.dims4()?;
+        snafu::ensure_whatever!(
+            b_size == 1,
+            "eviction supports batch-1 stores only (got batch {b_size})"
+        );
+        let host_rank: Vec<Vec<f32>> = match ranking {
+            evict::EvictRanking::LastPass => {
+                last_mass.narrow(2, 0, len)?.squeeze(0)?.to_vec2::<f32>()?
+            }
+            evict::EvictRanking::NormalizedCumulative => {
+                let cumulative = scores.narrow(2, 0, len)?.squeeze(0)?.to_vec2::<f32>()?;
+                let observed = counts.narrow(2, 0, len)?.squeeze(0)?.to_vec2::<f32>()?;
+                cumulative
+                    .iter()
+                    .zip(observed.iter())
+                    .map(|(mass_row, count_row)| {
+                        mass_row
+                            .iter()
+                            .zip(count_row.iter())
+                            .map(|(mass, count)| mass / count.max(1.0))
+                            .collect()
+                    })
+                    .collect()
+            }
+        };
+        let device = key_buffer.device().clone();
+        let mut kept_keys: Vec<candle_core::Tensor> = Vec::with_capacity(heads);
+        let mut kept_values: Vec<candle_core::Tensor> = Vec::with_capacity(heads);
+        let mut kept_scores: Vec<candle_core::Tensor> = Vec::with_capacity(heads);
+        let mut kept_last: Vec<candle_core::Tensor> = Vec::with_capacity(heads);
+        let mut kept_counts: Vec<candle_core::Tensor> = Vec::with_capacity(heads);
+        fn select(
+            tensor: &candle_core::Tensor,
+            head: usize,
+            len: usize,
+            index: &candle_core::Tensor,
+        ) -> AlmostResult<candle_core::Tensor> {
+            Ok(tensor
+                .narrow(1, head, 1)?
+                .narrow(2, 0, len)?
+                .index_select(index, 2)?)
+        }
+        for (head, head_rank) in host_rank.iter().enumerate() {
+            let keep = evict::keep_set(head_rank, cap, eviction.sink_keep, eviction.recent_keep);
+            let index = candle_core::Tensor::from_vec(keep, (cap,), &device)?;
+            kept_keys.push(select(key_buffer, head, len, &index)?);
+            kept_values.push(select(value_buffer, head, len, &index)?);
+            kept_scores.push(select(scores, head, len, &index)?);
+            kept_last.push(select(last_mass, head, len, &index)?);
+            kept_counts.push(select(counts, head, len, &index)?);
+        }
+        // cat on dim 1 yields a transposed view; slice_set needs packed
+        // sources.
+        key_buffer.slice_set(&candle_core::Tensor::cat(&kept_keys, 1)?.contiguous()?, 2, 0)?;
+        value_buffer.slice_set(&candle_core::Tensor::cat(&kept_values, 1)?.contiguous()?, 2, 0)?;
+        scores.slice_set(&candle_core::Tensor::cat(&kept_scores, 1)?.contiguous()?, 2, 0)?;
+        last_mass.slice_set(&candle_core::Tensor::cat(&kept_last, 1)?.contiguous()?, 2, 0)?;
+        counts.slice_set(&candle_core::Tensor::cat(&kept_counts, 1)?.contiguous()?, 2, 0)?;
+        self.full_cache_len = cap;
+        Ok(())
     }
 
     /// Checkpoint before a speculative verification forward: lengths,

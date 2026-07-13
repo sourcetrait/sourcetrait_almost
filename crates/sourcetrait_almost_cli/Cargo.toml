@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_almost_cli"
-version = "0.0.0-8"
+version = "0.0.0-9"
 edition = "2024"
 description = "almost: the command-line interface over sourcetrait_almost_lib"
 authors = ["SourceTrait <development@sourcetrait.com>"]

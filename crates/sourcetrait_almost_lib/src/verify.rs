@@ -78,6 +78,7 @@ pub fn verify(
     let settings = Settings {
         use_flash_attn: opts.use_flash_attn,
         profile_attn: false,
+        eviction: None,
     };
     let mut model = Model::new(&config, settings, vb)?;
     eprintln!("almost verify: weights loaded in {:.1}s", load_start.elapsed().as_secs_f32());

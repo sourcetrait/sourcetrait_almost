@@ -36,6 +36,19 @@ pub(crate) enum Command {
         /// plain greedy; big wins on copy-heavy output
         #[arg(long)]
         speculate: bool,
+        /// A3: arm two-stage KV eviction on full layers with this running
+        /// prefill cap (entries per head); eviction is off when absent
+        #[arg(long)]
+        evict_prefill_cap: Option<usize>,
+        /// A3: post-prefill compaction target (entries per head)
+        #[arg(long, requires = "evict_prefill_cap")]
+        evict_decode_cap: Option<usize>,
+        /// A3: protected recent suffix (entries per head)
+        #[arg(long, default_value_t = 512)]
+        evict_recent: usize,
+        /// A3: protected sink prefix (entries per head)
+        #[arg(long, default_value_t = 4)]
+        evict_sink: usize,
         #[arg(long, default_value_t = lib::consts::DEFAULT_TEMPERATURE)]
         temperature: f64,
         #[arg(long, default_value_t = lib::consts::DEFAULT_TOP_P)]
@@ -87,6 +100,19 @@ pub(crate) enum Command {
         /// write the per-head attention-mass profile here as JSON
         #[arg(long)]
         profile_out: Option<PathBuf>,
+        /// With --needle: run the battery under A3 eviction with this
+        /// running prefill cap (entries per head)
+        #[arg(long, requires = "needle")]
+        evict_prefill_cap: Option<usize>,
+        /// A3: post-prefill compaction target (entries per head)
+        #[arg(long, requires = "evict_prefill_cap")]
+        evict_decode_cap: Option<usize>,
+        /// A3: protected recent suffix (entries per head)
+        #[arg(long, default_value_t = 512)]
+        evict_recent: usize,
+        /// A3: protected sink prefix (entries per head)
+        #[arg(long, default_value_t = 4)]
+        evict_sink: usize,
         /// Seeds the needle case generator (decoding stays greedy)
         #[arg(long, default_value_t = 299792458)]
         seed: u64,

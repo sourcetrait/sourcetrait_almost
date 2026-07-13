@@ -109,6 +109,10 @@ impl Model {
                 !dumping,
                 "speculation and --dump-logits do not combine; parity dumps run non-speculative"
             );
+            snafu::ensure_whatever!(
+                self.settings().eviction.is_none(),
+                "speculation under eviction is not supported yet (run eviction-off)"
+            );
         }
         let mut index = LookupIndex::new();
         if options.speculate {
@@ -160,6 +164,9 @@ impl Model {
             Some(logits) => logits.squeeze(0)?.to_dtype(candle_core::DType::F32)?,
             None => snafu::whatever!("prefill produced no logits"),
         };
+        // A3 stage 2: the question-informed compaction to the decode cap,
+        // now that scoring has seen the final chunk.
+        self.compact_full_caches()?;
         let prefill_seconds = prefill_start.elapsed().as_secs_f64();
         let first = processor.sample(&logits)?;
 
