@@ -11,7 +11,7 @@ categories = []
 keywords = ["sourcetrait", "almost", "lib", "olmo"]
 
 [features]
-cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "dep:cudarc"]
 flash-attn = ["cuda", "dep:candle-flash-attn"]
 
 [dependencies]
@@ -19,6 +19,7 @@ candle-core.workspace = true
 candle-flash-attn = { workspace = true, optional = true }
 candle-nn.workspace = true
 candle-transformers.workspace = true
+cudarc = { workspace = true, optional = true }
 hf-hub.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -11,6 +11,7 @@ members = [
 burn = { version = "0.21", default-features = false, features = ["std", "ndarray"] }
 candle-core = { version = "0.11" }
 candle-flash-attn = { version = "0.11" }
+cudarc = { version = "0.19", features = ["cuda-version-from-build-system"] }
 candle-nn = { version = "0.11" }
 candle-transformers = { version = "0.11" }
 clap = { version = "4", features = ["derive"] }

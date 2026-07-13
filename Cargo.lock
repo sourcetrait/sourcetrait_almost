@@ -5962,6 +5962,7 @@ dependencies = [
  "candle-flash-attn",
  "candle-nn",
  "candle-transformers",
+ "cudarc 0.19.8",
  "hf-hub",
  "serde",
  "serde_json",
