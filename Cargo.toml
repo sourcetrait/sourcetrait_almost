@@ -24,3 +24,4 @@ snafu = { version = "0.9" }
 sourcetrait_almost_compat = { path = "crates/sourcetrait_almost_compat" }
 sourcetrait_almost_lib = { path = "crates/sourcetrait_almost_lib" }
 tokenizers = { version = "0.23" }
+toml = { version = "0.9" }

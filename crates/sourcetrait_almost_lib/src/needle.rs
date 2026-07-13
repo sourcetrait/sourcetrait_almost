@@ -3,9 +3,10 @@ use crate::*;
 /// Knobs for the needle/passkey retrieval battery (A2 phase 1).
 #[derive(Debug, Clone)]
 pub struct NeedleOptions {
-    /// Run generation through the flash path (same eligibility rules as
-    /// generate; the cpu path is impractically slow at these lengths).
-    pub use_flash_attn: bool,
+    /// Runtime settings the battery runs under (flash, eviction). The
+    /// observation pass arms profile_attn itself; a settings-file
+    /// profile_attn is ignored here.
+    pub settings: Settings,
     /// Seeds the case generator only; decoding is greedy.
     pub seed: u64,
     /// When set, per-cell results are also written here as JSON.
@@ -14,8 +15,6 @@ pub struct NeedleOptions {
     /// (attn-profile build, eager only: long lengths, single mode, fewer
     /// keys) and write the per-head attention-mass profile here as JSON.
     pub profile_out: Option<PathBuf>,
-    /// A3 eviction config the battery runs under; None = exact config.
-    pub eviction: Option<EvictionSettings>,
 }
 
 /// Context lengths (total prompt tokens) the battery targets.
@@ -230,8 +229,8 @@ pub fn needle(
     let profiling = opts.profile_out.is_some();
     if profiling {
         snafu::ensure_whatever!(
-            !opts.use_flash_attn,
-            "the observation pass reads eager attention weights; drop --flash for --profile-out"
+            !opts.settings.use_flash_attn,
+            "the observation pass reads eager attention weights; use an eager settings profile for --profile-out"
         );
     }
     let config: Olmo3Config = serde_json::from_reader(std::fs::File::open(&paths.config)?)?;
@@ -242,9 +241,8 @@ pub fn needle(
     let load_start = Instant::now();
     let vb = unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&paths.shards, dtype, device)? };
     let settings = Settings {
-        use_flash_attn: opts.use_flash_attn,
         profile_attn: profiling,
-        eviction: opts.eviction,
+        ..opts.settings
     };
     let mut model = Model::new(&config, settings, vb)?;
     eprintln!(

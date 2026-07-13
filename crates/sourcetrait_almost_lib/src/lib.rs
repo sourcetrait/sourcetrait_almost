@@ -1,4 +1,5 @@
 pub(crate) mod chat;
+pub(crate) mod checkpoint;
 pub(crate) mod config;
 pub mod consts;
 pub(crate) mod error;
@@ -18,6 +19,7 @@ pub(crate) mod verify;
 #[cfg(test)]
 pub(crate) mod tests {
     pub(crate) mod chat;
+    pub(crate) mod config;
     pub(crate) mod evict;
     pub(crate) mod model;
     pub(crate) mod needle;
@@ -81,10 +83,21 @@ pub use crate::{
         chat_wrap,
         resolve_stop_ids,
     },
-    config::{
+    checkpoint::{
         LayerType,
         Olmo3Config,
         RopeScaling,
+    },
+    config::{
+        load_config,
+        load_settings,
+        resolve_device,
+        resolve_dtype,
+        Config,
+        DeviceConfig,
+        DtypeConfig,
+        EvictionConfig,
+        GenerationConfig,
     },
     error::{
         AlmostError,

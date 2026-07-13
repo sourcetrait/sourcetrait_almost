@@ -11,9 +11,11 @@ pub struct VerifyOptions {
     pub cross_device: bool,
     /// How many trailing positions the incremental-decode check covers.
     pub decode_steps: usize,
-    /// Run the battery through the flash path (T5); the cross-device
-    /// cpu reference model always stays eager.
-    pub use_flash_attn: bool,
+    /// Runtime settings under test. The equivalence battery is the
+    /// exact-config parity instrument: eviction/profiling settings are
+    /// rejected. The cross-device cpu reference model stays default
+    /// (eager) regardless.
+    pub settings: Settings,
 }
 
 struct Comparison {
@@ -73,14 +75,13 @@ pub fn verify(
         if opts.long { "long (window exceeded)" } else { "quick" }
     );
 
+    snafu::ensure_whatever!(
+        opts.settings.eviction.is_none() && !opts.settings.profile_attn,
+        "the equivalence battery is the exact-config parity instrument; run --needle for eviction or profiling settings"
+    );
     let load_start = Instant::now();
     let vb = unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&paths.shards, dtype, device)? };
-    let settings = Settings {
-        use_flash_attn: opts.use_flash_attn,
-        profile_attn: false,
-        eviction: None,
-    };
-    let mut model = Model::new(&config, settings, vb)?;
+    let mut model = Model::new(&config, opts.settings, vb)?;
     eprintln!("almost verify: weights loaded in {:.1}s", load_start.elapsed().as_secs_f32());
 
     let mut results: Vec<Comparison> = Vec::new();

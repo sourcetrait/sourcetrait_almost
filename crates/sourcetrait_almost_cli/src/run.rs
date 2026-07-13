@@ -10,25 +10,31 @@ pub fn run() {
     }
 }
 
-fn eviction_from_flags(
-    prefill_cap: Option<usize>,
-    decode_cap: Option<usize>,
-    recent_keep: usize,
-    sink_keep: usize,
-) -> Option<lib::EvictionSettings> {
-    prefill_cap.map(|prefill_cap| lib::EvictionSettings {
-        prefill_cap,
-        decode_cap,
-        sink_keep,
-        recent_keep,
-    })
+/// Resolve the -c/-s pair into (config, settings) plus the checkpoint
+/// paths the run needs.
+fn resolve_run(
+    config_arg: Option<&str>,
+    settings_arg: Option<&str>,
+) -> lib::AlmostResult<(lib::Config, lib::Settings, lib::ModelPaths)> {
+    let (config, profile) = lib::load_config(config_arg)?;
+    let settings = lib::load_settings(settings_arg, profile.as_deref(), &config)?;
+    let dir = config
+        .model_dir
+        .clone()
+        .unwrap_or_else(|| lib::default_model_dir(&config.model_id));
+    let paths = lib::ensure_model(&config.model_id, &dir)?;
+    Ok((config, settings, paths))
 }
 
 fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
     match cli.command {
-        Command::Pull { model_id, model_dir } => {
-            let dir = model_dir.unwrap_or_else(|| lib::default_model_dir(&model_id));
-            let paths = lib::ensure_model(&model_id, &dir)?;
+        Command::Pull { config } => {
+            let (config, _profile) = lib::load_config(config.as_deref())?;
+            let dir = config
+                .model_dir
+                .clone()
+                .unwrap_or_else(|| lib::default_model_dir(&config.model_id));
+            let paths = lib::ensure_model(&config.model_id, &dir)?;
             eprintln!(
                 "almost: model ready at {} ({} shards)",
                 dir.display(),
@@ -39,54 +45,30 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
         Command::Prompt {
             prompt,
             raw,
-            greedy,
-            flash,
-            speculate,
-            evict_prefill_cap,
-            evict_decode_cap,
-            evict_recent,
-            evict_sink,
-            temperature,
-            top_p,
-            sample_len,
-            cpu,
-            dtype,
-            seed,
+            config,
+            settings,
             dump_logits,
-            model_id,
-            model_dir,
         } => {
-            let dir = model_dir.unwrap_or_else(|| lib::default_model_dir(&model_id));
-            let paths = lib::ensure_model(&model_id, &dir)?;
-            let device = lib::pick_device(cpu)?;
-            let dtype = lib::pick_dtype(dtype.as_deref(), &device)?;
+            let (config, settings, paths) = resolve_run(config.as_deref(), settings.as_deref())?;
+            let device = lib::resolve_device(&config)?;
+            let dtype = lib::resolve_dtype(&config, &device);
             eprintln!(
                 "almost: device {device:?}, dtype {dtype:?}{}",
-                if flash { ", flash" } else { "" }
+                if settings.use_flash_attn { ", flash" } else { "" }
             );
 
-            let settings = lib::Settings {
-                use_flash_attn: flash,
-                profile_attn: false,
-                eviction: eviction_from_flags(
-                    evict_prefill_cap,
-                    evict_decode_cap,
-                    evict_recent,
-                    evict_sink,
-                ),
-            };
             let loaded = lib::load_model(&paths, &device, dtype, settings)?;
             eprintln!("almost: weights loaded in {:.1}s", loaded.load_seconds);
             let mut model = loaded.model;
 
             let text = if raw { prompt } else { lib::chat_wrap(&prompt) };
             let options = lib::GenerateOptions {
-                greedy,
-                temperature,
-                top_p,
-                sample_len,
-                seed,
-                speculate,
+                greedy: config.generation.greedy,
+                temperature: config.generation.temperature,
+                top_p: config.generation.top_p,
+                sample_len: config.generation.sample_len,
+                seed: config.generation.seed,
+                speculate: config.generation.speculate,
                 dump_logits,
             };
             let mut generation = model.generate(&loaded.tokenizer, &text, &options)?;
@@ -134,39 +116,25 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
             Ok(())
         }
         Command::Verify {
+            config,
+            settings,
             long,
-            flash,
             cross_device,
             decode_steps,
             needle,
             needle_out,
             profile_out,
-            evict_prefill_cap,
-            evict_decode_cap,
-            evict_recent,
-            evict_sink,
             seed,
-            cpu,
-            dtype,
-            model_id,
-            model_dir,
         } => {
-            let dir = model_dir.unwrap_or_else(|| lib::default_model_dir(&model_id));
-            let paths = lib::ensure_model(&model_id, &dir)?;
-            let device = lib::pick_device(cpu)?;
-            let dtype = lib::pick_dtype(dtype.as_deref(), &device)?;
+            let (config, settings, paths) = resolve_run(config.as_deref(), settings.as_deref())?;
+            let device = lib::resolve_device(&config)?;
+            let dtype = lib::resolve_dtype(&config, &device);
             if needle {
                 let opts = lib::NeedleOptions {
-                    use_flash_attn: flash,
+                    settings,
                     seed,
                     out: needle_out,
                     profile_out,
-                    eviction: eviction_from_flags(
-                        evict_prefill_cap,
-                        evict_decode_cap,
-                        evict_recent,
-                        evict_sink,
-                    ),
                 };
                 return lib::needle(&paths, &device, dtype, &opts);
             }
@@ -174,7 +142,7 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
                 long,
                 cross_device,
                 decode_steps,
-                use_flash_attn: flash,
+                settings,
             };
             lib::verify(&paths, &device, dtype, &opts)
         }

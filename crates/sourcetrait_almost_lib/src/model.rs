@@ -840,7 +840,9 @@ impl Attention {
         // flash chunk of appended headroom; reserving the full prompt
         // would defeat the peak bound.
         let total_len = match &self.eviction {
-            Some(eviction) => total_len.min(eviction.prefill_cap + consts::PREFILL_CHUNK_FLASH),
+            Some(eviction) => {
+                total_len.min(eviction.prefill_cap.saturating_add(consts::PREFILL_CHUNK_FLASH))
+            }
             None => total_len,
         };
         let capacity = total_len.div_ceil(FULL_CACHE_RESERVE_GRAIN) * FULL_CACHE_RESERVE_GRAIN;
@@ -1189,7 +1191,7 @@ impl Attention {
             (eviction.decode_phase_cap(), evict::DECODE_EVICT_SLACK)
         };
         let ranking = evict::EvictRanking::NormalizedCumulative;
-        if len > cap + slack {
+        if len > cap.saturating_add(slack) {
             self.evict_to(cap, eviction, ranking)?;
         }
         Ok(())
