@@ -82,6 +82,11 @@ pub(crate) enum Command {
         /// Write the needle battery's per-cell results here as JSON
         #[arg(long)]
         needle_out: Option<PathBuf>,
+        /// With --needle: run the A2 observation pass (attn-profile
+        /// build, eager - no --flash; long lengths, single mode) and
+        /// write the per-head attention-mass profile here as JSON
+        #[arg(long)]
+        profile_out: Option<PathBuf>,
         /// Seeds the needle case generator (decoding stays greedy)
         #[arg(long, default_value_t = 299792458)]
         seed: u64,

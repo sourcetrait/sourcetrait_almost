@@ -2,10 +2,13 @@ use crate::*;
 
 /// Runtime knobs the model is constructed with; a container so the API can
 /// grow without signature churn. use_flash_attn is wired by D6 (slice 2)
-/// and inert in the eager core.
+/// and inert in the eager core. profile_attn arms the A2 observation pass
+/// (an attn-profile build, eager only): full layers accumulate per-head
+/// attention-mass partitions for retrieval-head ranking.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Settings {
     pub use_flash_attn: bool,
+    pub profile_attn: bool,
 }
 
 /// Why visibility is limited (or is not), so flash dispatch (D6) can pick
@@ -92,10 +95,15 @@ fn ring_linear_span(
         Ok(ring.narrow(2, start, count)?)
     } else {
         let first = window - start;
+        // cat on a non-zero dim returns a transposed VIEW (candle routes
+        // through dim-0), whose batch strides the cuda matmul rejects -
+        // pack it here so every consumer (attention, marks, exports) is
+        // safe.
         Ok(candle_core::Tensor::cat(
             &[&ring.narrow(2, start, first)?, &ring.narrow(2, 0, count - first)?],
             2,
-        )?)
+        )?
+        .contiguous()?)
     }
 }
 
@@ -171,6 +179,16 @@ impl Model {
                 vb.dtype()
             );
         }
+        if settings.profile_attn {
+            snafu::ensure_whatever!(
+                cfg!(feature = "attn-profile"),
+                "this build carries no attn-profile support (rebuild with --features attn-profile)"
+            );
+            snafu::ensure_whatever!(
+                !settings.use_flash_attn,
+                "attention profiling reads the eager softmax weights; flash must be off"
+            );
+        }
         let vb_m = vb.pp("model");
         let embed_tokens = candle_nn::embedding(cfg.vocab_size, cfg.hidden_size, vb_m.pp("embed_tokens"))?;
         let full_rope = std::sync::Arc::new(RopeTables::for_full_layers(cfg, vb.dtype(), vb_m.device())?);
@@ -189,7 +207,7 @@ impl Model {
                 LayerType::Full => full_rope.clone(),
                 LayerType::Sliding => sliding_rope.clone(),
             };
-            layers.push(DecoderLayer::new(rotary, layer_type, cfg, settings.use_flash_attn, vb_l.pp(layer_idx))?);
+            layers.push(DecoderLayer::new(rotary, layer_type, cfg, settings, vb_l.pp(layer_idx))?);
         }
         let norm = candle_nn::rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb_m.pp("norm"))?;
         let lm_head = if cfg.tie_word_embeddings {
@@ -371,6 +389,23 @@ impl Model {
         Ok(context_len)
     }
 
+    /// Drain the observation accumulators (attn-profile builds, armed
+    /// models): (layer_index, report) per full layer.
+    #[cfg(feature = "attn-profile")]
+    pub(crate) fn take_profile(&mut self) -> Vec<(usize, profile::LayerReport)> {
+        self.layers
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, layer)| {
+                layer
+                    .self_attn
+                    .profile
+                    .as_mut()
+                    .map(|accum| (index, accum.drain()))
+            })
+            .collect()
+    }
+
     /// Rewind the caches to `accepted` consumed tokens out of the
     /// marked verification span.
     pub(crate) fn cache_rollback(&mut self, mark: &CacheMark, accepted: usize) -> AlmostResult<()> {
@@ -454,14 +489,14 @@ impl DecoderLayer {
         rotary: std::sync::Arc<RopeTables>,
         layer_type: LayerType,
         cfg: &Olmo3Config,
-        use_flash_attn: bool,
+        settings: Settings,
         vb: candle_nn::VarBuilder,
     ) -> AlmostResult<Self> {
         let sliding_window = match layer_type {
             LayerType::Sliding => Some(cfg.sliding_window),
             LayerType::Full => None,
         };
-        let self_attn = Attention::new(rotary, sliding_window, cfg, use_flash_attn, vb.pp("self_attn"))?;
+        let self_attn = Attention::new(rotary, sliding_window, cfg, settings, vb.pp("self_attn"))?;
         let mlp = Mlp::new(cfg, vb.pp("mlp"))?;
         let post_attention_layernorm =
             candle_nn::rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("post_attention_layernorm"))?;
@@ -595,6 +630,10 @@ struct Attention {
     num_heads: usize,
     head_dim: usize,
     hidden_size: usize,
+    /// A2 observation accumulator; armed on full layers of a
+    /// profile-enabled model, absent otherwise.
+    #[cfg(feature = "attn-profile")]
+    profile: Option<profile::ProfileAccum>,
 }
 
 impl Attention {
@@ -602,7 +641,7 @@ impl Attention {
         rotary: std::sync::Arc<RopeTables>,
         sliding_window: Option<usize>,
         cfg: &Olmo3Config,
-        use_flash_attn: bool,
+        settings: Settings,
         vb: candle_nn::VarBuilder,
     ) -> AlmostResult<Self> {
         let num_heads = cfg.num_attention_heads;
@@ -623,7 +662,7 @@ impl Attention {
             k_norm,
             rotary,
             sliding_window,
-            use_flash_attn,
+            use_flash_attn: settings.use_flash_attn,
             ring_key: None,
             ring_value: None,
             ring_head: 0,
@@ -634,6 +673,9 @@ impl Attention {
             num_heads,
             head_dim,
             hidden_size: cfg.hidden_size,
+            #[cfg(feature = "attn-profile")]
+            profile: (settings.profile_attn && sliding_window.is_none())
+                .then(|| profile::ProfileAccum::new(num_heads, cfg.sliding_window)),
         })
     }
 
@@ -786,10 +828,19 @@ impl Attention {
                 attn_weights = attn_weights.broadcast_add(mask)?;
             }
             // HF computes softmax in f32 and casts back; match it for parity.
-            let attn_weights = if dtype == candle_core::DType::F32 {
+            let weights_f32 = if dtype == candle_core::DType::F32 {
                 candle_nn::ops::softmax_last_dim(&attn_weights)?
             } else {
-                candle_nn::ops::softmax_last_dim(&attn_weights.to_dtype(candle_core::DType::F32)?)?.to_dtype(dtype)?
+                candle_nn::ops::softmax_last_dim(&attn_weights.to_dtype(candle_core::DType::F32)?)?
+            };
+            #[cfg(feature = "attn-profile")]
+            if let Some(profile) = &mut self.profile {
+                profile.observe(&weights_f32, seqlen_offset)?;
+            }
+            let attn_weights = if dtype == candle_core::DType::F32 {
+                weights_f32
+            } else {
+                weights_f32.to_dtype(dtype)?
             };
             attn_weights.matmul(&value_states)?
         };
@@ -893,10 +944,18 @@ impl Attention {
             };
             let past_key = ring_linear_tail(ring_key, self.ring_head, self.ring_len, need)?;
             let past_value = ring_linear_tail(ring_value, self.ring_head, self.ring_len, need)?;
-            (
-                candle_core::Tensor::cat(&[&past_key, key_states], 2)?,
-                candle_core::Tensor::cat(&[&past_value, value_states], 2)?,
-            )
+            let key_cat = candle_core::Tensor::cat(&[&past_key, key_states], 2)?;
+            let value_cat = candle_core::Tensor::cat(&[&past_value, value_states], 2)?;
+            // The dim-2 cat yields a transposed view whose batch strides
+            // the cuda EAGER matmul rejects (masked since the rings
+            // landed: every gpu chunked run had been flash). The flash
+            // kernels take the view as-is - packing there only costs
+            // peak VRAM and copy traffic.
+            if self.use_flash_attn {
+                (key_cat, value_cat)
+            } else {
+                (key_cat.contiguous()?, value_cat.contiguous()?)
+            }
         };
         // Persist the tail linearly for the next chunk or decode.
         let total = seqlen_offset + q_len;

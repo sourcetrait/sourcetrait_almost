@@ -15,6 +15,7 @@ name = "almost"
 path = "src/main.rs"
 
 [features]
+attn-profile = ["sourcetrait_almost_lib/attn-profile"]
 cuda = ["sourcetrait_almost_lib/cuda"]
 flash-attn = ["cuda", "sourcetrait_almost_lib/flash-attn"]
 

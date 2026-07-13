@@ -7,6 +7,8 @@ pub(crate) mod hub;
 pub(crate) mod load;
 pub(crate) mod model;
 pub(crate) mod needle;
+#[cfg(feature = "attn-profile")]
+pub(crate) mod profile;
 pub(crate) mod rope;
 pub(crate) mod speculate;
 pub(crate) mod token_stream;
@@ -17,6 +19,8 @@ pub(crate) mod tests {
     pub(crate) mod chat;
     pub(crate) mod model;
     pub(crate) mod needle;
+    #[cfg(feature = "attn-profile")]
+    pub(crate) mod profile;
     pub(crate) mod rope;
     pub(crate) mod speculate;
 }

@@ -10,6 +10,10 @@ pub struct NeedleOptions {
     pub seed: u64,
     /// When set, per-cell results are also written here as JSON.
     pub out: Option<PathBuf>,
+    /// When set, run the A2 observation pass instead of the full grid
+    /// (attn-profile build, eager only: long lengths, single mode, fewer
+    /// keys) and write the per-head attention-mass profile here as JSON.
+    pub profile_out: Option<PathBuf>,
 }
 
 /// Context lengths (total prompt tokens) the battery targets.
@@ -19,6 +23,11 @@ const LENGTHS: [usize; 5] = [4096, 8192, 16384, 24576, 32768];
 const DEPTHS: [usize; 5] = [10, 25, 50, 75, 90];
 /// Randomized keys per (length, depth) cell.
 const KEYS_PER_CELL: usize = 5;
+/// Observation-pass subset: the long-context lengths only (the middle
+/// region is what the pass measures) with fewer keys - the per-row mass
+/// statistics are dense, so a handful of prompts per cell suffices.
+const PROFILE_LENGTHS: [usize; 3] = [16384, 24576, 32768];
+const PROFILE_KEYS_PER_CELL: usize = 2;
 
 const ADJECTIVES: [&str; 12] = [
     "amber", "quiet", "narrow", "restless", "pale", "sturdy", "brisk",
@@ -216,6 +225,13 @@ pub fn needle(
     dtype: candle_core::DType,
     opts: &NeedleOptions,
 ) -> AlmostResult<()> {
+    let profiling = opts.profile_out.is_some();
+    if profiling {
+        snafu::ensure_whatever!(
+            !opts.use_flash_attn,
+            "the observation pass reads eager attention weights; drop --flash for --profile-out"
+        );
+    }
     let config: Olmo3Config = serde_json::from_reader(std::fs::File::open(&paths.config)?)?;
     let tokenizer = match tokenizers::Tokenizer::from_file(&paths.tokenizer) {
         Ok(tokenizer) => tokenizer,
@@ -225,6 +241,7 @@ pub fn needle(
     let vb = unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&paths.shards, dtype, device)? };
     let settings = Settings {
         use_flash_attn: opts.use_flash_attn,
+        profile_attn: profiling,
     };
     let mut model = Model::new(&config, settings, vb)?;
     eprintln!(
@@ -244,16 +261,20 @@ pub fn needle(
         dump_logits: None,
     };
 
+    let modes: &[bool] = if profiling { &[false] } else { &[false, true] };
+    let lengths: &[usize] = if profiling { &PROFILE_LENGTHS } else { &LENGTHS };
+    let keys_per_cell = if profiling { PROFILE_KEYS_PER_CELL } else { KEYS_PER_CELL };
+
     let battery_start = Instant::now();
     let mut results: Vec<CellResult> = Vec::new();
-    for multi in [false, true] {
-        for &length in &LENGTHS {
+    for &multi in modes {
+        for &length in lengths {
             let filler_sentences =
                 ((length.saturating_sub(overhead)) as f64 / per_sentence) as usize;
             for &depth in &DEPTHS {
                 let mut hits = 0usize;
                 let mut token_total = 0usize;
-                for _ in 0..KEYS_PER_CELL {
+                for _ in 0..keys_per_cell {
                     let case = build_case(&mut rng, filler_sentences, depth, multi);
                     let mut generation = model.generate(&tokenizer, &chat_wrap(&case.text), &generate_options)?;
                     let mut answer = String::new();
@@ -277,8 +298,8 @@ pub fn needle(
                     depth,
                     multi,
                     hits,
-                    cases: KEYS_PER_CELL,
-                    prompt_tokens_mean: token_total / KEYS_PER_CELL,
+                    cases: keys_per_cell,
+                    prompt_tokens_mean: token_total / keys_per_cell,
                 });
             }
             let row: Vec<&CellResult> = results
@@ -297,8 +318,8 @@ pub fn needle(
     }
 
     println!("mode | length | tokens(mean) | hits/cases | per-depth {DEPTHS:?}");
-    for multi in [false, true] {
-        for &length in &LENGTHS {
+    for &multi in modes {
+        for &length in lengths {
             let row: Vec<&CellResult> = results
                 .iter()
                 .filter(|cell| cell.length == length && cell.multi == multi)
@@ -348,6 +369,48 @@ pub fn needle(
         });
         std::fs::write(path, serde_json::to_string_pretty(&payload)?)?;
         eprintln!("almost needle: results written to {}", path.display());
+    }
+
+    #[cfg(feature = "attn-profile")]
+    if let Some(path) = &opts.profile_out {
+        let layers = model.take_profile();
+        let layer_rows: Vec<serde_json::Value> = layers
+            .iter()
+            .map(|(layer_index, report)| {
+                let heads: Vec<serde_json::Value> = report
+                    .heads
+                    .iter()
+                    .enumerate()
+                    .map(|(head_index, head)| {
+                        serde_json::json!({
+                            "head": head_index,
+                            "prefill_middle": head.prefill_middle,
+                            "prefill_sink_before": head.prefill_sink_before,
+                            "decode_middle": head.decode_middle,
+                            "decode_sink_before": head.decode_sink_before,
+                            "sink_by_position": head.sink_by_position,
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "layer": layer_index,
+                    "window": report.window,
+                    "s_probe": report.s_probe,
+                    "prefill_rows": report.prefill_rows,
+                    "prefill_rows_past_window": report.prefill_rows_past_window,
+                    "decode_rows": report.decode_rows,
+                    "decode_rows_past_window": report.decode_rows_past_window,
+                    "heads": heads,
+                })
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "seed": opts.seed,
+            "checkpoint": consts::DEFAULT_MODEL_ID,
+            "layers": layer_rows,
+        });
+        std::fs::write(path, serde_json::to_string_pretty(&payload)?)?;
+        eprintln!("almost needle: attention profile written to {}", path.display());
     }
     Ok(())
 }

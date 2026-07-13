@@ -49,6 +49,7 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
 
             let settings = lib::Settings {
                 use_flash_attn: flash,
+                profile_attn: false,
             };
             let loaded = lib::load_model(&paths, &device, dtype, settings)?;
             eprintln!("almost: weights loaded in {:.1}s", loaded.load_seconds);
@@ -115,6 +116,7 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
             decode_steps,
             needle,
             needle_out,
+            profile_out,
             seed,
             cpu,
             dtype,
@@ -130,6 +132,7 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
                     use_flash_attn: flash,
                     seed,
                     out: needle_out,
+                    profile_out,
                 };
                 return lib::needle(&paths, &device, dtype, &opts);
             }
