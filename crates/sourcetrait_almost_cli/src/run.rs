@@ -113,6 +113,9 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
             flash,
             cross_device,
             decode_steps,
+            needle,
+            needle_out,
+            seed,
             cpu,
             dtype,
             model_id,
@@ -122,6 +125,14 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
             let paths = lib::ensure_model(&model_id, &dir)?;
             let device = lib::pick_device(cpu)?;
             let dtype = lib::pick_dtype(dtype.as_deref(), &device)?;
+            if needle {
+                let opts = lib::NeedleOptions {
+                    use_flash_attn: flash,
+                    seed,
+                    out: needle_out,
+                };
+                return lib::needle(&paths, &device, dtype, &opts);
+            }
             let opts = lib::VerifyOptions {
                 long,
                 cross_device,

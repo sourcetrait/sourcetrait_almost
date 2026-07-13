@@ -75,6 +75,16 @@ pub(crate) enum Command {
         /// Trailing positions covered by the incremental-decode check
         #[arg(long, default_value_t = 16)]
         decode_steps: usize,
+        /// Run the retrieval needle/passkey battery instead (A2 phase 1:
+        /// depth x length passkey grid, single + multi, exact match)
+        #[arg(long)]
+        needle: bool,
+        /// Write the needle battery's per-cell results here as JSON
+        #[arg(long)]
+        needle_out: Option<PathBuf>,
+        /// Seeds the needle case generator (decoding stays greedy)
+        #[arg(long, default_value_t = 299792458)]
+        seed: u64,
         /// Force CPU even when CUDA is available
         #[arg(long)]
         cpu: bool,

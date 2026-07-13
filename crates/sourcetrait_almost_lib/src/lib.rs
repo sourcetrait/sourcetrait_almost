@@ -6,6 +6,7 @@ pub(crate) mod generate;
 pub(crate) mod hub;
 pub(crate) mod load;
 pub(crate) mod model;
+pub(crate) mod needle;
 pub(crate) mod rope;
 pub(crate) mod speculate;
 pub(crate) mod token_stream;
@@ -15,6 +16,7 @@ pub(crate) mod verify;
 pub(crate) mod tests {
     pub(crate) mod chat;
     pub(crate) mod model;
+    pub(crate) mod needle;
     pub(crate) mod rope;
     pub(crate) mod speculate;
 }
@@ -103,6 +105,10 @@ pub use crate::{
     model::{
         Model,
         Settings,
+    },
+    needle::{
+        needle,
+        NeedleOptions,
     },
     verify::{
         verify,

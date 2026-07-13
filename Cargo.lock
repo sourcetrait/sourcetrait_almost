@@ -5920,7 +5920,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_almost_cli"
-version = "0.0.0-7"
+version = "0.0.0-8"
 dependencies = [
  "clap",
  "sourcetrait_almost_lib",
