@@ -75,6 +75,142 @@ fn slot_write_follows_restaged_index() {
     assert_eq!(sums, vec![8.0, 0.0, 0.0, 16.0, 8.0, 0.0, 0.0, 16.0]);
 }
 
+/// Phase C capture contract, minimally: an attention-shaped candle op
+/// chain over persistent buffers - slot_write appends, bucket narrows,
+/// matmul, additive mask, f32 softmax, matmul, a persistent-output
+/// write - must replay exactly what the uncaptured chain computes.
+/// IGNORED: refuted on this stack (driver 580 / CUDA 13 / cudarc
+/// 0.19.8) - every (mode x hold) variant fails; a pageable-host H2D
+/// staging copy inside the captured graph replays stale data (the
+/// verbose dot dump via ALMOST_CAPTURE_DOT shows it). Run manually
+/// with --ignored to re-test after a platform/candle change; env
+/// knobs: ALMOST_CAPTURE_MODE=thread_local|relaxed|global,
+/// ALMOST_CAPTURE_HOLD=0|1, ALMOST_CAPTURE_DOT=<path>. One variant
+/// per process - a broken capture can wedge the CUDA context.
+#[test]
+#[ignore = "capture refuted on driver 580/cuda13 + cudarc 0.19.8 (see lib journal REV 21); run with --ignored to re-test"]
+fn capture_replays_attention_shaped_chain() {
+    if !crate::r::candle::cuda_is_available() {
+        return;
+    }
+    let device = candle_core::Device::new_cuda(0).unwrap();
+    let candle_core::Device::Cuda(cuda_device) = &device else {
+        unreachable!()
+    };
+    let dtype = candle_core::DType::BF16;
+    let (heads, dim, capacity, bucket) = (4usize, 16usize, 64usize, 32usize);
+
+    let q = candle_core::Tensor::randn(0f32, 1f32, (1, heads, 1, dim), &device)
+        .unwrap()
+        .to_dtype(dtype)
+        .unwrap();
+    let k_new = candle_core::Tensor::randn(0f32, 1f32, (1, heads, 1, dim), &device)
+        .unwrap()
+        .to_dtype(dtype)
+        .unwrap();
+    let v_new = candle_core::Tensor::randn(0f32, 1f32, (1, heads, 1, dim), &device)
+        .unwrap()
+        .to_dtype(dtype)
+        .unwrap();
+    let key_buffer = candle_core::Tensor::zeros((1, heads, capacity, dim), dtype, &device).unwrap();
+    let value_buffer =
+        candle_core::Tensor::zeros((1, heads, capacity, dim), dtype, &device).unwrap();
+    let slot = candle_core::Tensor::new(&[5u32], &device).unwrap();
+    let mask_values = pad_mask_values(bucket, 6);
+    let mask = candle_core::Tensor::from_vec(mask_values, (1, 1, 1, bucket), &device)
+        .unwrap()
+        .to_dtype(dtype)
+        .unwrap();
+    let out = candle_core::Tensor::zeros((1, heads, 1, dim), candle_core::DType::F32, &device)
+        .unwrap();
+
+    let write = SlotWrite { dtype };
+    // Returns every intermediate so a variant can HOLD them across the
+    // capture (drops during recording are one breakage hypothesis).
+    let chain = || -> candle_core::Result<Vec<candle_core::Tensor>> {
+        key_buffer.inplace_op3(&k_new, &slot, &write)?;
+        value_buffer.inplace_op3(&v_new, &slot, &write)?;
+        let keys = key_buffer.narrow(2, 0, bucket)?;
+        let values = value_buffer.narrow(2, 0, bucket)?;
+        let logits = (q.matmul(&keys.transpose(2, 3)?)? * 0.25)?;
+        let masked = logits.broadcast_add(&mask)?;
+        let masked_f32 = masked.to_dtype(candle_core::DType::F32)?;
+        let weights_f32 = candle_nn::ops::softmax_last_dim(&masked_f32)?;
+        let weights = weights_f32.to_dtype(dtype)?;
+        let attn = weights.matmul(&values)?;
+        let attn_f32 = attn.to_dtype(candle_core::DType::F32)?;
+        out.slice_set(&attn_f32, 0, 0)?;
+        Ok(vec![
+            keys, values, logits, masked, masked_f32, weights_f32, weights, attn, attn_f32,
+        ])
+    };
+
+    fn snap(tensor: &candle_core::Tensor) -> Vec<f32> {
+        tensor.flatten_all().unwrap().to_vec1::<f32>().unwrap()
+    }
+
+    let _ = chain().unwrap();
+    let expected = snap(&out);
+
+    // One variant per PROCESS (a broken capture can wedge the CUDA
+    // context): the diagnostic matrix drives this via env; the default
+    // is the pinned production recipe.
+    use cudarc::driver::sys::CUstreamCaptureMode;
+    let mode_name =
+        std::env::var("ALMOST_CAPTURE_MODE").unwrap_or_else(|_| String::from("thread_local"));
+    let hold = std::env::var("ALMOST_CAPTURE_HOLD")
+        .map(|value| value == "1")
+        .unwrap_or(true);
+    let mode = match mode_name.as_str() {
+        "thread_local" => CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL,
+        "relaxed" => CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED,
+        "global" => CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_GLOBAL,
+        other => panic!("unknown ALMOST_CAPTURE_MODE {other}"),
+    };
+    let label = format!("{mode_name}/hold={hold}");
+    eprintln!("{label}: begin");
+
+    let stream = cuda_device.cuda_stream();
+    stream.begin_capture(mode).unwrap();
+    let chain_result = chain();
+    let end_result = stream.end_capture(
+        cudarc::driver::sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+    );
+    let intermediates = chain_result.unwrap();
+    let held = if hold {
+        Some(intermediates)
+    } else {
+        drop(intermediates);
+        None
+    };
+    let graph = end_result.unwrap().unwrap();
+    eprintln!("{label}: captured");
+
+    // Forensics: ALMOST_CAPTURE_DOT=<path> dumps the captured graph
+    // (verbose: mem-node VAs + kernel params) before launching.
+    if let Ok(dot_path) = std::env::var("ALMOST_CAPTURE_DOT") {
+        let c_path = std::ffi::CString::new(dot_path).unwrap();
+        unsafe {
+            cudarc::driver::sys::cuGraphDebugDotPrint(graph.cu_graph(), c_path.as_ptr(), 1)
+                .result()
+                .unwrap();
+        }
+        eprintln!("{label}: dot dumped");
+    }
+
+    for launch_index in 0..2 {
+        graph.launch().unwrap();
+        eprintln!("{label}: launched {launch_index}");
+        let replayed = snap(&out);
+        assert_eq!(
+            replayed, expected,
+            "{label}: launch {launch_index} diverged"
+        );
+    }
+    eprintln!("{label}: ok");
+    drop(held);
+}
+
 #[test]
 fn bucket_math_rounds_up_by_grain() {
     assert_eq!(bucket_for(0), BUCKET_GRAIN);

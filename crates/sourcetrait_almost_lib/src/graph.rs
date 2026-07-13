@@ -218,9 +218,11 @@ pub(crate) fn pad_mask_values(bucket: usize, valid: usize) -> Vec<f32> {
 /// per-step dynamic of the graph-mode decode reads (token id, rope
 /// position, append slots, pad masks, the logits output). The host
 /// stages a few bytes before each step; the op sequence reads values,
-/// never baked host constants - the same sequence phase C captures.
-/// Armed by Model::arm_graph_decode after prefill; dropped on
-/// clear/restore epochs.
+/// never baked host constants - the same sequence phase C captures
+/// and replays. Created once per Model at first arming and kept
+/// (masks are width-pooled and value-reset IN PLACE, so every address
+/// a captured graph bakes stays stable); clear/restore epochs only
+/// drop the armed flag.
 #[derive(Debug, Clone)]
 pub(crate) struct DecodeStage {
     /// (1, 1) u32: the token this step feeds (embedding index_select).
@@ -231,9 +233,10 @@ pub(crate) struct DecodeStage {
     pub(crate) full_slot: candle_core::Tensor,
     /// (1,) u32: sliding-layer ring append slot.
     pub(crate) ring_slot: candle_core::Tensor,
-    /// (1, 1, 1, full_bucket) additive 0/-inf, model dtype.
+    /// (1, 1, 1, full_bucket) additive 0/-inf, model dtype (a handle
+    /// into the width pool).
     pub(crate) full_mask: candle_core::Tensor,
-    /// (1, 1, 1, ring_bucket) additive 0/-inf, model dtype.
+    /// (1, 1, 1, ring_bucket) additive 0/-inf, model dtype (pooled).
     pub(crate) ring_mask: candle_core::Tensor,
     /// (1, vocab) f32: the step's logits, written in-graph.
     pub(crate) logits_out: candle_core::Tensor,
@@ -241,6 +244,30 @@ pub(crate) struct DecodeStage {
     mask_zero: candle_core::Tensor,
     /// (1, heads, 1, 1) f32 zeros: the score-slot reset source.
     pub(crate) score_zero: candle_core::Tensor,
+    /// Width-keyed mask pools: one tensor per bucket width, created
+    /// once and value-reset in place - captured graphs bake these
+    /// addresses, so a width's mask must never reallocate.
+    full_masks: HashMap<usize, candle_core::Tensor>,
+    ring_masks: HashMap<usize, candle_core::Tensor>,
+    /// Captured decode graphs keyed by (full_bucket, ring_bucket).
+    pub(crate) graphs: GraphCache,
+    /// Replay switch. OFF BY DEFAULT: capture of candle op sequences
+    /// is REFUTED on this stack (driver 580 / CUDA 13 / cudarc
+    /// 0.19.8) - a pageable-host H2D staging copy inside the captured
+    /// graph replays stale data, so replays compute garbage
+    /// (ILLEGAL_ADDRESS at model scale). Evidence: the ignored
+    /// capture_replays_attention_shaped_chain contract test (mode x
+    /// hold matrix, dot-dump hook). The capture machinery stays for
+    /// the diagnostic path and for when the platform (or a static
+    /// workspace, E8) unblocks it.
+    pub(crate) capture_enabled: bool,
+    /// Whether generate() has armed stepping for the current cache
+    /// state (clear/restore epochs unset it; rearm sets it).
+    pub(crate) armed: bool,
+    /// The full-buffer capacity the cached graphs were captured
+    /// against; a capacity change means the kv/score buffers
+    /// reallocated and every cached graph is stale.
+    pub(crate) kv_capacity: usize,
     pub(crate) full_bucket: usize,
     pub(crate) ring_bucket: usize,
     window: usize,
@@ -263,8 +290,12 @@ impl DecodeStage {
     ) -> AlmostResult<Self> {
         let full_bucket = bucket_for(full_len + 1);
         let ring_bucket = bucket_for((ring_len + 1).min(window)).min(window);
-        let full_mask = Self::mask_tensor(full_bucket, full_len, dtype, device)?;
-        let ring_mask = Self::mask_tensor(ring_bucket, ring_len, dtype, device)?;
+        let mut full_masks: HashMap<usize, candle_core::Tensor> = HashMap::new();
+        let mut ring_masks: HashMap<usize, candle_core::Tensor> = HashMap::new();
+        let full_mask =
+            Self::pooled_mask(&mut full_masks, full_bucket, full_len, dtype, device)?;
+        let ring_mask =
+            Self::pooled_mask(&mut ring_masks, ring_bucket, ring_len, dtype, device)?;
         Ok(Self {
             ids: candle_core::Tensor::zeros((1, 1), candle_core::DType::U32, device)?,
             position: candle_core::Tensor::zeros((1,), candle_core::DType::U32, device)?,
@@ -283,6 +314,14 @@ impl DecodeStage {
                 candle_core::DType::F32,
                 device,
             )?,
+            full_masks,
+            ring_masks,
+            graphs: GraphCache::default(),
+            capture_enabled: false,
+            armed: true,
+            // The creator records the true capacity right after
+            // construction (kept out of the signature for arity).
+            kv_capacity: 0,
             full_bucket,
             ring_bucket,
             window,
@@ -291,30 +330,104 @@ impl DecodeStage {
         })
     }
 
-    fn mask_tensor(
+    /// Get-or-create the width's pooled mask and reset its values to
+    /// `valid` IN PLACE (stable address across the pool's lifetime).
+    fn pooled_mask(
+        pool: &mut HashMap<usize, candle_core::Tensor>,
         bucket: usize,
         valid: usize,
         dtype: candle_core::DType,
         device: &candle_core::Device,
     ) -> AlmostResult<candle_core::Tensor> {
-        let values = pad_mask_values(bucket, valid);
-        Ok(candle_core::Tensor::from_vec(values, (1, 1, 1, bucket), device)?.to_dtype(dtype)?)
+        let mask = match pool.get(&bucket) {
+            Some(mask) => mask.clone(),
+            None => {
+                let fresh = candle_core::Tensor::zeros((1, 1, 1, bucket), dtype, device)?;
+                pool.insert(bucket, fresh.clone());
+                fresh
+            }
+        };
+        Self::write_mask_values(&mask, bucket, valid, dtype, device)?;
+        Ok(mask)
     }
 
-    /// Re-derive both buckets for the widths the NEXT append reaches
-    /// and rebuild a mask when its bucket changes (a crossing, or a
-    /// store shrunk by an eviction epoch). Uncaptured host work; phase
-    /// C also switches graphs here.
+    /// Overwrite a mask's whole row in place from pad_mask_values.
+    fn write_mask_values(
+        mask: &candle_core::Tensor,
+        bucket: usize,
+        valid: usize,
+        dtype: candle_core::DType,
+        device: &candle_core::Device,
+    ) -> AlmostResult<()> {
+        let values = pad_mask_values(bucket, valid);
+        let row =
+            candle_core::Tensor::from_vec(values, (1, 1, 1, bucket), device)?.to_dtype(dtype)?;
+        mask.slice_set(&row, 3, 0)?;
+        Ok(())
+    }
+
+    /// Re-point the stage at fresh post-prefill lengths (a new
+    /// generation over the same buffers): buckets re-derived, pooled
+    /// masks value-reset in place, stepping re-armed. Captured graphs
+    /// survive - the model flushes them separately when the kv
+    /// buffers reallocate.
+    pub(crate) fn rearm(&mut self, full_len: usize, ring_len: usize) -> AlmostResult<()> {
+        self.full_bucket = bucket_for(full_len + 1);
+        self.ring_bucket = bucket_for((ring_len + 1).min(self.window)).min(self.window);
+        self.full_mask = Self::pooled_mask(
+            &mut self.full_masks,
+            self.full_bucket,
+            full_len,
+            self.dtype,
+            &self.device,
+        )?;
+        self.ring_mask = Self::pooled_mask(
+            &mut self.ring_masks,
+            self.ring_bucket,
+            ring_len,
+            self.dtype,
+            &self.device,
+        )?;
+        self.capture_enabled = false;
+        self.armed = true;
+        Ok(())
+    }
+
+    /// Reset the CURRENT full mask to a shrunk valid width in place -
+    /// the eviction-compaction epoch: stale enabled columns past the
+    /// compacted store would otherwise expose garbage slots to the
+    /// (same, still-valid) graph.
+    pub(crate) fn reset_full_valid(&self, full_len: usize) -> AlmostResult<()> {
+        Self::write_mask_values(
+            &self.full_mask,
+            self.full_bucket,
+            full_len,
+            self.dtype,
+            &self.device,
+        )
+    }
+
+    /// Re-derive both buckets for the widths the NEXT append reaches;
+    /// a changed bucket re-points to (or creates) that width's pooled
+    /// mask with values reset from the live length - the phase C
+    /// graph switch happens on the same boundary via the cache key.
     pub(crate) fn ensure_buckets(&mut self, full_len: usize, ring_len: usize) -> AlmostResult<()> {
         let full_bucket = bucket_for(full_len + 1);
         if full_bucket != self.full_bucket {
             self.full_bucket = full_bucket;
-            self.full_mask = Self::mask_tensor(full_bucket, full_len, self.dtype, &self.device)?;
+            self.full_mask = Self::pooled_mask(
+                &mut self.full_masks,
+                full_bucket,
+                full_len,
+                self.dtype,
+                &self.device,
+            )?;
         }
         let ring_bucket = bucket_for((ring_len + 1).min(self.window)).min(self.window);
         if ring_bucket != self.ring_bucket {
             self.ring_bucket = ring_bucket;
-            self.ring_mask = Self::mask_tensor(
+            self.ring_mask = Self::pooled_mask(
+                &mut self.ring_masks,
                 ring_bucket,
                 ring_len.min(self.window),
                 self.dtype,
@@ -376,5 +489,40 @@ impl DecodeStage {
             0,
         )?;
         Ok(())
+    }
+}
+
+/// Captured, instantiated decode graphs keyed by (full_bucket,
+/// ring_bucket) - phase C's replay handles. Wrapped so the containing
+/// types keep their derives: Debug renders a summary, Clone shares
+/// the instantiated execs (clones already share every staged buffer).
+#[derive(Clone, Default)]
+pub(crate) struct GraphCache {
+    // Rc, not Arc: CudaGraph is single-thread by cudarc's contract
+    // (so the cache is !Send either way), and Rc says so honestly.
+    graphs: HashMap<(usize, usize), std::rc::Rc<cudarc::driver::CudaGraph>>,
+}
+
+impl std::fmt::Debug for GraphCache {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "GraphCache({} captured)", self.graphs.len())
+    }
+}
+
+impl GraphCache {
+    pub(crate) fn get(
+        &self,
+        key: (usize, usize),
+    ) -> Option<std::rc::Rc<cudarc::driver::CudaGraph>> {
+        self.graphs.get(&key).cloned()
+    }
+
+    pub(crate) fn insert(&mut self, key: (usize, usize), graph: cudarc::driver::CudaGraph) {
+        self.graphs.insert(key, std::rc::Rc::new(graph));
+    }
+
+    /// Drop every captured graph (the kv/score buffers reallocated).
+    pub(crate) fn clear(&mut self) {
+        self.graphs.clear();
     }
 }

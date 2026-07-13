@@ -314,10 +314,12 @@ impl Model {
 
     pub fn clear_kv_cache(&mut self) {
         // A cleared cache invalidates the staged lengths/masks: an E4
-        // epoch that disarms; generate() re-arms after its prefill.
+        // epoch that disarms stepping. The stage (and its captured
+        // graphs) persists - every baked address survives a clear, so
+        // the next arm just re-stages.
         #[cfg(feature = "cuda")]
-        {
-            self.graph_stage = None;
+        if let Some(stage) = &mut self.graph_stage {
+            stage.armed = false;
         }
         for layer in self.layers.iter_mut() {
             layer.clear_kv_cache();
@@ -426,10 +428,12 @@ impl Model {
             self.settings.eviction.is_none(),
             "snapshots under eviction are not supported yet (scores are not persisted)"
         );
-        // Restored lengths invalidate the staged state: an E4 epoch.
+        // Restored lengths invalidate the staged state: an E4 epoch
+        // that disarms stepping (a restore-time buffer regrow is
+        // caught by the next arm's kv_capacity check).
         #[cfg(feature = "cuda")]
-        {
-            self.graph_stage = None;
+        if let Some(stage) = &mut self.graph_stage {
+            stage.armed = false;
         }
         let tensors = candle_core::safetensors::load(path, &self.device)?;
         let Some(meta) = tensors.get("meta") else {
@@ -545,17 +549,40 @@ impl Model {
                 layer.self_attn.full_grow(1, capacity, self.dtype, &device)?;
             }
         }
-        let heads = self.layers[0].self_attn.num_heads;
-        let vocab = self.embed_tokens.embeddings().dims()[0];
-        self.graph_stage = Some(graph::DecodeStage::new(
-            full_len,
-            ring_len,
-            self.sliding_window,
-            heads,
-            vocab,
-            self.dtype,
-            &device,
-        )?);
+        // The kv identity the cached graphs bake: a capacity change
+        // means the kv/score buffers reallocated (full_grow replaces
+        // only when growing), so every cached graph is stale.
+        let kv_capacity = self
+            .layers
+            .iter()
+            .find(|layer| layer.layer_type == LayerType::Full)
+            .and_then(|layer| layer.self_attn.full_key_buffer.as_ref())
+            .map(|buffer| buffer.dims()[2])
+            .unwrap_or(0);
+        match &mut self.graph_stage {
+            Some(stage) => {
+                if stage.kv_capacity != kv_capacity {
+                    stage.graphs.clear();
+                    stage.kv_capacity = kv_capacity;
+                }
+                stage.rearm(full_len, ring_len)?;
+            }
+            None => {
+                let heads = self.layers[0].self_attn.num_heads;
+                let vocab = self.embed_tokens.embeddings().dims()[0];
+                let mut stage = graph::DecodeStage::new(
+                    full_len,
+                    ring_len,
+                    self.sliding_window,
+                    heads,
+                    vocab,
+                    self.dtype,
+                    &device,
+                )?;
+                stage.kv_capacity = kv_capacity;
+                self.graph_stage = Some(stage);
+            }
+        }
         Ok(())
     }
 
@@ -566,10 +593,23 @@ impl Model {
         snafu::whatever!("this build carries no cuda support (decode graphs need --features cuda)")
     }
 
-    /// Whether the staged graph-mode decode path is armed.
+    /// Whether the staged graph-mode decode path is armed for the
+    /// current cache state (the stage itself persists across epochs;
+    /// only the flag drops).
     #[cfg(feature = "cuda")]
     pub(crate) fn graph_armed(&self) -> bool {
-        self.graph_stage.is_some()
+        self.graph_stage.as_ref().is_some_and(|stage| stage.armed)
+    }
+
+    /// Largest full-layer store length currently held (the eviction
+    /// gate's cap assertion; mirror of max_sliding_cache_len).
+    pub(crate) fn max_full_cache_len(&self) -> usize {
+        self.layers
+            .iter()
+            .filter(|layer| layer.layer_type == LayerType::Full)
+            .map(|layer| layer.self_attn.cached_len())
+            .max()
+            .unwrap_or(0)
     }
 
     #[cfg(not(feature = "cuda"))]
@@ -633,6 +673,12 @@ impl Model {
                         )?;
                     }
                 }
+                // Epoch re-stage: disable the stale mask columns past
+                // the compacted store IN PLACE (same tensor, so a
+                // captured graph resumes valid).
+                if let Some(stage) = &self.graph_stage {
+                    stage.reset_full_valid(cap)?;
+                }
             }
         }
         let (full_len, ring_len, ring_head) = self.graph_type_state()?;
@@ -640,19 +686,14 @@ impl Model {
             Some(stage) => stage,
             None => snafu::whatever!("graph decode step without an armed stage"),
         };
-        stage.ensure_buckets(full_len, ring_len)?;
-        stage.stage_step(token, offset, full_len, ring_len, ring_head)?;
-
-        let mut xs = self.embed_tokens.forward(&stage.ids)?;
-        for layer in self.layers.iter_mut() {
-            xs = layer.forward_graph(&xs, &stage)?;
-        }
-        let logits = xs
-            .apply(&self.norm)?
-            .apply(&self.lm_head)?
-            .squeeze(1)?
-            .to_dtype(candle_core::DType::F32)?;
-        stage.logits_out.slice_set(&logits, 0, 0)?;
+        // Run the step body with the stage held out, then ALWAYS put
+        // the stage (and its captured graphs) back - an error must not
+        // destroy the persistent staging.
+        let step_result =
+            self.graph_step_with(&mut stage, token, offset, full_len, ring_len, ring_head);
+        let out = stage.logits_out.clone();
+        self.graph_stage = Some(stage);
+        step_result?;
 
         // Host bookkeeping advances in lockstep with the device writes.
         let window = self.sliding_window;
@@ -669,9 +710,108 @@ impl Model {
                 }
             }
         }
-        let out = stage.logits_out.clone();
-        self.graph_stage = Some(stage);
         Ok(out)
+    }
+
+    /// One staged step against a held-out stage: stage the dynamics,
+    /// then either replay the bucket pair's captured graph (capturing
+    /// it first if uncached) or run the sequence as ordinary ops (the
+    /// uncaptured reference mode).
+    #[cfg(feature = "cuda")]
+    fn graph_step_with(
+        &mut self,
+        stage: &mut graph::DecodeStage,
+        token: u32,
+        offset: usize,
+        full_len: usize,
+        ring_len: usize,
+        ring_head: usize,
+    ) -> AlmostResult<()> {
+        snafu::ensure_whatever!(
+            stage.armed,
+            "graph decode step on a disarmed stage (cleared or restored mid-run; re-arm first)"
+        );
+        stage.ensure_buckets(full_len, ring_len)?;
+        stage.stage_step(token, offset, full_len, ring_len, ring_head)?;
+        if !stage.capture_enabled {
+            return self.graph_forward_sequence(stage);
+        }
+        let key = (stage.full_bucket, stage.ring_bucket);
+        let graph = match stage.graphs.get(key) {
+            Some(graph) => graph,
+            None => {
+                let captured = self.capture_decode_graph(stage)?;
+                stage.graphs.insert(key, captured);
+                match stage.graphs.get(key) {
+                    Some(graph) => graph,
+                    None => snafu::whatever!("captured graph missing after insert"),
+                }
+            }
+        };
+        // The replay IS the step: capture only records.
+        if let Err(error) = graph.launch() {
+            snafu::whatever!("decode graph launch failed: {error}");
+        }
+        Ok(())
+    }
+
+    /// Capture the current bucket pair's decode sequence into an
+    /// instantiated CUDA graph on candle's created stream (the legacy
+    /// default stream cannot capture). The recording performs no
+    /// work; the caller launches the instantiated graph to execute
+    /// the step. THREAD_LOCAL capture fails loudly on any
+    /// capture-illegal call from this thread. AUTO_FREE_ON_LAUNCH is
+    /// the correct relaunch semantic for any in-graph memory nodes
+    /// (and a no-op without them); it is also one of the two flags
+    /// cuGraphInstantiateWithFlags accepts (UPLOAD is WithParams-only
+    /// and measured CUDA_ERROR_INVALID_VALUE here), so the exec is
+    /// pre-uploaded explicitly instead.
+    #[cfg(feature = "cuda")]
+    fn capture_decode_graph(
+        &mut self,
+        stage: &graph::DecodeStage,
+    ) -> AlmostResult<cudarc::driver::CudaGraph> {
+        let stream = match &self.device {
+            candle_core::Device::Cuda(cuda_device) => cuda_device.cuda_stream(),
+            _ => snafu::whatever!("graph capture requires a cuda device"),
+        };
+        if let Err(error) = stream.begin_capture(
+            cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL,
+        ) {
+            snafu::whatever!("begin_capture failed: {error}");
+        }
+        let run_result = self.graph_forward_sequence(stage);
+        let end_result = stream.end_capture(
+            cudarc::driver::sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+        );
+        run_result?;
+        let graph = match end_result {
+            Ok(Some(graph)) => graph,
+            Ok(None) => snafu::whatever!("end_capture returned no graph"),
+            Err(error) => snafu::whatever!("end_capture failed: {error}"),
+        };
+        if let Err(error) = graph.upload() {
+            snafu::whatever!("graph upload failed: {error}");
+        }
+        Ok(graph)
+    }
+
+    /// The captured region: embed -> layers -> norm -> lm_head -> f32
+    /// cast -> the persistent logits_out write. Every per-step value
+    /// rides a staged buffer; no host constant is baked.
+    #[cfg(feature = "cuda")]
+    fn graph_forward_sequence(&mut self, stage: &graph::DecodeStage) -> AlmostResult<()> {
+        let mut xs = self.embed_tokens.forward(&stage.ids)?;
+        for layer in self.layers.iter_mut() {
+            xs = layer.forward_graph(&xs, stage)?;
+        }
+        let logits = xs
+            .apply(&self.norm)?
+            .apply(&self.lm_head)?
+            .squeeze(1)?
+            .to_dtype(candle_core::DType::F32)?;
+        stage.logits_out.slice_set(&logits, 0, 0)?;
+        Ok(())
     }
 
     /// Non-cuda builds carry no graph path (never armed, never

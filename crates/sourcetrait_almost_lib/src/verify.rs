@@ -38,6 +38,13 @@ const LONG_SENTENCE: &str =
 /// at least 64).
 const GRAPH_CHECK_STEPS: usize = 64;
 
+/// Eviction-epoch leg shape: a prefix compacted to the cap, then
+/// enough steps that decode-overflow epochs fire mid-run (one epoch
+/// per cap+slack cycle - about every 65 steps at slack 64).
+const EVICT_CHECK_PREFIX: usize = 8192;
+const EVICT_CHECK_CAP: usize = 2048;
+const EVICT_CHECK_STEPS: usize = 160;
+
 /// Self-consistency battery: every check compares two code paths of the
 /// SAME implementation, so agreement bars are tight. Exits with an error
 /// when a same-device check exceeds its bar or the T4 sliding-cache bound
@@ -377,12 +384,17 @@ fn argmax(values: &[f32]) -> usize {
     best
 }
 
-/// E4 phase A gate: the staged graph-mode decode forward (uncaptured)
-/// vs classic decode on the same ids at 2K and 32K prefixes - quick
-/// bf16 bar with argmax identity (padded-width f32 reductions regroup
-/// sums, so NOT bitwise) - plus graph-mode self-determinism at exactly
-/// zero. cuda-only, exact config, self-arming (like the needle
-/// battery's observation pass).
+/// E4 gate: staged graph-mode decode vs classic on the same ids at 2K
+/// and 32K prefixes (quick bf16 bar with argmax identity -
+/// padded-width f32 reductions regroup sums, so NOT bitwise),
+/// graph-mode self-determinism at exactly zero, and an eviction leg
+/// where decode-overflow epochs fire mid-run (self-determinism plus
+/// the store-cap assert - the epoch's in-place mask reset is what
+/// keeps stale columns hidden). The staged path runs UNCAPTURED:
+/// capture+replay is refuted on this stack (graph.rs carries the
+/// finding; the ignored capture contract test is the diagnostic).
+/// cuda-only, self-arming (like the needle battery's observation
+/// pass).
 pub fn verify_graph(paths: &ModelPaths) -> AlmostResult<()> {
     snafu::ensure_whatever!(
         cfg!(feature = "cuda") && r::candle::cuda_is_available(),
@@ -410,8 +422,9 @@ pub fn verify_graph(paths: &ModelPaths) -> AlmostResult<()> {
         load_start.elapsed().as_secs_f32()
     );
 
-    // (comparison, argmax_gated): the graph-vs-classic rows also demand
-    // argmax identity; the determinism rows demand exactly zero.
+    // (comparison, argmax_gated): the graph-vs-classic rows also
+    // demand argmax identity; the determinism rows demand exactly
+    // zero.
     let mut results: Vec<(Comparison, bool)> = Vec::new();
     for &target in &[2048usize, 32768] {
         let (prefix, continuation) = graph_ids(&tokenizer, target, GRAPH_CHECK_STEPS)?;
@@ -447,6 +460,56 @@ pub fn verify_graph(paths: &ModelPaths) -> AlmostResult<()> {
             false,
         ));
     }
+
+    // Eviction epoch leg: decode-overflow compactions fire mid-run as
+    // epoch breaks (classic compaction + the in-place mask reset that
+    // hides stale columns past the shrunk store). Two identical
+    // uncaptured runs must agree exactly and the store must hold the
+    // cap.
+    drop(model);
+    let evict_settings = Settings {
+        use_flash_attn: cfg!(feature = "flash-attn"),
+        profile_attn: false,
+        eviction: Some(EvictionSettings {
+            prefill_cap: usize::MAX,
+            decode_cap: Some(EVICT_CHECK_CAP),
+            sink_keep: 4,
+            recent_keep: 512,
+        }),
+        graph: true,
+    };
+    let vb =
+        unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&paths.shards, dtype, &device)? };
+    let mut model = Model::new(&config, evict_settings, vb)?;
+    let (prefix, continuation) = graph_ids(&tokenizer, EVICT_CHECK_PREFIX, EVICT_CHECK_STEPS)?;
+    let leg_start = Instant::now();
+    chunked_prefill(&mut model, &prefix, &device)?;
+    model.compact_full_caches()?;
+    model.arm_graph_decode(prefix.len() + continuation.len() + 1)?;
+    let evict_first = decode_rows_graph(&mut model, &continuation, prefix.len())?;
+    chunked_prefill(&mut model, &prefix, &device)?;
+    model.compact_full_caches()?;
+    model.arm_graph_decode(prefix.len() + continuation.len() + 1)?;
+    let evict_second = decode_rows_graph(&mut model, &continuation, prefix.len())?;
+    eprintln!(
+        "almost verify-graph: eviction epoch legs done ({:.0}s elapsed)",
+        leg_start.elapsed().as_secs_f32()
+    );
+    let store_cap = EVICT_CHECK_CAP + evict::DECODE_EVICT_SLACK + 1;
+    snafu::ensure_whatever!(
+        model.max_full_cache_len() <= store_cap,
+        "evicted store length {} exceeds cap + slack + 1 ({store_cap}) - the overflow epoch misbehaved",
+        model.max_full_cache_len()
+    );
+    results.push((
+        compare(
+            "graph determinism (evicted, epochs fired)",
+            &evict_second,
+            &evict_first,
+            Some(0.0),
+        )?,
+        false,
+    ));
 
     let mut failed: Vec<String> = Vec::new();
     println!("check | rows | max_abs | nmse | argmax_match | verdict");
