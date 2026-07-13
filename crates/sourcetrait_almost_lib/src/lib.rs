@@ -78,7 +78,10 @@ pub(crate) use crate::{
         CacheMark,
     },
     rope::RopeTables,
-    speculate::LookupIndex,
+    speculate::{
+        DraftPolicy,
+        LookupIndex,
+    },
     token_stream::TokenStream,
 };
 

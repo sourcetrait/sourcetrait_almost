@@ -74,6 +74,7 @@ pub struct Generation<'m, 't> {
     /// into the caches and counted in offset.
     queued: VecDeque<u32>,
     index: LookupIndex,
+    policy: DraftPolicy,
     drafted_count: usize,
     accepted_draft_count: usize,
     offset: usize,
@@ -190,6 +191,7 @@ impl Model {
             pending: Some(first),
             queued: VecDeque::new(),
             index,
+            policy: DraftPolicy::new(),
             drafted_count: 0,
             accepted_draft_count: 0,
             offset,
@@ -280,8 +282,18 @@ impl Generation<'_, '_> {
             .options
             .sample_len
             .saturating_sub(self.generated_ids.len());
+        // The policy shapes the round: its ceiling caps the probe, the
+        // matched ladder level seeds the final length (a 2-gram hit
+        // drafts short until the run is hot), and a paused policy
+        // skips drafting entirely.
         let draft = if self.options.speculate && budget > 0 {
-            self.index.draft(budget)
+            let probe = self.policy.probe_limit();
+            self.index
+                .draft(probe.min(budget))
+                .map(|(matched_n, mut tokens)| {
+                    tokens.truncate(self.policy.draft_limit(matched_n).min(budget));
+                    tokens
+                })
         } else {
             None
         };
@@ -321,6 +333,7 @@ impl Generation<'_, '_> {
         }
         let consumed = accepted.len();
         self.accepted_draft_count += consumed - 1;
+        self.policy.record(consumed - 1);
         let bonus = greedy_next[consumed - 1];
 
         self.model.cache_rollback(&mark, consumed)?;
