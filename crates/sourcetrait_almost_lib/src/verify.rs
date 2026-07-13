@@ -107,11 +107,23 @@ pub fn verify(
     sample_cache_bound(&model, cache_cap, "chunked", &mut cache_bound_breaches, &mut max_cache_seen);
 
     // Incremental decode vs single (cache/offset math; in long mode the
-    // trimmed-cache maskless decode vs the banded window mask).
+    // trimmed-cache maskless decode vs the banded window mask). The
+    // boundary state also feeds the E2 snapshot roundtrip: persist,
+    // decode, restore, decode again - the two passes must agree at
+    // determinism grade.
     let steps = opts.decode_steps.min(n.saturating_sub(2));
     let boundary = n - steps;
     model.clear_kv_cache();
     let _ = model.forward(&tensor_ids(&ids[..boundary], device)?, 0)?;
+    let snapshot_path = std::env::temp_dir().join(format!(
+        "almost_verify_snapshot_{}.safetensors",
+        std::process::id()
+    ));
+    let snapshot_len = model.snapshot_caches(&snapshot_path)?;
+    snafu::ensure_whatever!(
+        snapshot_len == boundary,
+        "snapshot context length {snapshot_len} != boundary {boundary}"
+    );
     let mut rows: Vec<candle_core::Tensor> = Vec::with_capacity(steps);
     for position in boundary..n {
         let row = model.forward(&tensor_ids(&ids[position..position + 1], device)?, position)?;
@@ -130,6 +142,33 @@ pub fn verify(
         Some(same_device_bar),
     )?);
     sample_cache_bound(&model, cache_cap, "incremental", &mut cache_bound_breaches, &mut max_cache_seen);
+
+    // E2 snapshot roundtrip: restore the boundary state and replay the
+    // same decode steps; agreement is determinism-grade (same device,
+    // same path, restored caches).
+    let restored_len = model.restore_caches(&snapshot_path)?;
+    std::fs::remove_file(&snapshot_path)?;
+    snafu::ensure_whatever!(
+        restored_len == boundary,
+        "restored context length {restored_len} != boundary {boundary}"
+    );
+    let mut replay_rows: Vec<candle_core::Tensor> = Vec::with_capacity(steps);
+    for position in boundary..n {
+        let row = model.forward(&tensor_ids(&ids[position..position + 1], device)?, position)?;
+        replay_rows.push(
+            row.squeeze(0)?
+                .to_device(&candle_core::Device::Cpu)?
+                .to_dtype(candle_core::DType::F32)?,
+        );
+    }
+    let replayed = candle_core::Tensor::cat(&replay_rows, 0)?;
+    results.push(compare(
+        "snapshot-restore decode replay",
+        &replayed,
+        &incremental,
+        Some(1e-10),
+    )?);
+    sample_cache_bound(&model, cache_cap, "snapshot", &mut cache_bound_breaches, &mut max_cache_seen);
 
     // Cross-device (informational): quick ids on cpu f32.
     if opts.cross_device {

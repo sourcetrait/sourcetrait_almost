@@ -293,6 +293,71 @@ impl Model {
         Ok(CacheMark { marks, offset, span })
     }
 
+    /// E2: persist the current cache state (the standing prefix) as one
+    /// safetensors file. Returns the snapshotted context length.
+    pub(crate) fn snapshot_caches(&self, path: &Path) -> AlmostResult<usize> {
+        let mut context_len: Option<usize> = None;
+        let mut tensors: HashMap<String, candle_core::Tensor> = HashMap::new();
+        for (layer_idx, layer) in self.layers.iter().enumerate() {
+            let Some((key, value)) = layer.self_attn.export_cache()? else {
+                continue;
+            };
+            if layer.layer_type == LayerType::Full {
+                let len = key.dims()[2];
+                if let Some(existing) = context_len {
+                    snafu::ensure_whatever!(
+                        existing == len,
+                        "full-layer cache lengths disagree ({existing} vs {len})"
+                    );
+                } else {
+                    context_len = Some(len);
+                }
+            }
+            tensors.insert(format!("layer{layer_idx}.key"), key);
+            tensors.insert(format!("layer{layer_idx}.value"), value);
+        }
+        let Some(context_len) = context_len else {
+            snafu::whatever!("nothing to snapshot (empty caches)");
+        };
+        let cpu = candle_core::Device::Cpu;
+        tensors.insert(
+            String::from("meta"),
+            candle_core::Tensor::new(&[1u32, context_len as u32], &cpu)?,
+        );
+        candle_core::safetensors::save(&tensors, path)?;
+        Ok(context_len)
+    }
+
+    /// E2: load a snapshot back into the caches, replacing their state.
+    /// Returns the restored context length (the offset to continue at).
+    pub(crate) fn restore_caches(&mut self, path: &Path) -> AlmostResult<usize> {
+        let tensors = candle_core::safetensors::load(path, &self.device)?;
+        let Some(meta) = tensors.get("meta") else {
+            snafu::whatever!("snapshot carries no meta tensor");
+        };
+        let meta: Vec<u32> = meta.to_device(&candle_core::Device::Cpu)?.to_vec1()?;
+        snafu::ensure_whatever!(
+            meta.len() == 2 && meta[0] == 1,
+            "unsupported snapshot meta {meta:?}"
+        );
+        let context_len = meta[1] as usize;
+        for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
+            let key = tensors.get(&format!("layer{layer_idx}.key"));
+            let value = tensors.get(&format!("layer{layer_idx}.value"));
+            let (Some(key), Some(value)) = (key, value) else {
+                snafu::whatever!("snapshot is missing layer {layer_idx}");
+            };
+            snafu::ensure_whatever!(
+                key.dtype() == self.dtype,
+                "snapshot dtype {:?} does not match the model dtype {:?}",
+                key.dtype(),
+                self.dtype
+            );
+            layer.self_attn.import_cache(key, value)?;
+        }
+        Ok(context_len)
+    }
+
     /// Rewind the caches to `accepted` consumed tokens out of the
     /// marked verification span.
     pub(crate) fn cache_rollback(&mut self, mark: &CacheMark, accepted: usize) -> AlmostResult<()> {
@@ -885,6 +950,88 @@ impl Attention {
         self.ring_head = window - missing;
         self.ring_len = keep_target;
         Ok(())
+    }
+
+    /// The layer's live cache content as linear cpu tensors (k, v) for
+    /// an E2 snapshot; None when the cache is empty.
+    fn export_cache(&self) -> AlmostResult<Option<(candle_core::Tensor, candle_core::Tensor)>> {
+        let cpu = candle_core::Device::Cpu;
+        match self.sliding_window {
+            None => {
+                if self.full_cache_len == 0 {
+                    return Ok(None);
+                }
+                let (Some(key_buffer), Some(value_buffer)) = (&self.full_key_buffer, &self.full_value_buffer)
+                else {
+                    snafu::whatever!("full-layer buffers absent with nonzero length");
+                };
+                Ok(Some((
+                    key_buffer.narrow(2, 0, self.full_cache_len)?.to_device(&cpu)?,
+                    value_buffer.narrow(2, 0, self.full_cache_len)?.to_device(&cpu)?,
+                )))
+            }
+            Some(window) => {
+                if self.ring_len == 0 {
+                    return Ok(None);
+                }
+                let (Some(ring_key), Some(ring_value)) = (&self.ring_key, &self.ring_value) else {
+                    snafu::whatever!("sliding ring absent with nonzero occupancy");
+                };
+                // Normalize to the between-forwards form: at most w-1
+                // entries (a post-decode ring carries the extra oldest
+                // slot that the next forward would drop anyway).
+                let need = self.ring_len.min(window - 1);
+                Ok(Some((
+                    ring_linear_tail(ring_key, self.ring_head, self.ring_len, need)?.to_device(&cpu)?,
+                    ring_linear_tail(ring_value, self.ring_head, self.ring_len, need)?.to_device(&cpu)?,
+                )))
+            }
+        }
+    }
+
+    /// Load a snapshot's linear (k, v) back into this layer's cache
+    /// (buffers re-reserved as needed; rings land linear, head 0).
+    fn import_cache(
+        &mut self,
+        key: &candle_core::Tensor,
+        value: &candle_core::Tensor,
+    ) -> AlmostResult<()> {
+        let (b_size, heads, len, head_dim) = key.dims4()?;
+        snafu::ensure_whatever!(
+            heads == self.num_heads && head_dim == self.head_dim,
+            "snapshot layer shape ({heads}, {head_dim}) does not match the model ({}, {})",
+            self.num_heads,
+            self.head_dim
+        );
+        match self.sliding_window {
+            None => {
+                self.full_cache_len = 0;
+                if len > 0 {
+                    let (key_device, value_device) = self.full_append(key, value)?;
+                    let _ = (key_device, value_device);
+                }
+                Ok(())
+            }
+            Some(window) => {
+                snafu::ensure_whatever!(
+                    len < window,
+                    "snapshot ring content {len} exceeds window-1 {}",
+                    window - 1
+                );
+                self.ring_head = 0;
+                self.ring_len = 0;
+                if len > 0 {
+                    self.ensure_ring(b_size, window, key.dtype(), key.device())?;
+                    let (Some(ring_key), Some(ring_value)) = (&self.ring_key, &self.ring_value) else {
+                        snafu::whatever!("sliding ring absent after ensure");
+                    };
+                    ring_key.slice_set(&key.contiguous()?, 2, 0)?;
+                    ring_value.slice_set(&value.contiguous()?, 2, 0)?;
+                    self.ring_len = len;
+                }
+                Ok(())
+            }
+        }
     }
 
     fn cached_len(&self) -> usize {
