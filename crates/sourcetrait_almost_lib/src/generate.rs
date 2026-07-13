@@ -127,9 +127,13 @@ impl Model {
         let mut dump_rows: Vec<candle_core::Tensor> = Vec::new();
 
         self.clear_kv_cache();
+        // The prompt length is known here: fine-grain reserve so the
+        // context tail does not pay FULL_CACHE_STEP rounding; the margin
+        // covers a short decode and longer decodes grow coarsely as before.
+        self.reserve_full_caches(prompt_ids.len() + consts::RESERVE_DECODE_MARGIN)?;
         // Chunked prefill: logit-exact vs a single forward. The eager
-        // chunk bounds the attention transient; the flash chunk is sized
-        // for throughput (consts).
+        // chunk bounds the attention transient; the flash chunk trades
+        // throughput against the 32K peak (consts).
         let prefill_chunk = if self.flash_enabled() {
             consts::PREFILL_CHUNK_FLASH
         } else {

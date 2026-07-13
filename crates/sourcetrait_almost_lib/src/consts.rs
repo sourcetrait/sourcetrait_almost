@@ -18,7 +18,15 @@ pub const PREFILL_CHUNK_EAGER: usize = 128;
 
 /// Flash prompt-prefill chunk. Fused attention materializes no score
 /// matrix, so the transient bound disappears and the chunk is sized for
-/// throughput instead: each chunk re-streams the full weights, so bigger
-/// chunks amortize weight traffic until per-chunk attention cost
-/// dominates (swept on Tier A at 8K/32K).
+/// throughput: each chunk re-streams the full weights, so bigger chunks
+/// amortize weight traffic (swept on Tier A at 8K/32K). The 32K peak is
+/// NOT chunk-bound in this regime - 1024 was measured to buy only
+/// ~80 MiB for -12%/-18% prefill at 32K/8K; 512 is the emergency
+/// contract knob (~-640 MiB at ~-18% 32K prefill) should A2's KV
+/// reduction ever be unavailable.
 pub const PREFILL_CHUNK_FLASH: usize = 2048;
+
+/// Decode margin generate() adds to the known prompt length when
+/// pre-reserving full-layer cache capacity; a longer decode grows
+/// coarsely past the reserve.
+pub const RESERVE_DECODE_MARGIN: usize = 256;

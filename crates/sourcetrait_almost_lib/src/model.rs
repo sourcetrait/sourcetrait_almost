@@ -258,6 +258,19 @@ impl Model {
         }
     }
 
+    /// Pre-reserve full-layer cache capacity for a known upcoming context
+    /// length, at the fine grain (FULL_CACHE_RESERVE_GRAIN): kills the
+    /// up-to-a-step tail overshoot of append-time growth without
+    /// re-introducing per-chunk reallocation. Growth past the reserve
+    /// keeps the coarse FULL_CACHE_STEP behavior.
+    pub(crate) fn reserve_full_caches(&mut self, total_len: usize) -> AlmostResult<()> {
+        let device = self.device.clone();
+        for layer in self.layers.iter_mut() {
+            layer.self_attn.reserve_full(total_len, self.dtype, &device)?;
+        }
+        Ok(())
+    }
+
     /// Largest sliding-layer ring occupancy currently held; the T4
     /// invariant pins it at window-1 between prefill chunks and window
     /// after a decode step (the current token's slot included).
@@ -491,6 +504,12 @@ impl DecoderLayer {
 /// what OOMs an otherwise-fitting 32K run on Tier A.
 const FULL_CACHE_STEP: usize = 8192;
 
+/// Fine grain for a known-length reserve (generate's prompt prefill,
+/// snapshot restore): tapers the tail overshoot that FULL_CACHE_STEP
+/// rounding leaves (up to a full step - ~1 GiB across the 8 full layers
+/// at bf16) while append-time growth stays coarse.
+const FULL_CACHE_RESERVE_GRAIN: usize = 1024;
+
 /// D6 flash dispatch: (b, seq, heads, head_dim) operands, softmax computed
 /// in-kernel (f32 accumulators), causal masking bottom-right aligned so a
 /// q block that is the tail of kv gets absolute-position causality (the
@@ -618,9 +637,57 @@ impl Attention {
         })
     }
 
+    /// Grow the full-layer buffers to `capacity` slots, preserving content;
+    /// no-op when they already hold enough. Callers pick the rounding:
+    /// append growth is coarse (FULL_CACHE_STEP), known-length reserves are
+    /// fine (FULL_CACHE_RESERVE_GRAIN).
+    fn full_grow(
+        &mut self,
+        b_size: usize,
+        capacity: usize,
+        dtype: candle_core::DType,
+        device: &candle_core::Device,
+    ) -> AlmostResult<()> {
+        let current = match &self.full_key_buffer {
+            Some(buffer) => buffer.dims()[2],
+            None => 0,
+        };
+        if capacity <= current {
+            return Ok(());
+        }
+        let shape = (b_size, self.num_heads, capacity, self.head_dim);
+        let new_key = candle_core::Tensor::zeros(shape, dtype, device)?;
+        let new_value = candle_core::Tensor::zeros(shape, dtype, device)?;
+        if self.full_cache_len > 0
+            && let (Some(old_key), Some(old_value)) = (&self.full_key_buffer, &self.full_value_buffer)
+        {
+            new_key.slice_set(&old_key.narrow(2, 0, self.full_cache_len)?.contiguous()?, 2, 0)?;
+            new_value.slice_set(&old_value.narrow(2, 0, self.full_cache_len)?.contiguous()?, 2, 0)?;
+        }
+        self.full_key_buffer = Some(new_key);
+        self.full_value_buffer = Some(new_value);
+        Ok(())
+    }
+
+    /// Known-length capacity reserve at the fine grain; no-op on sliding
+    /// layers. Batch-1 shape by design (the generate() surface is batch-1).
+    fn reserve_full(
+        &mut self,
+        total_len: usize,
+        dtype: candle_core::DType,
+        device: &candle_core::Device,
+    ) -> AlmostResult<()> {
+        if self.sliding_window.is_some() {
+            return Ok(());
+        }
+        let capacity = total_len.div_ceil(FULL_CACHE_RESERVE_GRAIN) * FULL_CACHE_RESERVE_GRAIN;
+        self.full_grow(1, capacity, dtype, device)
+    }
+
     /// Append rotated k/v into the capacity-stepped full-layer buffers and
     /// return the live (b, h, len, dim) views. Append-only cat semantics;
-    /// only the allocation granularity is coarse (FULL_CACHE_STEP).
+    /// only the allocation granularity is coarse (FULL_CACHE_STEP), minus
+    /// whatever a known-length reserve already provided.
     fn full_append(
         &mut self,
         key_states: &candle_core::Tensor,
@@ -630,7 +697,7 @@ impl Attention {
         // already, v arrives as a transposed view.
         let key_states = key_states.contiguous()?;
         let value_states = value_states.contiguous()?;
-        let (b_size, heads, seq_len, head_dim) = key_states.dims4()?;
+        let (b_size, _heads, seq_len, _head_dim) = key_states.dims4()?;
         let needed = self.full_cache_len + seq_len;
         let capacity = match &self.full_key_buffer {
             Some(buffer) => buffer.dims()[2],
@@ -638,17 +705,7 @@ impl Attention {
         };
         if needed > capacity {
             let new_capacity = needed.div_ceil(FULL_CACHE_STEP) * FULL_CACHE_STEP;
-            let shape = (b_size, heads, new_capacity, head_dim);
-            let new_key = candle_core::Tensor::zeros(shape, key_states.dtype(), key_states.device())?;
-            let new_value = candle_core::Tensor::zeros(shape, key_states.dtype(), key_states.device())?;
-            if self.full_cache_len > 0
-                && let (Some(old_key), Some(old_value)) = (&self.full_key_buffer, &self.full_value_buffer)
-            {
-                new_key.slice_set(&old_key.narrow(2, 0, self.full_cache_len)?.contiguous()?, 2, 0)?;
-                new_value.slice_set(&old_value.narrow(2, 0, self.full_cache_len)?.contiguous()?, 2, 0)?;
-            }
-            self.full_key_buffer = Some(new_key);
-            self.full_value_buffer = Some(new_value);
+            self.full_grow(b_size, new_capacity, key_states.dtype(), key_states.device())?;
         }
         let (Some(key_buffer), Some(value_buffer)) = (&self.full_key_buffer, &self.full_value_buffer) else {
             snafu::whatever!("full-layer cache buffers absent after reserve");
@@ -1007,6 +1064,11 @@ impl Attention {
             None => {
                 self.full_cache_len = 0;
                 if len > 0 {
+                    // Restored length is known: fine-grain reserve, so the
+                    // append below does not pay FULL_CACHE_STEP rounding.
+                    let capacity =
+                        len.div_ceil(FULL_CACHE_RESERVE_GRAIN) * FULL_CACHE_RESERVE_GRAIN;
+                    self.full_grow(b_size, capacity, key.dtype(), key.device())?;
                     let (key_device, value_device) = self.full_append(key, value)?;
                     let _ = (key_device, value_device);
                 }
