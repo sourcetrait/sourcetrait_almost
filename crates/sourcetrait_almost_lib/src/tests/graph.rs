@@ -1,4 +1,4 @@
-use crate::graph::SlotWrite;
+use crate::graph::{bucket_for, pad_mask_values, SlotWrite, BUCKET_GRAIN};
 
 /// The E4 building-block contract: a raw-launched slot_write at a
 /// device-resident index lands exactly where a host-offset slice_set
@@ -73,4 +73,21 @@ fn slot_write_follows_restaged_index() {
         .unwrap();
     // Per head: slot 0 sums to 8 (ones), slot 3 sums to 16 (twos).
     assert_eq!(sums, vec![8.0, 0.0, 0.0, 16.0, 8.0, 0.0, 0.0, 16.0]);
+}
+
+#[test]
+fn bucket_math_rounds_up_by_grain() {
+    assert_eq!(bucket_for(0), BUCKET_GRAIN);
+    assert_eq!(bucket_for(1), BUCKET_GRAIN);
+    assert_eq!(bucket_for(BUCKET_GRAIN), BUCKET_GRAIN);
+    assert_eq!(bucket_for(BUCKET_GRAIN + 1), 2 * BUCKET_GRAIN);
+    assert_eq!(bucket_for(32769), 34816);
+}
+
+#[test]
+fn pad_mask_hides_exactly_the_tail() {
+    let values = pad_mask_values(8, 3);
+    assert_eq!(values.len(), 8);
+    assert!(values[..3].iter().all(|v| *v == 0.0));
+    assert!(values[3..].iter().all(|v| *v == f32::NEG_INFINITY));
 }

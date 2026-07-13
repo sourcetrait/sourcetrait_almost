@@ -160,6 +160,10 @@ pub struct Model {
     device: candle_core::Device,
     dtype: candle_core::DType,
     settings: Settings,
+    /// E4 staged graph-mode decode state: armed by generate() after
+    /// prefill + compaction, dropped on clear/restore epochs.
+    #[cfg(feature = "cuda")]
+    graph_stage: Option<graph::DecodeStage>,
 }
 
 impl Model {
@@ -261,6 +265,8 @@ impl Model {
             device: vb_m.device().clone(),
             dtype: vb.dtype(),
             settings,
+            #[cfg(feature = "cuda")]
+            graph_stage: None,
         })
     }
 
@@ -307,6 +313,12 @@ impl Model {
     }
 
     pub fn clear_kv_cache(&mut self) {
+        // A cleared cache invalidates the staged lengths/masks: an E4
+        // epoch that disarms; generate() re-arms after its prefill.
+        #[cfg(feature = "cuda")]
+        {
+            self.graph_stage = None;
+        }
         for layer in self.layers.iter_mut() {
             layer.clear_kv_cache();
         }
@@ -414,6 +426,11 @@ impl Model {
             self.settings.eviction.is_none(),
             "snapshots under eviction are not supported yet (scores are not persisted)"
         );
+        // Restored lengths invalidate the staged state: an E4 epoch.
+        #[cfg(feature = "cuda")]
+        {
+            self.graph_stage = None;
+        }
         let tensors = candle_core::safetensors::load(path, &self.device)?;
         let Some(meta) = tensors.get("meta") else {
             snafu::whatever!("snapshot carries no meta tensor");
@@ -459,6 +476,213 @@ impl Model {
             }
         }
         Ok(())
+    }
+
+    /// E4: arm the staged graph-mode decode path (generate() calls
+    /// this after prefill + stage-2 compaction). Grows full-layer
+    /// buffers once to the run's bucket ceiling - so later bucket
+    /// crossings never reallocate under a (phase C) captured graph -
+    /// then builds the staged buffers from the live cache state.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn arm_graph_decode(&mut self, expected_total: usize) -> AlmostResult<()> {
+        snafu::ensure_whatever!(
+            self.device.is_cuda(),
+            "graph-mode decode requires a cuda device"
+        );
+        // Uniform per-type state is what lets one staged slot/mask pair
+        // serve every layer of its type.
+        let mut full_len: Option<usize> = None;
+        let mut ring_state: Option<(usize, usize)> = None;
+        for layer in &self.layers {
+            match layer.layer_type {
+                LayerType::Full => {
+                    let len = layer.self_attn.full_cache_len;
+                    if let Some(existing) = full_len {
+                        snafu::ensure_whatever!(
+                            existing == len,
+                            "full-layer cache lengths disagree ({existing} vs {len})"
+                        );
+                    } else {
+                        full_len = Some(len);
+                    }
+                }
+                LayerType::Sliding => {
+                    let state = (layer.self_attn.ring_len, layer.self_attn.ring_head);
+                    if let Some(existing) = ring_state {
+                        snafu::ensure_whatever!(
+                            existing == state,
+                            "sliding ring states disagree ({existing:?} vs {state:?})"
+                        );
+                    } else {
+                        ring_state = Some(state);
+                    }
+                }
+            }
+        }
+        let Some(full_len) = full_len else {
+            snafu::whatever!("graph arming found no full-attention layers");
+        };
+        let Some((ring_len, ring_head)) = ring_state else {
+            snafu::whatever!("graph arming found no sliding layers");
+        };
+        snafu::ensure_whatever!(
+            ring_head == 0 || ring_len == self.sliding_window,
+            "graph arming expects head-0 linear rings until saturation (head {ring_head}, len {ring_len})"
+        );
+        // The run ceiling: the largest valid width decode can reach -
+        // eviction bounds the store at decode cap + slack + 1; exact
+        // runs bound at the position ceiling.
+        let ceiling = match &self.settings.eviction {
+            Some(eviction) => {
+                full_len.max(eviction.decode_phase_cap() + evict::DECODE_EVICT_SLACK + 1)
+            }
+            None => expected_total.min(self.max_position_embeddings),
+        };
+        let capacity = graph::bucket_for(ceiling.max(full_len + 1));
+        let device = self.device.clone();
+        for layer in self.layers.iter_mut() {
+            if layer.layer_type == LayerType::Full {
+                layer.self_attn.full_grow(1, capacity, self.dtype, &device)?;
+            }
+        }
+        let heads = self.layers[0].self_attn.num_heads;
+        let vocab = self.embed_tokens.embeddings().dims()[0];
+        self.graph_stage = Some(graph::DecodeStage::new(
+            full_len,
+            ring_len,
+            self.sliding_window,
+            heads,
+            vocab,
+            self.dtype,
+            &device,
+        )?);
+        Ok(())
+    }
+
+    /// Non-cuda builds carry no graph path; arming is a hard error
+    /// (Settings.graph is already rejected at Model::new).
+    #[cfg(not(feature = "cuda"))]
+    pub(crate) fn arm_graph_decode(&mut self, _expected_total: usize) -> AlmostResult<()> {
+        snafu::whatever!("this build carries no cuda support (decode graphs need --features cuda)")
+    }
+
+    /// Whether the staged graph-mode decode path is armed.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn graph_armed(&self) -> bool {
+        self.graph_stage.is_some()
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    pub(crate) fn graph_armed(&self) -> bool {
+        false
+    }
+
+    /// The uniform per-type cache state graph staging derives from
+    /// (uniformity asserted at arming, preserved by the lockstep
+    /// advances in graph_decode_step).
+    #[cfg(feature = "cuda")]
+    fn graph_type_state(&self) -> AlmostResult<(usize, usize, usize)> {
+        let full = self
+            .layers
+            .iter()
+            .find(|layer| layer.layer_type == LayerType::Full);
+        let sliding = self
+            .layers
+            .iter()
+            .find(|layer| layer.layer_type == LayerType::Sliding);
+        let (Some(full), Some(sliding)) = (full, sliding) else {
+            snafu::whatever!("graph decode expects both layer types present");
+        };
+        Ok((
+            full.self_attn.full_cache_len,
+            sliding.self_attn.ring_len,
+            sliding.self_attn.ring_head,
+        ))
+    }
+
+    /// E4 phase A: one graph-mode decode step as ordinary (uncaptured)
+    /// ops - the exact op sequence phase C captures. Epoch work
+    /// (eviction compaction, bucket crossings) runs here as classic
+    /// host-driven ops, outside the would-be captured region. Returns
+    /// the persistent (1, vocab) f32 output buffer, valid until the
+    /// next step overwrites it.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn graph_decode_step(
+        &mut self,
+        token: u32,
+        offset: usize,
+    ) -> AlmostResult<candle_core::Tensor> {
+        snafu::ensure_whatever!(
+            offset < self.max_position_embeddings,
+            "context length {} exceeds max_position_embeddings {}",
+            offset + 1,
+            self.max_position_embeddings
+        );
+        // Eviction overflow is an EPOCH: classic compaction between
+        // steps, never part of the captured sequence.
+        if let Some(eviction) = self.settings.eviction {
+            let cap = eviction.decode_phase_cap();
+            let (full_len, _, _) = self.graph_type_state()?;
+            if full_len > cap.saturating_add(evict::DECODE_EVICT_SLACK) {
+                for layer in self.layers.iter_mut() {
+                    if layer.self_attn.eviction.is_some() {
+                        layer.self_attn.evict_to(
+                            cap,
+                            eviction,
+                            evict::EvictRanking::NormalizedCumulative,
+                        )?;
+                    }
+                }
+            }
+        }
+        let (full_len, ring_len, ring_head) = self.graph_type_state()?;
+        let mut stage = match self.graph_stage.take() {
+            Some(stage) => stage,
+            None => snafu::whatever!("graph decode step without an armed stage"),
+        };
+        stage.ensure_buckets(full_len, ring_len)?;
+        stage.stage_step(token, offset, full_len, ring_len, ring_head)?;
+
+        let mut xs = self.embed_tokens.forward(&stage.ids)?;
+        for layer in self.layers.iter_mut() {
+            xs = layer.forward_graph(&xs, &stage)?;
+        }
+        let logits = xs
+            .apply(&self.norm)?
+            .apply(&self.lm_head)?
+            .squeeze(1)?
+            .to_dtype(candle_core::DType::F32)?;
+        stage.logits_out.slice_set(&logits, 0, 0)?;
+
+        // Host bookkeeping advances in lockstep with the device writes.
+        let window = self.sliding_window;
+        for layer in self.layers.iter_mut() {
+            let attn = &mut layer.self_attn;
+            match layer.layer_type {
+                LayerType::Full => attn.full_cache_len += 1,
+                LayerType::Sliding => {
+                    if attn.ring_len < window {
+                        attn.ring_len += 1;
+                    } else {
+                        attn.ring_head = (attn.ring_head + 1) % window;
+                    }
+                }
+            }
+        }
+        let out = stage.logits_out.clone();
+        self.graph_stage = Some(stage);
+        Ok(out)
+    }
+
+    /// Non-cuda builds carry no graph path (never armed, never
+    /// reached).
+    #[cfg(not(feature = "cuda"))]
+    pub(crate) fn graph_decode_step(
+        &mut self,
+        _token: u32,
+        _offset: usize,
+    ) -> AlmostResult<candle_core::Tensor> {
+        snafu::whatever!("this build carries no cuda support (decode graphs need --features cuda)")
     }
 
     /// Drain the observation accumulators (attn-profile builds, armed
@@ -621,6 +845,25 @@ impl DecoderLayer {
 
     fn clear_kv_cache(&mut self) {
         self.self_attn.clear_kv_cache();
+    }
+
+    /// The graph-shaped step: post-norm block around the staged
+    /// attention forward (norm/mlp calls identical to the classic
+    /// path).
+    #[cfg(feature = "cuda")]
+    fn forward_graph(
+        &mut self,
+        xs: &candle_core::Tensor,
+        stage: &graph::DecodeStage,
+    ) -> AlmostResult<candle_core::Tensor> {
+        let residual = xs;
+        let xs = self.self_attn.forward_graph(xs, stage)?;
+        let xs = self.post_attention_layernorm.forward(&xs)?;
+        let xs = (xs + residual)?;
+        let residual = &xs;
+        let mlp_out = self.mlp.forward(&xs)?;
+        let mlp_out = self.post_feedforward_layernorm.forward(&mlp_out)?;
+        Ok((residual + mlp_out)?)
     }
 }
 
@@ -1011,6 +1254,133 @@ impl Attention {
         Ok(attn_output
             .transpose(1, 2)?
             .reshape((b_size, q_len, self.hidden_size))?
+            .apply(&self.o_proj)?)
+    }
+
+    /// E4 graph-shaped decode forward (q = 1): the classic step with
+    /// every per-step dynamic read from staged buffers - rope rows by
+    /// index_select on the staged position, k/v appended by slot_write
+    /// at the staged slot, attention over a static bucket narrow with
+    /// the additive pad mask (pad columns carry exactly zero softmax
+    /// mass). Same math as classic over the valid columns; only the
+    /// f32 reduction grouping differs (padded width), hence the
+    /// quick-bar (not bitwise) gate.
+    #[cfg(feature = "cuda")]
+    fn forward_graph(
+        &mut self,
+        xs: &candle_core::Tensor,
+        stage: &graph::DecodeStage,
+    ) -> AlmostResult<candle_core::Tensor> {
+        let (b_size, q_len, _) = xs.dims3()?;
+        snafu::ensure_whatever!(
+            b_size == 1 && q_len == 1,
+            "graph decode is a batch-1 single-token path (got batch {b_size}, q {q_len})"
+        );
+        let dtype = xs.dtype();
+
+        let query_states = self.q_norm.forward(&self.q_proj.forward(xs)?)?;
+        let key_states = self.k_norm.forward(&self.k_proj.forward(xs)?)?;
+        let value_states = self.v_proj.forward(xs)?;
+        let query_states = query_states
+            .reshape((1, 1, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?;
+        let key_states = key_states
+            .reshape((1, 1, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?;
+        let value_states = value_states
+            .reshape((1, 1, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?;
+        let (query_states, key_states) =
+            self.rotary
+                .apply_indexed(&query_states, &key_states, &stage.position)?;
+        let key_states = key_states.contiguous()?;
+        let value_states = value_states.contiguous()?;
+
+        let write = graph::SlotWrite { dtype };
+        let (keys, values, mask) = match self.sliding_window {
+            Some(_) => {
+                let (Some(ring_key), Some(ring_value)) = (&self.ring_key, &self.ring_value)
+                else {
+                    snafu::whatever!("graph decode reached an unallocated sliding ring");
+                };
+                ring_key.inplace_op3(&key_states, &stage.ring_slot, &write)?;
+                ring_value.inplace_op3(&value_states, &stage.ring_slot, &write)?;
+                (
+                    ring_key.narrow(2, 0, stage.ring_bucket)?,
+                    ring_value.narrow(2, 0, stage.ring_bucket)?,
+                    &stage.ring_mask,
+                )
+            }
+            None => {
+                let (Some(key_buffer), Some(value_buffer)) =
+                    (&self.full_key_buffer, &self.full_value_buffer)
+                else {
+                    snafu::whatever!("graph decode reached unallocated full-layer buffers");
+                };
+                key_buffer.inplace_op3(&key_states, &stage.full_slot, &write)?;
+                value_buffer.inplace_op3(&value_states, &stage.full_slot, &write)?;
+                if self.eviction.is_some() {
+                    // The appended slot starts unscored and unobserved:
+                    // reset its score state in-graph (the classic
+                    // path's append-time zeroing), so pad-column count
+                    // bumps never leak into a reused slot.
+                    let (Some(scores), Some(last_mass), Some(counts)) =
+                        (&self.full_scores, &self.full_last_mass, &self.full_counts)
+                    else {
+                        snafu::whatever!("eviction armed but score buffers are absent");
+                    };
+                    let zero_write = graph::SlotWrite {
+                        dtype: candle_core::DType::F32,
+                    };
+                    for aux in [scores, last_mass, counts] {
+                        let capacity = aux.dims()[2];
+                        aux.reshape((1, self.num_heads, capacity, 1))?.inplace_op3(
+                            &stage.score_zero,
+                            &stage.full_slot,
+                            &zero_write,
+                        )?;
+                    }
+                }
+                (
+                    key_buffer.narrow(2, 0, stage.full_bucket)?,
+                    value_buffer.narrow(2, 0, stage.full_bucket)?,
+                    &stage.full_mask,
+                )
+            }
+        };
+
+        let scale = 1f64 / f64::sqrt(self.head_dim as f64);
+        let attn_weights = (query_states.matmul(&keys.transpose(2, 3)?)? * scale)?;
+        let attn_weights = attn_weights.broadcast_add(mask)?;
+        let weights_f32 = if dtype == candle_core::DType::F32 {
+            candle_nn::ops::softmax_last_dim(&attn_weights)?
+        } else {
+            candle_nn::ops::softmax_last_dim(&attn_weights.to_dtype(candle_core::DType::F32)?)?
+        };
+        if self.sliding_window.is_none() && self.eviction.is_some() {
+            // Bucket-static decode scoring: pad columns carry exactly
+            // zero mass, so the running signals stay classic-equal.
+            let (Some(scores), Some(last_mass), Some(counts)) =
+                (&self.full_scores, &self.full_last_mass, &self.full_counts)
+            else {
+                snafu::whatever!("eviction armed but score buffers are absent");
+            };
+            let mass = weights_f32.sum(2)?;
+            let updated = (scores.narrow(2, 0, stage.full_bucket)? + &mass)?;
+            scores.slice_set(&updated, 2, 0)?;
+            last_mass.slice_set(&mass.contiguous()?, 2, 0)?;
+            let bumped = (counts.narrow(2, 0, stage.full_bucket)? + 1.0)?;
+            counts.slice_set(&bumped, 2, 0)?;
+        }
+        let attn_weights = if dtype == candle_core::DType::F32 {
+            weights_f32
+        } else {
+            weights_f32.to_dtype(dtype)?
+        };
+        let attn_output = attn_weights.matmul(&values)?;
+        Ok(attn_output
+            .transpose(1, 2)?
+            .reshape((1, 1, self.hidden_size))?
             .apply(&self.o_proj)?)
     }
 

@@ -58,6 +58,11 @@ pub(crate) enum Command {
         /// incremental-decode check
         #[arg(long, default_value_t = 16)]
         decode_steps: usize,
+        /// Run the E4 graph-decode gate instead: staged graph-mode
+        /// decode vs classic on the same ids at 2K/32K, plus
+        /// self-determinism (cuda-only, exact config, self-arming)
+        #[arg(long, conflicts_with = "needle")]
+        graph: bool,
         /// Run the retrieval needle/passkey battery instead (A2 phase 1:
         /// depth x length passkey grid, single + multi, exact match)
         #[arg(long)]

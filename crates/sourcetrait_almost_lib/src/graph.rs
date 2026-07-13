@@ -1,7 +1,3 @@
-// Wired into the decode path by E4 phase A (next slice); until then the
-// building blocks are exercised by their gpu tests only.
-#![allow(dead_code)]
-
 use crate::*;
 
 /// E4 device-side building blocks. The decode graph's per-step dynamics
@@ -196,5 +192,189 @@ impl candle_core::InplaceOp3 for SlotWrite {
             }
             _ => unreachable!(),
         }
+    }
+}
+
+/// Bucket grain for graph-mode attention widths: the kv narrows are
+/// static per graph, so valid widths round up to this and the pad mask
+/// hides the tail - at most one grain of padded compute, and a small
+/// graph-cache population for phase C.
+pub(crate) const BUCKET_GRAIN: usize = 2048;
+
+/// Smallest bucket covering `len` valid entries (at least one grain).
+pub(crate) fn bucket_for(len: usize) -> usize {
+    len.max(1).div_ceil(BUCKET_GRAIN) * BUCKET_GRAIN
+}
+
+/// Additive pad-mask values: 0.0 below `valid`, -inf across the
+/// bucket's pad tail (post-softmax pad mass is exactly zero).
+pub(crate) fn pad_mask_values(bucket: usize, valid: usize) -> Vec<f32> {
+    (0..bucket)
+        .map(|column| if column < valid { 0.0 } else { f32::NEG_INFINITY })
+        .collect()
+}
+
+/// E4 staged decode state: the persistent device buffers every
+/// per-step dynamic of the graph-mode decode reads (token id, rope
+/// position, append slots, pad masks, the logits output). The host
+/// stages a few bytes before each step; the op sequence reads values,
+/// never baked host constants - the same sequence phase C captures.
+/// Armed by Model::arm_graph_decode after prefill; dropped on
+/// clear/restore epochs.
+#[derive(Debug, Clone)]
+pub(crate) struct DecodeStage {
+    /// (1, 1) u32: the token this step feeds (embedding index_select).
+    pub(crate) ids: candle_core::Tensor,
+    /// (1,) u32: the token's absolute rope position.
+    pub(crate) position: candle_core::Tensor,
+    /// (1,) u32: full-layer append slot (= the live full length).
+    pub(crate) full_slot: candle_core::Tensor,
+    /// (1,) u32: sliding-layer ring append slot.
+    pub(crate) ring_slot: candle_core::Tensor,
+    /// (1, 1, 1, full_bucket) additive 0/-inf, model dtype.
+    pub(crate) full_mask: candle_core::Tensor,
+    /// (1, 1, 1, ring_bucket) additive 0/-inf, model dtype.
+    pub(crate) ring_mask: candle_core::Tensor,
+    /// (1, vocab) f32: the step's logits, written in-graph.
+    pub(crate) logits_out: candle_core::Tensor,
+    /// (1, 1, 1, 1) model-dtype 0.0: the mask-enable write source.
+    mask_zero: candle_core::Tensor,
+    /// (1, heads, 1, 1) f32 zeros: the score-slot reset source.
+    pub(crate) score_zero: candle_core::Tensor,
+    pub(crate) full_bucket: usize,
+    pub(crate) ring_bucket: usize,
+    window: usize,
+    dtype: candle_core::DType,
+    device: candle_core::Device,
+}
+
+impl DecodeStage {
+    /// Build from the live post-prefill cache state (`full_len` /
+    /// `ring_len` valid entries per layer type, rings head-0 linear
+    /// unless saturated).
+    pub(crate) fn new(
+        full_len: usize,
+        ring_len: usize,
+        window: usize,
+        heads: usize,
+        vocab: usize,
+        dtype: candle_core::DType,
+        device: &candle_core::Device,
+    ) -> AlmostResult<Self> {
+        let full_bucket = bucket_for(full_len + 1);
+        let ring_bucket = bucket_for((ring_len + 1).min(window)).min(window);
+        let full_mask = Self::mask_tensor(full_bucket, full_len, dtype, device)?;
+        let ring_mask = Self::mask_tensor(ring_bucket, ring_len, dtype, device)?;
+        Ok(Self {
+            ids: candle_core::Tensor::zeros((1, 1), candle_core::DType::U32, device)?,
+            position: candle_core::Tensor::zeros((1,), candle_core::DType::U32, device)?,
+            full_slot: candle_core::Tensor::zeros((1,), candle_core::DType::U32, device)?,
+            ring_slot: candle_core::Tensor::zeros((1,), candle_core::DType::U32, device)?,
+            full_mask,
+            ring_mask,
+            logits_out: candle_core::Tensor::zeros(
+                (1, vocab),
+                candle_core::DType::F32,
+                device,
+            )?,
+            mask_zero: candle_core::Tensor::zeros((1, 1, 1, 1), dtype, device)?,
+            score_zero: candle_core::Tensor::zeros(
+                (1, heads, 1, 1),
+                candle_core::DType::F32,
+                device,
+            )?,
+            full_bucket,
+            ring_bucket,
+            window,
+            dtype,
+            device: device.clone(),
+        })
+    }
+
+    fn mask_tensor(
+        bucket: usize,
+        valid: usize,
+        dtype: candle_core::DType,
+        device: &candle_core::Device,
+    ) -> AlmostResult<candle_core::Tensor> {
+        let values = pad_mask_values(bucket, valid);
+        Ok(candle_core::Tensor::from_vec(values, (1, 1, 1, bucket), device)?.to_dtype(dtype)?)
+    }
+
+    /// Re-derive both buckets for the widths the NEXT append reaches
+    /// and rebuild a mask when its bucket changes (a crossing, or a
+    /// store shrunk by an eviction epoch). Uncaptured host work; phase
+    /// C also switches graphs here.
+    pub(crate) fn ensure_buckets(&mut self, full_len: usize, ring_len: usize) -> AlmostResult<()> {
+        let full_bucket = bucket_for(full_len + 1);
+        if full_bucket != self.full_bucket {
+            self.full_bucket = full_bucket;
+            self.full_mask = Self::mask_tensor(full_bucket, full_len, self.dtype, &self.device)?;
+        }
+        let ring_bucket = bucket_for((ring_len + 1).min(self.window)).min(self.window);
+        if ring_bucket != self.ring_bucket {
+            self.ring_bucket = ring_bucket;
+            self.ring_mask = Self::mask_tensor(
+                ring_bucket,
+                ring_len.min(self.window),
+                self.dtype,
+                &self.device,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Stage one step: the token, its position, both append slots, and
+    /// the newly-valid mask columns. Tiny H2D writes outside the
+    /// (future) captured region; state-free - everything derives from
+    /// the live lengths, and re-enabling an enabled column is a no-op.
+    pub(crate) fn stage_step(
+        &self,
+        token: u32,
+        offset: usize,
+        full_len: usize,
+        ring_len: usize,
+        ring_head: usize,
+    ) -> AlmostResult<()> {
+        self.ids
+            .slice_set(&candle_core::Tensor::new(&[[token]], &self.device)?, 0, 0)?;
+        self.position.slice_set(
+            &candle_core::Tensor::new(&[offset as u32], &self.device)?,
+            0,
+            0,
+        )?;
+        snafu::ensure_whatever!(
+            full_len < self.full_bucket,
+            "full store length {} does not fit the {}-wide bucket (ensure_buckets not run?)",
+            full_len,
+            self.full_bucket
+        );
+        self.full_slot.slice_set(
+            &candle_core::Tensor::new(&[full_len as u32], &self.device)?,
+            0,
+            0,
+        )?;
+        self.full_mask.slice_set(&self.mask_zero, 3, full_len)?;
+        let ring_slot = if ring_len < self.window {
+            let slot = (ring_head + ring_len) % self.window;
+            snafu::ensure_whatever!(
+                slot < self.ring_bucket,
+                "ring slot {} does not fit the {}-wide bucket (ensure_buckets not run?)",
+                slot,
+                self.ring_bucket
+            );
+            self.ring_mask.slice_set(&self.mask_zero, 3, slot)?;
+            slot
+        } else {
+            // Saturated ring: every slot is valid (static mask); the
+            // write rotates through the oldest slot.
+            ring_head
+        };
+        self.ring_slot.slice_set(
+            &candle_core::Tensor::new(&[ring_slot as u32], &self.device)?,
+            0,
+            0,
+        )?;
+        Ok(())
     }
 }

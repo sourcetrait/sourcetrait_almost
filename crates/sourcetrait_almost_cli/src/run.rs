@@ -121,6 +121,7 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
             long,
             cross_device,
             decode_steps,
+            graph,
             needle,
             needle_out,
             profile_out,
@@ -129,6 +130,9 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
             let (config, settings, paths) = resolve_run(config.as_deref(), settings.as_deref())?;
             let device = lib::resolve_device(&config)?;
             let dtype = lib::resolve_dtype(&config, &device);
+            if graph {
+                return lib::verify_graph(&paths);
+            }
             if needle {
                 let opts = lib::NeedleOptions {
                     settings,

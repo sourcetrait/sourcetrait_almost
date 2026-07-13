@@ -34,6 +34,10 @@ const QUICK_PROMPT: &str =
 const LONG_SENTENCE: &str =
     "The quick brown fox jumps over the lazy dog while the river keeps rolling east past the old mill. ";
 
+/// Decode steps each graph-gate leg compares (the phase A bar demands
+/// at least 64).
+const GRAPH_CHECK_STEPS: usize = 64;
+
 /// Self-consistency battery: every check compares two code paths of the
 /// SAME implementation, so agreement bars are tight. Exits with an error
 /// when a same-device check exceeds its bar or the T4 sliding-cache bound
@@ -371,4 +375,193 @@ fn argmax(values: &[f32]) -> usize {
         }
     }
     best
+}
+
+/// E4 phase A gate: the staged graph-mode decode forward (uncaptured)
+/// vs classic decode on the same ids at 2K and 32K prefixes - quick
+/// bf16 bar with argmax identity (padded-width f32 reductions regroup
+/// sums, so NOT bitwise) - plus graph-mode self-determinism at exactly
+/// zero. cuda-only, exact config, self-arming (like the needle
+/// battery's observation pass).
+pub fn verify_graph(paths: &ModelPaths) -> AlmostResult<()> {
+    snafu::ensure_whatever!(
+        cfg!(feature = "cuda") && r::candle::cuda_is_available(),
+        "verify --graph needs a cuda build and a cuda device"
+    );
+    let device = candle_core::Device::new_cuda(0)?;
+    let dtype = candle_core::DType::BF16;
+    let config: Olmo3Config = serde_json::from_reader(std::fs::File::open(&paths.config)?)?;
+    let tokenizer = match tokenizers::Tokenizer::from_file(&paths.tokenizer) {
+        Ok(tokenizer) => tokenizer,
+        Err(error) => snafu::whatever!("loading tokenizer.json failed: {error}"),
+    };
+    let settings = Settings {
+        use_flash_attn: cfg!(feature = "flash-attn"),
+        profile_attn: false,
+        eviction: None,
+        graph: true,
+    };
+    let load_start = Instant::now();
+    let vb =
+        unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&paths.shards, dtype, &device)? };
+    let mut model = Model::new(&config, settings, vb)?;
+    eprintln!(
+        "almost verify-graph: weights loaded in {:.1}s; {GRAPH_CHECK_STEPS} steps per leg",
+        load_start.elapsed().as_secs_f32()
+    );
+
+    // (comparison, argmax_gated): the graph-vs-classic rows also demand
+    // argmax identity; the determinism rows demand exactly zero.
+    let mut results: Vec<(Comparison, bool)> = Vec::new();
+    for &target in &[2048usize, 32768] {
+        let (prefix, continuation) = graph_ids(&tokenizer, target, GRAPH_CHECK_STEPS)?;
+        let leg_start = Instant::now();
+        chunked_prefill(&mut model, &prefix, &device)?;
+        let classic = decode_rows_classic(&mut model, &continuation, prefix.len(), &device)?;
+        chunked_prefill(&mut model, &prefix, &device)?;
+        model.arm_graph_decode(prefix.len() + continuation.len() + 1)?;
+        let graph_first = decode_rows_graph(&mut model, &continuation, prefix.len())?;
+        chunked_prefill(&mut model, &prefix, &device)?;
+        model.arm_graph_decode(prefix.len() + continuation.len() + 1)?;
+        let graph_second = decode_rows_graph(&mut model, &continuation, prefix.len())?;
+        eprintln!(
+            "almost verify-graph: {target}-token legs done ({:.0}s elapsed)",
+            leg_start.elapsed().as_secs_f32()
+        );
+        results.push((
+            compare(
+                &format!("graph vs classic @{target}"),
+                &graph_first,
+                &classic,
+                Some(5e-4),
+            )?,
+            true,
+        ));
+        results.push((
+            compare(
+                &format!("graph self-determinism @{target}"),
+                &graph_second,
+                &graph_first,
+                Some(0.0),
+            )?,
+            false,
+        ));
+    }
+
+    let mut failed: Vec<String> = Vec::new();
+    println!("check | rows | max_abs | nmse | argmax_match | verdict");
+    for (result, argmax_gated) in &results {
+        let bar = result.bar.unwrap_or(0.0);
+        let bar_pass = result.nmse <= bar;
+        let argmax_pass = !argmax_gated || result.argmax_match >= 1.0;
+        let verdict = if bar_pass && argmax_pass {
+            String::from("PASS")
+        } else {
+            failed.push(result.label.clone());
+            if bar_pass {
+                String::from("FAIL (argmax)")
+            } else {
+                format!("FAIL (bar {bar:.0e})")
+            }
+        };
+        println!(
+            "{} | {} | {:.3e} | {:.3e} | {:.4} | {}",
+            result.label, result.rows, result.max_abs, result.nmse, result.argmax_match, verdict
+        );
+        if verdict.starts_with("FAIL") {
+            for (row, row_max) in &result.worst_rows {
+                println!("  worst row {row} | max_abs {row_max:.3e}");
+            }
+        }
+    }
+    snafu::ensure_whatever!(
+        failed.is_empty(),
+        "verify --graph failed: {}",
+        failed.join("; ")
+    );
+    Ok(())
+}
+
+/// Filler ids for one graph-gate leg: a `target`-token prefix plus
+/// `steps` continuation ids fed one at a time through both decode
+/// paths.
+fn graph_ids(
+    tokenizer: &tokenizers::Tokenizer,
+    target: usize,
+    steps: usize,
+) -> AlmostResult<(Vec<u32>, Vec<u32>)> {
+    let needed = target + steps;
+    let text = LONG_SENTENCE.repeat(needed / 8);
+    let encoding = match tokenizer.encode(text, true) {
+        Ok(encoding) => encoding,
+        Err(error) => snafu::whatever!("graph-gate tokenization failed: {error}"),
+    };
+    let mut ids = encoding.get_ids().to_vec();
+    snafu::ensure_whatever!(
+        ids.len() >= needed,
+        "graph-gate prompt tokenized too short ({} < {needed})",
+        ids.len()
+    );
+    ids.truncate(needed);
+    let continuation = ids.split_off(target);
+    Ok((ids, continuation))
+}
+
+/// Prefill a fresh cache in generation-sized chunks, discarding logits.
+fn chunked_prefill(
+    model: &mut Model,
+    ids: &[u32],
+    device: &candle_core::Device,
+) -> AlmostResult<()> {
+    model.clear_kv_cache();
+    // Known-length reserve, mirroring generate(): coarse append-time
+    // growth (and its old+new copy transient) OOMs a 32K prefill.
+    model.reserve_full_caches(ids.len() + GRAPH_CHECK_STEPS + 1)?;
+    let chunk = if model.flash_enabled() {
+        consts::PREFILL_CHUNK_FLASH
+    } else {
+        consts::PREFILL_CHUNK_EAGER
+    };
+    let mut start = 0usize;
+    while start < ids.len() {
+        let end = (start + chunk).min(ids.len());
+        let _ = model.forward(&tensor_ids(&ids[start..end], device)?, start)?;
+        start = end;
+    }
+    Ok(())
+}
+
+/// One-token classic decode over `ids`; rows collected as
+/// (steps, vocab) cpu f32.
+fn decode_rows_classic(
+    model: &mut Model,
+    ids: &[u32],
+    offset: usize,
+    device: &candle_core::Device,
+) -> AlmostResult<candle_core::Tensor> {
+    let mut rows: Vec<candle_core::Tensor> = Vec::with_capacity(ids.len());
+    for (step, &id) in ids.iter().enumerate() {
+        let row = model.forward(&tensor_ids(&[id], device)?, offset + step)?;
+        rows.push(
+            row.squeeze(0)?
+                .to_device(&candle_core::Device::Cpu)?
+                .to_dtype(candle_core::DType::F32)?,
+        );
+    }
+    Ok(candle_core::Tensor::cat(&rows, 0)?)
+}
+
+/// One-token graph-mode decode over `ids` (armed model); rows collected
+/// as (steps, vocab) cpu f32.
+fn decode_rows_graph(
+    model: &mut Model,
+    ids: &[u32],
+    offset: usize,
+) -> AlmostResult<candle_core::Tensor> {
+    let mut rows: Vec<candle_core::Tensor> = Vec::with_capacity(ids.len());
+    for (step, &id) in ids.iter().enumerate() {
+        let row = model.graph_decode_step(id, offset + step)?;
+        rows.push(row.to_device(&candle_core::Device::Cpu)?);
+    }
+    Ok(candle_core::Tensor::cat(&rows, 0)?)
 }

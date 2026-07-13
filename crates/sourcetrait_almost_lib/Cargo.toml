@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_almost_lib"
-version = "0.0.0-10"
+version = "0.0.0-11"
 edition = "2024"
 description = "The almost engine: Olmo 3 7B Instruct port and program library on candle"
 authors = ["SourceTrait <development@sourcetrait.com>"]

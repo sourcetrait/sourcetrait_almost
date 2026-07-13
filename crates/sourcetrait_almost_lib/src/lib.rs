@@ -136,6 +136,7 @@ pub use crate::{
     },
     verify::{
         verify,
+        verify_graph,
         VerifyOptions,
     },
 };

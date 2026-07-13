@@ -169,6 +169,12 @@ impl Model {
         self.compact_full_caches()?;
         let prefill_seconds = prefill_start.elapsed().as_secs_f64();
         let first = processor.sample(&logits)?;
+        // E4: arm the staged graph-mode decode (phase A runs the same
+        // op sequence uncaptured). Speculation keeps the classic path
+        // (v1 scoping); cpu decode is classic everywhere.
+        if self.settings().graph && self.device().is_cuda() && !options.speculate {
+            self.arm_graph_decode(prompt_ids.len() + options.sample_len + 1)?;
+        }
 
         let offset = prompt_ids.len();
         Ok(Generation {
@@ -225,8 +231,20 @@ impl Generation<'_, '_> {
     }
 
     /// The decode work of one next(): forward the yielded token, stage the
-    /// next sample.
+    /// next sample. An armed graph stage routes through the staged decode
+    /// step (E4); the classic path is unchanged.
     fn stage_next(&mut self, token: u32) -> AlmostResult<u32> {
+        if self.model.graph_armed() {
+            let step_logits = self.model.graph_decode_step(token, self.offset)?;
+            self.fed_ids.push(token);
+            if self.options.dump_logits.is_some() {
+                self.dump_rows
+                    .push(step_logits.to_device(&candle_core::Device::Cpu)?);
+            }
+            let step_logits = step_logits.squeeze(0)?;
+            self.offset += 1;
+            return Ok(self.processor.sample(&step_logits)?);
+        }
         let input = candle_core::Tensor::new(&[token], self.model.device())?.unsqueeze(0)?;
         let step_logits = self.model.forward(&input, self.offset)?;
         self.fed_ids.push(token);

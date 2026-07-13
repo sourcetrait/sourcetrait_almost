@@ -86,6 +86,24 @@ impl RopeTables {
         let k = r::candle::rope(&k.contiguous()?, &cos, &sin)?;
         Ok((q, k))
     }
+
+    /// Rotate q/k at the position held in a device u32 buffer (the E4
+    /// staged rope position): value-dynamic, shape-static - the
+    /// graph-mode replacement for the host-offset narrow. The caller
+    /// asserts the position bound before staging.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn apply_indexed(
+        &self,
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        position: &candle_core::Tensor,
+    ) -> AlmostResult<(candle_core::Tensor, candle_core::Tensor)> {
+        let cos = self.cos.index_select(position, 0)?;
+        let sin = self.sin.index_select(position, 0)?;
+        let q = r::candle::rope(&q.contiguous()?, &cos, &sin)?;
+        let k = r::candle::rope(&k.contiguous()?, &cos, &sin)?;
+        Ok((q, k))
+    }
 }
 
 /// 1 / theta^(2i/dim) for i in 0..dim/2.
