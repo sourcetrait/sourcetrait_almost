@@ -133,7 +133,7 @@ pub fn verify(
         "almost_verify_snapshot_{}.safetensors",
         std::process::id()
     ));
-    let snapshot_len = model.snapshot_caches(&snapshot_path)?;
+    let snapshot_len = model.snapshot_caches(&snapshot_path, "battery", &ids[..boundary])?;
     snafu::ensure_whatever!(
         snapshot_len == boundary,
         "snapshot context length {snapshot_len} != boundary {boundary}"
@@ -160,11 +160,16 @@ pub fn verify(
     // E2 snapshot roundtrip: restore the boundary state and replay the
     // same decode steps; agreement is determinism-grade (same device,
     // same path, restored caches).
-    let restored_len = model.restore_caches(&snapshot_path)?;
+    let restored = model.restore_caches(&snapshot_path, "battery")?;
     std::fs::remove_file(&snapshot_path)?;
     snafu::ensure_whatever!(
-        restored_len == boundary,
-        "restored context length {restored_len} != boundary {boundary}"
+        restored.context_len == boundary,
+        "restored context length {} != boundary {boundary}",
+        restored.context_len
+    );
+    snafu::ensure_whatever!(
+        restored.context_ids == ids[..boundary],
+        "restored id trail does not match the snapshotted prefix"
     );
     let mut replay_rows: Vec<candle_core::Tensor> = Vec::with_capacity(steps);
     for position in boundary..n {

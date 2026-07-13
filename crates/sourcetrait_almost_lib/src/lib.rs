@@ -87,6 +87,7 @@ pub(crate) use crate::{
 
 pub use crate::{
     chat::{
+        chat_continue,
         chat_wrap,
         resolve_stop_ids,
     },
@@ -120,7 +121,9 @@ pub use crate::{
     },
     hub::{
         default_model_dir,
+        default_snapshots_dir,
         ensure_model,
+        resolve_snapshot,
         ModelPaths,
     },
     load::{
@@ -131,6 +134,7 @@ pub use crate::{
     },
     model::{
         Model,
+        RestoredContext,
         Settings,
     },
     needle::{

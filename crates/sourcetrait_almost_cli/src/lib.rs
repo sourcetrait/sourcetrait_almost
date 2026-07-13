@@ -15,4 +15,5 @@ pub(crate) use sourcetrait_almost_lib as lib;
 pub(crate) use crate::cli::{
     Cli,
     Command,
+    SnapshotAction,
 };

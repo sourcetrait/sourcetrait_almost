@@ -16,6 +16,20 @@ pub fn chat_wrap(user_prompt: &str) -> String {
     wrapped
 }
 
+/// Continuation rendering for a standing context that ended mid
+/// assistant turn (every post-decode save does - the stop token is
+/// sampled but never consumed): close that turn, open a user turn with
+/// the prompt, and open the next assistant turn.
+pub fn chat_continue(user_prompt: &str) -> String {
+    let mut wrapped = String::new();
+    wrapped.push_str("<|im_end|>\n");
+    wrapped.push_str("<|im_start|>user\n");
+    wrapped.push_str(user_prompt);
+    wrapped.push_str("<|im_end|>\n");
+    wrapped.push_str("<|im_start|>assistant\n");
+    wrapped
+}
+
 /// Stop-token ids resolved by string, so tokenizer truth wins over any
 /// config-side id drift.
 pub fn resolve_stop_ids(tokenizer: &tokenizers::Tokenizer) -> Vec<u32> {

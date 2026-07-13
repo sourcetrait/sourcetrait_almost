@@ -8,20 +8,44 @@ pub struct ModelPaths {
     pub shards: Vec<PathBuf>,
 }
 
-/// $XDG_CACHE_HOME/huggingface/model/<owner>--<name>, with ~/.cache as the
-/// cache-home fallback when the variable is unset or empty (the XDG spec's
-/// own default).
-pub fn default_model_dir(model_id: &str) -> PathBuf {
-    let base = match std::env::var("XDG_CACHE_HOME") {
+/// $XDG_CACHE_HOME, with ~/.cache as the fallback when the variable is
+/// unset or empty (the XDG spec's own default).
+fn cache_home() -> PathBuf {
+    match std::env::var("XDG_CACHE_HOME") {
         Ok(cache_home) if !cache_home.is_empty() => PathBuf::from(cache_home),
         _ => {
             let home = std::env::var("HOME").unwrap_or_else(|_| String::from("."));
             PathBuf::from(home).join(".cache")
         }
-    };
-    base.join("huggingface")
+    }
+}
+
+/// $XDG_CACHE_HOME/huggingface/model/<owner>--<name> (cache-home
+/// fallback rules above).
+pub fn default_model_dir(model_id: &str) -> PathBuf {
+    cache_home()
+        .join("huggingface")
         .join("model")
         .join(model_id.replace('/', "--"))
+}
+
+/// E2 saved-context home: $XDG_CACHE_HOME/sourcetrait/almost/snapshots
+/// (snapshots are regenerable caches).
+pub fn default_snapshots_dir() -> PathBuf {
+    cache_home()
+        .join("sourcetrait")
+        .join("almost")
+        .join("snapshots")
+}
+
+/// A --from/--to token that is purely a snake names a save under the
+/// snapshots home; anything else is a filesystem path (~ expanded).
+pub fn resolve_snapshot(token: &str) -> PathBuf {
+    if config::is_snake(token) {
+        default_snapshots_dir().join(format!("{token}.safetensors"))
+    } else {
+        config::expand_path(token)
+    }
 }
 
 /// Ensure every checkpoint file exists under dir, downloading what is

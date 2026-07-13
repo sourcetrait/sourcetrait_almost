@@ -47,6 +47,8 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
             raw,
             config,
             settings,
+            from,
+            to,
             dump_logits,
         } => {
             let (config, settings, paths) = resolve_run(config.as_deref(), settings.as_deref())?;
@@ -61,7 +63,26 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
             eprintln!("almost: weights loaded in {:.1}s", loaded.load_seconds);
             let mut model = loaded.model;
 
-            let text = if raw { prompt } else { lib::chat_wrap(&prompt) };
+            let restored = match &from {
+                Some(token) => {
+                    let path = lib::resolve_snapshot(token);
+                    let restored = model.restore_caches(&path, &config.model_id)?;
+                    eprintln!(
+                        "almost: restored {} context tokens from {}",
+                        restored.context_len,
+                        path.display()
+                    );
+                    Some(restored)
+                }
+                None => None,
+            };
+            let text = if raw {
+                prompt
+            } else if restored.is_some() {
+                lib::chat_continue(&prompt)
+            } else {
+                lib::chat_wrap(&prompt)
+            };
             let options = lib::GenerateOptions {
                 greedy: config.generation.greedy,
                 temperature: config.generation.temperature,
@@ -71,7 +92,12 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
                 speculate: config.generation.speculate,
                 dump_logits,
             };
-            let mut generation = model.generate(&loaded.tokenizer, &text, &options)?;
+            let mut generation = match &restored {
+                Some(restored) => {
+                    model.generate_from(&loaded.tokenizer, restored, &text, &options)?
+                }
+                None => model.generate(&loaded.tokenizer, &text, &options)?,
+            };
             for step in &mut generation {
                 let step = step?;
                 if let Some(chunk) = step.chunk {
@@ -87,6 +113,22 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
             if let Some(path) = &options.dump_logits {
                 eprintln!("almost: logits dumped to {}", path.display());
             }
+            if let Some(token) = &to {
+                let path = lib::resolve_snapshot(token);
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let saved = model.snapshot_caches(&path, &config.model_id, &report.context_ids)?;
+                eprintln!("almost: saved {saved} context tokens to {}", path.display());
+            }
+            let restored_note = {
+                let restored_count = report.prompt_token_count - report.prefilled_token_count;
+                if restored_count > 0 {
+                    format!("{restored_count} restored + ")
+                } else {
+                    String::new()
+                }
+            };
             let speculation_note = if report.drafted_token_count > 0 {
                 format!(
                     "; drafted {} accepted {} ({:.0}%)",
@@ -99,10 +141,11 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
                 String::new()
             };
             eprintln!(
-                "almost: prefill {} tokens in {:.2}s ({:.1} tok/s); decode {} tokens in {:.2}s ({:.1} tok/s){}; stopped by {}",
-                report.prompt_token_count,
+                "almost: prefill {}{} tokens in {:.2}s ({:.1} tok/s); decode {} tokens in {:.2}s ({:.1} tok/s){}; stopped by {}",
+                restored_note,
+                report.prefilled_token_count,
                 report.prefill_seconds,
-                report.prompt_token_count as f64 / report.prefill_seconds.max(f64::EPSILON),
+                report.prefilled_token_count as f64 / report.prefill_seconds.max(f64::EPSILON),
                 report.generated_token_count,
                 report.decode_seconds,
                 report.generated_token_count as f64 / report.decode_seconds.max(f64::EPSILON),
@@ -115,6 +158,44 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
             );
             Ok(())
         }
+        Command::Snapshot { action } => match action {
+            SnapshotAction::List => {
+                let dir = lib::default_snapshots_dir();
+                if !dir.exists() {
+                    eprintln!("almost: no snapshots home yet ({})", dir.display());
+                    return Ok(());
+                }
+                let mut rows: Vec<(String, u64)> = Vec::new();
+                for entry in std::fs::read_dir(&dir)? {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if path.extension().is_some_and(|e| e == "safetensors") {
+                        let name = path
+                            .file_stem()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        rows.push((name, entry.metadata()?.len()));
+                    }
+                }
+                rows.sort();
+                for (name, bytes) in &rows {
+                    println!("{name} | {:.1} GiB", *bytes as f64 / (1024.0 * 1024.0 * 1024.0));
+                }
+                eprintln!("almost: {} saves at {}", rows.len(), dir.display());
+                Ok(())
+            }
+            SnapshotAction::Rm { save } => {
+                let path = lib::resolve_snapshot(&save);
+                snafu::ensure_whatever!(
+                    path.exists(),
+                    "no save at {}",
+                    path.display()
+                );
+                std::fs::remove_file(&path)?;
+                eprintln!("almost: removed {}", path.display());
+                Ok(())
+            }
+        },
         Command::Verify {
             config,
             settings,

@@ -44,7 +44,12 @@ pub struct GenerationStep {
 #[derive(Debug, Clone)]
 pub struct GenerationReport {
     pub finish_reason: Option<FinishReason>,
+    /// Full context ahead of decode: restored tokens plus this run's
+    /// prefill.
     pub prompt_token_count: usize,
+    /// Tokens THIS run prefilled (the whole prompt, or just the suffix
+    /// on a generate_from continuation).
+    pub prefilled_token_count: usize,
     pub generated_token_count: usize,
     /// Speculation tallies (zero when speculate was off or never fired).
     pub drafted_token_count: usize,
@@ -52,6 +57,11 @@ pub struct GenerationReport {
     pub prefill_seconds: f64,
     pub decode_seconds: f64,
     pub rest: Option<String>,
+    /// The id trail whose KV the caches hold after this generation
+    /// (context plus consumed decode) - exactly what snapshot_caches
+    /// wants. A sample_len stop leaves the final EMITTED token out (it
+    /// was never forwarded); a stop-token end is transcript-complete.
+    pub context_ids: Vec<u32>,
 }
 
 /// Pull-based generation borrowing the model: each next() performs one
@@ -66,6 +76,7 @@ pub struct Generation<'m, 't> {
     options: GenerateOptions,
     stop_ids: Vec<u32>,
     prompt_ids: Vec<u32>,
+    prefilled_count: usize,
     fed_ids: Vec<u32>,
     generated_ids: Vec<u32>,
     dump_rows: Vec<candle_core::Tensor>,
@@ -84,6 +95,22 @@ pub struct Generation<'m, 't> {
     decode_seconds: f64,
 }
 
+/// Tokenize `text`, labeled for the error message; errors when it
+/// tokenizes to nothing.
+fn encode_ids(
+    tokenizer: &tokenizers::Tokenizer,
+    text: &str,
+    what: &str,
+) -> AlmostResult<Vec<u32>> {
+    let encoding = match tokenizer.encode(text, true) {
+        Ok(encoding) => encoding,
+        Err(error) => snafu::whatever!("{what} tokenization failed: {error}"),
+    };
+    let ids: Vec<u32> = encoding.get_ids().to_vec();
+    snafu::ensure_whatever!(!ids.is_empty(), "the {what} tokenized to zero tokens");
+    Ok(ids)
+}
+
 impl Model {
     /// Tokenize, prefill (from a cleared cache), and sample the first
     /// token; the returned iterator then decodes one token per next().
@@ -93,12 +120,54 @@ impl Model {
         text: &str,
         options: &GenerateOptions,
     ) -> AlmostResult<Generation<'m, 't>> {
-        let encoding = match tokenizer.encode(text, true) {
-            Ok(encoding) => encoding,
-            Err(error) => snafu::whatever!("prompt tokenization failed: {error}"),
-        };
-        let prompt_ids: Vec<u32> = encoding.get_ids().to_vec();
-        snafu::ensure_whatever!(!prompt_ids.is_empty(), "the prompt tokenized to zero tokens");
+        let prompt_ids = encode_ids(tokenizer, text, "prompt")?;
+        self.clear_kv_cache();
+        self.start_generation(tokenizer, prompt_ids, 0, options)
+    }
+
+    /// E2: continue from a restored standing context - tokenize
+    /// `suffix_text`, prefill it at the restored offset, and decode
+    /// exactly as generate() does. The caches must hold the restored
+    /// context (restore_caches puts them there); parity dumps are
+    /// whole-context instruments and are refused here.
+    pub fn generate_from<'m, 't>(
+        &'m mut self,
+        tokenizer: &'t tokenizers::Tokenizer,
+        restored: &RestoredContext,
+        suffix_text: &str,
+        options: &GenerateOptions,
+    ) -> AlmostResult<Generation<'m, 't>> {
+        snafu::ensure_whatever!(
+            options.dump_logits.is_none(),
+            "parity dumps run from a cleared cache; a restored context does not combine with --dump-logits"
+        );
+        let cached = self.max_full_cache_len();
+        snafu::ensure_whatever!(
+            cached == restored.context_len,
+            "caches hold {cached} entries but the restored context says {}; restore first",
+            restored.context_len
+        );
+        let suffix_ids = encode_ids(tokenizer, suffix_text, "suffix")?;
+        let mut context_ids = restored.context_ids.clone();
+        context_ids.extend_from_slice(&suffix_ids);
+        self.start_generation(tokenizer, context_ids, restored.context_len, options)
+    }
+
+    /// The shared generation core: prefill context_ids[prefilled..] in
+    /// chunks over whatever the caches already hold, run the stage-2
+    /// compaction, sample the first token, arm graph decode when
+    /// configured, and hand back the pull iterator.
+    fn start_generation<'m, 't>(
+        &'m mut self,
+        tokenizer: &'t tokenizers::Tokenizer,
+        context_ids: Vec<u32>,
+        prefilled: usize,
+        options: &GenerateOptions,
+    ) -> AlmostResult<Generation<'m, 't>> {
+        snafu::ensure_whatever!(
+            prefilled < context_ids.len(),
+            "nothing to prefill (the context carries no new tokens)"
+        );
         let stop_ids = resolve_stop_ids(tokenizer);
         let dumping = options.dump_logits.is_some();
         if options.speculate {
@@ -117,7 +186,7 @@ impl Model {
         }
         let mut index = LookupIndex::new();
         if options.speculate {
-            index.extend(&prompt_ids);
+            index.extend(&context_ids);
         }
 
         let sampling = if options.greedy {
@@ -131,14 +200,13 @@ impl Model {
         let mut processor = r::candle::LogitsProcessor::from_sampling(options.seed, sampling);
         let mut dump_rows: Vec<candle_core::Tensor> = Vec::new();
 
-        self.clear_kv_cache();
-        // The prompt length is known here: fine-grain reserve so the
+        // The context length is known here: fine-grain reserve so the
         // context tail does not pay FULL_CACHE_STEP rounding; the margin
         // covers a short decode and longer decodes grow coarsely as before.
-        self.reserve_full_caches(prompt_ids.len() + consts::RESERVE_DECODE_MARGIN)?;
-        // Chunked prefill: logit-exact vs a single forward. The eager
-        // chunk bounds the attention transient; the flash chunk trades
-        // throughput against the 32K peak (consts).
+        self.reserve_full_caches(context_ids.len() + consts::RESERVE_DECODE_MARGIN)?;
+        // Chunked prefill of the un-prefilled tail: logit-exact vs a
+        // single forward. The eager chunk bounds the attention transient;
+        // the flash chunk trades throughput against the 32K peak (consts).
         let prefill_chunk = if self.flash_enabled() {
             consts::PREFILL_CHUNK_FLASH
         } else {
@@ -146,20 +214,20 @@ impl Model {
         };
         let prefill_start = Instant::now();
         let mut last_logits: Option<candle_core::Tensor> = None;
-        let mut chunk_start = 0usize;
-        while chunk_start < prompt_ids.len() {
-            let chunk_end = (chunk_start + prefill_chunk).min(prompt_ids.len());
+        let mut position = prefilled;
+        while position < context_ids.len() {
+            let end = (position + prefill_chunk).min(context_ids.len());
             let input =
-                candle_core::Tensor::new(&prompt_ids[chunk_start..chunk_end], self.device())?.unsqueeze(0)?;
+                candle_core::Tensor::new(&context_ids[position..end], self.device())?.unsqueeze(0)?;
             let chunk_logits = if dumping {
-                let all = self.forward_all(&input, chunk_start)?.squeeze(0)?;
+                let all = self.forward_all(&input, position)?.squeeze(0)?;
                 dump_rows.push(all.to_device(&candle_core::Device::Cpu)?.to_dtype(candle_core::DType::F32)?);
-                all.narrow(0, chunk_end - chunk_start - 1, 1)?
+                all.narrow(0, end - position - 1, 1)?
             } else {
-                self.forward(&input, chunk_start)?.squeeze(0)?
+                self.forward(&input, position)?.squeeze(0)?
             };
             last_logits = Some(chunk_logits);
-            chunk_start = chunk_end;
+            position = end;
         }
         let logits = match last_logits {
             Some(logits) => logits.squeeze(0)?.to_dtype(candle_core::DType::F32)?,
@@ -174,17 +242,19 @@ impl Model {
         // op sequence uncaptured). Speculation keeps the classic path
         // (v1 scoping); cpu decode is classic everywhere.
         if self.settings().graph && self.device().is_cuda() && !options.speculate {
-            self.arm_graph_decode(prompt_ids.len() + options.sample_len + 1)?;
+            self.arm_graph_decode(context_ids.len() + options.sample_len + 1)?;
         }
 
-        let offset = prompt_ids.len();
+        let offset = context_ids.len();
+        let prefilled_count = offset - prefilled;
         Ok(Generation {
             model: self,
             stream: TokenStream::new(tokenizer),
             processor,
             options: options.clone(),
             stop_ids,
-            prompt_ids,
+            prompt_ids: context_ids,
+            prefilled_count,
             fed_ids: Vec::new(),
             generated_ids: Vec::new(),
             dump_rows,
@@ -220,15 +290,19 @@ impl Generation<'_, '_> {
                 std::mem::take(&mut self.dump_rows),
             )?;
         }
+        let mut context_ids = self.prompt_ids.clone();
+        context_ids.extend_from_slice(&self.fed_ids);
         Ok(GenerationReport {
             finish_reason: self.finish_reason,
             prompt_token_count: self.prompt_ids.len(),
+            prefilled_token_count: self.prefilled_count,
             generated_token_count: self.generated_ids.len(),
             drafted_token_count: self.drafted_count,
             accepted_draft_token_count: self.accepted_draft_count,
             prefill_seconds: self.prefill_seconds,
             decode_seconds: self.decode_seconds,
             rest,
+            context_ids,
         })
     }
 

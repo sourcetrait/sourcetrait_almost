@@ -20,7 +20,8 @@ pub(crate) enum Command {
     /// Generate a completion for a single prompt
     Prompt {
         prompt: String,
-        /// Feed the prompt raw, skipping the chat-template wrap
+        /// Feed the prompt raw, skipping the chat-template wrap (with
+        /// --from: the raw continuation suffix)
         #[arg(long)]
         raw: bool,
         /// Config profile snake or TOML path (declared intent: model,
@@ -32,9 +33,21 @@ pub(crate) enum Command {
         /// derives reactively via Settings::from_config)
         #[arg(short = 's', long)]
         settings: Option<String>,
-        /// Write a parity dump (logits over every fed position) here
+        /// Continue from a saved context (snake under the snapshots
+        /// home, or a path); the prompt becomes the next user turn
         #[arg(long)]
+        from: Option<String>,
+        /// Save the post-generation context (snake or path)
+        #[arg(long)]
+        to: Option<String>,
+        /// Write a parity dump (logits over every fed position) here
+        #[arg(long, conflicts_with = "from")]
         dump_logits: Option<PathBuf>,
+    },
+    /// Manage saved contexts (E2 KV snapshots)
+    Snapshot {
+        #[command(subcommand)]
+        action: SnapshotAction,
     },
     /// Run the internal equivalence battery (default) or the retrieval
     /// needle battery (--needle) against the checkpoint
@@ -80,4 +93,12 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 299792458)]
         seed: u64,
     },
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub(crate) enum SnapshotAction {
+    /// List saves in the snapshots home
+    List,
+    /// Delete a save (snake under the snapshots home, or a path)
+    Rm { save: String },
 }

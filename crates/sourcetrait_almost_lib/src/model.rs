@@ -143,6 +143,15 @@ pub(crate) struct CacheMark {
     span: usize,
 }
 
+/// A restored snapshot's identity: the context length to continue at and
+/// the id trail whose KV now fills the caches (feeds generate_from and
+/// the speculation index).
+#[derive(Debug, Clone)]
+pub struct RestoredContext {
+    pub context_len: usize,
+    pub context_ids: Vec<u32>,
+}
+
 /// The almost Olmo 3 decoder (D1): HF-shaped single-target module, MHA
 /// only by policy (the sole checkpoint is MHA; kv-group machinery is
 /// deliberately absent). Sliding layers hold a fixed window-sized ring
@@ -382,9 +391,17 @@ impl Model {
         Ok(CacheMark { marks, offset, span })
     }
 
-    /// E2: persist the current cache state (the standing prefix) as one
-    /// safetensors file. Returns the snapshotted context length.
-    pub(crate) fn snapshot_caches(&self, path: &Path) -> AlmostResult<usize> {
+    /// E2: persist the current cache state (the standing context) as one
+    /// safetensors file. `context_ids` is the id trail whose KV fills
+    /// the caches (prompt plus consumed generation - a finished run's
+    /// report carries it); it rides in the file with the model id and is
+    /// validated back on restore. Returns the snapshotted context length.
+    pub fn snapshot_caches(
+        &self,
+        path: &Path,
+        model_id: &str,
+        context_ids: &[u32],
+    ) -> AlmostResult<usize> {
         snafu::ensure_whatever!(
             self.settings.eviction.is_none(),
             "snapshots under eviction are not supported yet (scores are not persisted)"
@@ -412,18 +429,37 @@ impl Model {
         let Some(context_len) = context_len else {
             snafu::whatever!("nothing to snapshot (empty caches)");
         };
+        snafu::ensure_whatever!(
+            context_ids.len() == context_len,
+            "context id trail ({}) does not match the cache length ({context_len})",
+            context_ids.len()
+        );
         let cpu = candle_core::Device::Cpu;
         tensors.insert(
             String::from("meta"),
-            candle_core::Tensor::new(&[1u32, context_len as u32], &cpu)?,
+            candle_core::Tensor::new(&[2u32, context_len as u32], &cpu)?,
+        );
+        tensors.insert(
+            String::from("context_ids"),
+            candle_core::Tensor::new(context_ids, &cpu)?,
+        );
+        tensors.insert(
+            String::from("model_id"),
+            candle_core::Tensor::new(model_id.as_bytes().to_vec(), &cpu)?,
         );
         candle_core::safetensors::save(&tensors, path)?;
         Ok(context_len)
     }
 
     /// E2: load a snapshot back into the caches, replacing their state.
-    /// Returns the restored context length (the offset to continue at).
-    pub(crate) fn restore_caches(&mut self, path: &Path) -> AlmostResult<usize> {
+    /// Validates the file against this run (per-tensor dtype, the stored
+    /// model id vs `expected_model_id`) and returns the restored context
+    /// (the offset to continue at plus the id trail).
+    pub fn restore_caches(
+        &mut self,
+        path: &Path,
+        expected_model_id: &str,
+    ) -> AlmostResult<RestoredContext> {
         snafu::ensure_whatever!(
             self.settings.eviction.is_none(),
             "snapshots under eviction are not supported yet (scores are not persisted)"
@@ -441,10 +477,35 @@ impl Model {
         };
         let meta: Vec<u32> = meta.to_device(&candle_core::Device::Cpu)?.to_vec1()?;
         snafu::ensure_whatever!(
-            meta.len() == 2 && meta[0] == 1,
-            "unsupported snapshot meta {meta:?}"
+            meta.len() == 2 && meta[0] == 2,
+            "unsupported snapshot meta {meta:?} (this build reads v2)"
         );
         let context_len = meta[1] as usize;
+        let Some(stored_model_id) = tensors.get("model_id") else {
+            snafu::whatever!("snapshot carries no model_id tensor");
+        };
+        let stored_model_id: Vec<u8> = stored_model_id
+            .to_device(&candle_core::Device::Cpu)?
+            .to_vec1()?;
+        let stored_model_id = match String::from_utf8(stored_model_id) {
+            Ok(stored) => stored,
+            Err(error) => snafu::whatever!("snapshot model_id is not utf8: {error}"),
+        };
+        snafu::ensure_whatever!(
+            stored_model_id == expected_model_id,
+            "snapshot was taken for model {stored_model_id} but this run loads {expected_model_id}"
+        );
+        let Some(context_ids) = tensors.get("context_ids") else {
+            snafu::whatever!("snapshot carries no context_ids tensor");
+        };
+        let context_ids: Vec<u32> = context_ids
+            .to_device(&candle_core::Device::Cpu)?
+            .to_vec1()?;
+        snafu::ensure_whatever!(
+            context_ids.len() == context_len,
+            "snapshot id trail ({}) does not match its context length ({context_len})",
+            context_ids.len()
+        );
         for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
             let key = tensors.get(&format!("layer{layer_idx}.key"));
             let value = tensors.get(&format!("layer{layer_idx}.value"));
@@ -459,7 +520,10 @@ impl Model {
             );
             layer.self_attn.import_cache(key, value)?;
         }
-        Ok(context_len)
+        Ok(RestoredContext {
+            context_len,
+            context_ids,
+        })
     }
 
     /// A3 stage 2: compact full-layer stores to the decode cap - the

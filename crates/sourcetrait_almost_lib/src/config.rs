@@ -185,7 +185,7 @@ fn profiles_home() -> PathBuf {
 }
 
 /// Minimal command-boundary path expansion (~/ to $HOME).
-fn expand_path(token: &str) -> PathBuf {
+pub(crate) fn expand_path(token: &str) -> PathBuf {
     if let Some(rest) = token.strip_prefix("~/")
         && let Ok(home) = std::env::var("HOME")
     {
