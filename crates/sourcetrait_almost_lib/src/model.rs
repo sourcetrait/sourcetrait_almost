@@ -63,22 +63,47 @@ pub(crate) fn banded_mask_values(
     values
 }
 
-/// D3 retention bounds: the (start, length) narrow a sliding cache keeps
-/// after growing to kv_len entries; None when everything already fits. A
-/// decoding query needs at most window-1 past keys, so window-1 is the cap.
-pub(crate) fn sliding_trim_bounds(kv_len: usize, window: usize) -> Option<(usize, usize)> {
+/// D3 retention bounds: the (start, length) of the tail a sliding cache
+/// persists after a prefill reaches total_len positions - the last
+/// window-1 entries (a following query needs at most that many past
+/// keys).
+pub(crate) fn sliding_trim_bounds(total_len: usize, window: usize) -> (usize, usize) {
     let cap = window - 1;
-    if kv_len > cap {
-        Some((kv_len - cap, cap))
+    if total_len > cap {
+        (total_len - cap, cap)
     } else {
-        None
+        (0, total_len)
+    }
+}
+
+/// The last `need` logical entries of a sliding ring as a linear tensor:
+/// a plain narrow when the span is contiguous in the buffer, a two-narrow
+/// cat when the ring wraps across the physical end.
+fn ring_linear_tail(
+    ring: &candle_core::Tensor,
+    head: usize,
+    len: usize,
+    need: usize,
+) -> AlmostResult<candle_core::Tensor> {
+    let window = ring.dims()[2];
+    let start = (head + len - need) % window;
+    if start + need <= window {
+        Ok(ring.narrow(2, start, need)?)
+    } else {
+        let first = window - start;
+        Ok(candle_core::Tensor::cat(
+            &[&ring.narrow(2, start, first)?, &ring.narrow(2, 0, need - first)?],
+            2,
+        )?)
     }
 }
 
 /// The almost Olmo 3 decoder (D1): HF-shaped single-target module, MHA
 /// only by policy (the sole checkpoint is MHA; kv-group machinery is
-/// deliberately absent). Sliding layers persist at most window-1 cached
-/// entries (D3); decode builds no masks on any layer (D4).
+/// deliberately absent). Sliding layers hold a fixed window-sized ring
+/// (D3/E3; at most w-1 entries persist between prefill chunks, w after
+/// a decode step - the attended set is [p-w+1, p] either way); decode
+/// builds no masks on any layer (D4).
 #[derive(Debug, Clone)]
 pub struct Model {
     embed_tokens: candle_nn::Embedding,
@@ -202,8 +227,9 @@ impl Model {
         }
     }
 
-    /// Largest sliding-layer cache length currently held; the T4 invariant
-    /// pins it at window-1 or less after any forward.
+    /// Largest sliding-layer ring occupancy currently held; the T4
+    /// invariant pins it at window-1 between prefill chunks and window
+    /// after a decode step (the current token's slot included).
     pub(crate) fn max_sliding_cache_len(&self) -> usize {
         self.layers
             .iter()
@@ -407,7 +433,15 @@ struct Attention {
     rotary: std::sync::Arc<RopeTables>,
     sliding_window: Option<usize>,
     use_flash_attn: bool,
-    kv_cache: Option<(candle_core::Tensor, candle_core::Tensor)>,
+    /// E3 sliding-layer ring: a fixed (b, h, window, d) buffer per side.
+    /// Decode writes the new slot in place and attends the whole ring
+    /// (rope carries absolute positions, so attention is order-free);
+    /// prefill leaves the ring linear (head 0). ring_head is the oldest
+    /// slot once rotation starts; ring_len counts valid slots.
+    ring_key: Option<candle_core::Tensor>,
+    ring_value: Option<candle_core::Tensor>,
+    ring_head: usize,
+    ring_len: usize,
     full_key_buffer: Option<candle_core::Tensor>,
     full_value_buffer: Option<candle_core::Tensor>,
     full_cache_len: usize,
@@ -443,7 +477,10 @@ impl Attention {
             rotary,
             sliding_window,
             use_flash_attn,
-            kv_cache: None,
+            ring_key: None,
+            ring_value: None,
+            ring_head: 0,
+            ring_len: 0,
             full_key_buffer: None,
             full_value_buffer: None,
             full_cache_len: 0,
@@ -523,34 +560,18 @@ impl Attention {
 
         let (query_states, key_states) = self.rotary.apply(&query_states, &key_states, seqlen_offset)?;
 
-        // Attention always runs on the pre-trim concatenation; the mask
-        // (prefill) or the cache bound itself (decode) handles visibility.
+        // D3 visibility rides the cache structure: sliding layers hold a
+        // fixed ring (decode attends exactly the ring = [p-w+1, p]); full
+        // layers append into capacity-stepped buffers. Prefill masks or
+        // window kernels handle multi-token visibility.
         let (key_states, value_states) = match self.sliding_window {
-            // D3: sliding layers cat then persist only the last window-1
-            // entries; a decoding query at position p needs exactly
-            // [p-w+1, p-1] plus itself, so nothing visible is ever dropped.
             Some(window) => {
-                let (key_states, value_states) = match &self.kv_cache {
-                    None => (key_states, value_states),
-                    Some((prev_k, prev_v)) => (
-                        candle_core::Tensor::cat(&[prev_k, &key_states], 2)?,
-                        candle_core::Tensor::cat(&[prev_v, &value_states], 2)?,
-                    ),
-                };
-                let retained = match sliding_trim_bounds(key_states.dim(2)?, window) {
-                    Some((start, length)) => (
-                        key_states.narrow(2, start, length)?,
-                        value_states.narrow(2, start, length)?,
-                    ),
-                    None => (key_states.clone(), value_states.clone()),
-                };
-                self.kv_cache = Some(retained);
-                // The cuda matmul wants matrix-packed operands; a cat
-                // output already is one (no-op), the first-forward
-                // transposed passthrough is not.
-                (key_states.contiguous()?, value_states.contiguous()?)
+                if q_len == 1 {
+                    self.ring_decode(&key_states, &value_states, window)?
+                } else {
+                    self.ring_prefill(&key_states, &value_states, window, seqlen_offset)?
+                }
             }
-            // Full layers append into the capacity-stepped buffers.
             None => self.full_append(&key_states, &value_states)?,
         };
 
@@ -593,21 +614,125 @@ impl Attention {
             .apply(&self.o_proj)?)
     }
 
+    /// Allocate the sliding ring on first use; kept across clears.
+    fn ensure_ring(
+        &mut self,
+        b_size: usize,
+        window: usize,
+        dtype: candle_core::DType,
+        device: &candle_core::Device,
+    ) -> AlmostResult<()> {
+        if self.ring_key.is_none() {
+            let shape = (b_size, self.num_heads, window, self.head_dim);
+            self.ring_key = Some(candle_core::Tensor::zeros(shape, dtype, device)?);
+            self.ring_value = Some(candle_core::Tensor::zeros(shape, dtype, device)?);
+        }
+        Ok(())
+    }
+
+    /// Decode step on a sliding layer: write the new k/v into the next
+    /// ring slot in place (overwriting the slot that just left the
+    /// window once full), then attend the whole ring - exactly the
+    /// visible set [p-w+1, p], rotation-invariant because rope bakes
+    /// absolute positions into k. Zero allocation, zero copy beyond the
+    /// one slot.
+    fn ring_decode(
+        &mut self,
+        key_states: &candle_core::Tensor,
+        value_states: &candle_core::Tensor,
+        window: usize,
+    ) -> AlmostResult<(candle_core::Tensor, candle_core::Tensor)> {
+        let key_states = key_states.contiguous()?;
+        let value_states = value_states.contiguous()?;
+        let (b_size, _heads, _one, _d) = key_states.dims4()?;
+        self.ensure_ring(b_size, window, key_states.dtype(), key_states.device())?;
+        let (Some(ring_key), Some(ring_value)) = (&self.ring_key, &self.ring_value) else {
+            snafu::whatever!("sliding ring absent after ensure");
+        };
+        let slot = if self.ring_len < window {
+            let slot = self.ring_len;
+            self.ring_len += 1;
+            slot
+        } else {
+            let slot = self.ring_head;
+            self.ring_head = (self.ring_head + 1) % window;
+            slot
+        };
+        ring_key.slice_set(&key_states, 2, slot)?;
+        ring_value.slice_set(&value_states, 2, slot)?;
+        if self.ring_len < window {
+            Ok((
+                ring_key.narrow(2, 0, self.ring_len)?,
+                ring_value.narrow(2, 0, self.ring_len)?,
+            ))
+        } else {
+            Ok((ring_key.clone(), ring_value.clone()))
+        }
+    }
+
+    /// Prefill chunk on a sliding layer: attention runs over the linear
+    /// past (the last min(offset, w-1) logical ring entries) plus the
+    /// chunk; afterwards the last min(total, w-1) positions are written
+    /// back linearly (head 0), so prefill costs one bounded copy per
+    /// CHUNK, never per token.
+    fn ring_prefill(
+        &mut self,
+        key_states: &candle_core::Tensor,
+        value_states: &candle_core::Tensor,
+        window: usize,
+        seqlen_offset: usize,
+    ) -> AlmostResult<(candle_core::Tensor, candle_core::Tensor)> {
+        let (b_size, _heads, q_len, _d) = key_states.dims4()?;
+        self.ensure_ring(b_size, window, key_states.dtype(), key_states.device())?;
+        let need = seqlen_offset.min(window - 1);
+        snafu::ensure_whatever!(
+            self.ring_len >= need,
+            "sliding ring holds {} entries but the chunk at offset {} needs {}",
+            self.ring_len,
+            seqlen_offset,
+            need
+        );
+        let (key_states, value_states) = if need == 0 {
+            (key_states.contiguous()?, value_states.contiguous()?)
+        } else {
+            let (Some(ring_key), Some(ring_value)) = (&self.ring_key, &self.ring_value) else {
+                snafu::whatever!("sliding ring absent after ensure");
+            };
+            let past_key = ring_linear_tail(ring_key, self.ring_head, self.ring_len, need)?;
+            let past_value = ring_linear_tail(ring_value, self.ring_head, self.ring_len, need)?;
+            (
+                candle_core::Tensor::cat(&[&past_key, key_states], 2)?,
+                candle_core::Tensor::cat(&[&past_value, value_states], 2)?,
+            )
+        };
+        // Persist the tail linearly for the next chunk or decode.
+        let total = seqlen_offset + q_len;
+        let kv_len = key_states.dims()[2];
+        let (_, keep) = sliding_trim_bounds(total, window);
+        let tail_key = key_states.narrow(2, kv_len - keep, keep)?.contiguous()?;
+        let tail_value = value_states.narrow(2, kv_len - keep, keep)?.contiguous()?;
+        let (Some(ring_key), Some(ring_value)) = (&self.ring_key, &self.ring_value) else {
+            snafu::whatever!("sliding ring absent after ensure");
+        };
+        ring_key.slice_set(&tail_key, 2, 0)?;
+        ring_value.slice_set(&tail_value, 2, 0)?;
+        self.ring_head = 0;
+        self.ring_len = keep;
+        Ok((key_states, value_states))
+    }
+
     fn cached_len(&self) -> usize {
         match self.sliding_window {
-            Some(_) => match &self.kv_cache {
-                Some((key_cache, _)) => key_cache.dims()[2],
-                None => 0,
-            },
+            Some(_) => self.ring_len,
             None => self.full_cache_len,
         }
     }
 
-    /// Sliding caches drop; full-layer buffers keep their reserved
-    /// capacity (only the length resets), so repeated generations do not
-    /// re-pay the allocation.
+    /// Lengths reset; ring and full-layer buffers keep their reserved
+    /// capacity, so repeated generations do not re-pay the allocation.
     fn clear_kv_cache(&mut self) {
-        self.kv_cache = None;
+        self.ring_head = 0;
+        self.ring_len = 0;
         self.full_cache_len = 0;
     }
 }

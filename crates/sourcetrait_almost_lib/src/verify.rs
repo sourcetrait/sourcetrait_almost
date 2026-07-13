@@ -65,7 +65,9 @@ pub fn verify(
     } else {
         5e-4
     };
-    let cache_cap = config.sliding_window - 1;
+    // E3 rings: at most window-1 entries persist between prefill chunks,
+    // window right after a decode step (the current token's slot).
+    let cache_cap = config.sliding_window;
     eprintln!(
         "almost verify: {n} tokens, device {device:?}, dtype {dtype:?}, mode {}",
         if opts.long { "long (window exceeded)" } else { "quick" }

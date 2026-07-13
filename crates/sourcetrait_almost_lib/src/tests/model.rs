@@ -62,10 +62,9 @@ fn trimmed_mask_columns_start_at_the_cache_head() {
 
 #[test]
 fn trim_bounds_cap_at_window_minus_one() {
-    assert_eq!(sliding_trim_bounds(2, 4), None); // under the cap
-    assert_eq!(sliding_trim_bounds(3, 4), None); // exactly the cap
-    assert_eq!(sliding_trim_bounds(4, 4), Some((1, 3))); // one over
-    assert_eq!(sliding_trim_bounds(10, 4), Some((7, 3)));
-    // The decode-step shape: a cache at the cap grows by one, trims back.
-    assert_eq!(sliding_trim_bounds(4096, 4096), Some((1, 4095)));
+    assert_eq!(sliding_trim_bounds(2, 4), (0, 2)); // under the cap
+    assert_eq!(sliding_trim_bounds(3, 4), (0, 3)); // exactly the cap
+    assert_eq!(sliding_trim_bounds(4, 4), (1, 3)); // one over
+    assert_eq!(sliding_trim_bounds(10, 4), (7, 3));
+    assert_eq!(sliding_trim_bounds(4096, 4096), (1, 4095));
 }
