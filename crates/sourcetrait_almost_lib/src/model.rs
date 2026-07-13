@@ -76,26 +76,57 @@ pub(crate) fn sliding_trim_bounds(total_len: usize, window: usize) -> (usize, us
     }
 }
 
-/// The last `need` logical entries of a sliding ring as a linear tensor:
-/// a plain narrow when the span is contiguous in the buffer, a two-narrow
-/// cat when the ring wraps across the physical end.
+/// `count` logical entries of a sliding ring starting at logical index
+/// `logical_start`, as a linear tensor: a plain narrow when the span is
+/// contiguous in the buffer, a two-narrow cat when it wraps across the
+/// physical end.
+fn ring_linear_span(
+    ring: &candle_core::Tensor,
+    head: usize,
+    logical_start: usize,
+    count: usize,
+) -> AlmostResult<candle_core::Tensor> {
+    let window = ring.dims()[2];
+    let start = (head + logical_start) % window;
+    if start + count <= window {
+        Ok(ring.narrow(2, start, count)?)
+    } else {
+        let first = window - start;
+        Ok(candle_core::Tensor::cat(
+            &[&ring.narrow(2, start, first)?, &ring.narrow(2, 0, count - first)?],
+            2,
+        )?)
+    }
+}
+
+/// The last `need` logical entries of a sliding ring (see
+/// ring_linear_span).
 fn ring_linear_tail(
     ring: &candle_core::Tensor,
     head: usize,
     len: usize,
     need: usize,
 ) -> AlmostResult<candle_core::Tensor> {
-    let window = ring.dims()[2];
-    let start = (head + len - need) % window;
-    if start + need <= window {
-        Ok(ring.narrow(2, start, need)?)
-    } else {
-        let first = window - start;
-        Ok(candle_core::Tensor::cat(
-            &[&ring.narrow(2, start, first)?, &ring.narrow(2, 0, need - first)?],
-            2,
-        )?)
-    }
+    ring_linear_span(ring, head, len - need, need)
+}
+
+/// Per-layer cache checkpoint for speculative verification (E5a): the
+/// scalar lengths plus the oldest `span` logical ring entries - the only
+/// content the verification forward's linear ring rewrite can destroy
+/// that a rollback might need.
+struct AttentionMark {
+    full_len: usize,
+    saved_key: Option<candle_core::Tensor>,
+    saved_value: Option<candle_core::Tensor>,
+}
+
+/// Model-level cache checkpoint: taken before a speculative verification
+/// forward of `span` tokens at `offset`, rolled back to the accepted
+/// prefix afterwards.
+pub(crate) struct CacheMark {
+    marks: Vec<AttentionMark>,
+    offset: usize,
+    span: usize,
 }
 
 /// The almost Olmo 3 decoder (D1): HF-shaped single-target module, MHA
@@ -245,6 +276,38 @@ impl Model {
 
     pub(crate) fn flash_enabled(&self) -> bool {
         self.settings.use_flash_attn
+    }
+
+    /// Checkpoint the caches before a speculative verification forward
+    /// of `span` tokens at `offset` (E5a). Cost: span ring slots per
+    /// sliding layer.
+    pub(crate) fn cache_mark(&self, offset: usize, span: usize) -> AlmostResult<CacheMark> {
+        snafu::ensure_whatever!(
+            span >= 2,
+            "a verification span of {span} would not take the prefill path the rollback undoes"
+        );
+        let mut marks = Vec::with_capacity(self.layers.len());
+        for layer in &self.layers {
+            marks.push(layer.self_attn.cache_mark(offset, span)?);
+        }
+        Ok(CacheMark { marks, offset, span })
+    }
+
+    /// Rewind the caches to `accepted` consumed tokens out of the
+    /// marked verification span.
+    pub(crate) fn cache_rollback(&mut self, mark: &CacheMark, accepted: usize) -> AlmostResult<()> {
+        snafu::ensure_whatever!(
+            accepted >= 1 && accepted <= mark.span,
+            "rollback to {} tokens outside the marked span of {}",
+            accepted,
+            mark.span
+        );
+        for (layer, layer_mark) in self.layers.iter_mut().zip(mark.marks.iter()) {
+            layer
+                .self_attn
+                .cache_rollback(layer_mark, mark.offset, accepted, mark.span)?;
+        }
+        Ok(())
     }
 
     /// D4: decode (seq_len <= 1) builds no masks on any layer; masks exist
@@ -649,8 +712,11 @@ impl Attention {
         let (Some(ring_key), Some(ring_value)) = (&self.ring_key, &self.ring_value) else {
             snafu::whatever!("sliding ring absent after ensure");
         };
+        // General ring append (head may be nonzero with len < window
+        // after a speculation rollback): write at the logical end,
+        // advance head only once full.
         let slot = if self.ring_len < window {
-            let slot = self.ring_len;
+            let slot = (self.ring_head + self.ring_len) % window;
             self.ring_len += 1;
             slot
         } else {
@@ -660,13 +726,18 @@ impl Attention {
         };
         ring_key.slice_set(&key_states, 2, slot)?;
         ring_value.slice_set(&value_states, 2, slot)?;
-        if self.ring_len < window {
+        if self.ring_len == window {
+            Ok((ring_key.clone(), ring_value.clone()))
+        } else if self.ring_head + self.ring_len <= window {
             Ok((
-                ring_key.narrow(2, 0, self.ring_len)?,
-                ring_value.narrow(2, 0, self.ring_len)?,
+                ring_key.narrow(2, self.ring_head, self.ring_len)?,
+                ring_value.narrow(2, self.ring_head, self.ring_len)?,
             ))
         } else {
-            Ok((ring_key.clone(), ring_value.clone()))
+            Ok((
+                ring_linear_tail(ring_key, self.ring_head, self.ring_len, self.ring_len)?,
+                ring_linear_tail(ring_value, self.ring_head, self.ring_len, self.ring_len)?,
+            ))
         }
     }
 
@@ -719,6 +790,101 @@ impl Attention {
         self.ring_head = 0;
         self.ring_len = keep;
         Ok((key_states, value_states))
+    }
+
+    /// Checkpoint before a speculative verification forward: lengths,
+    /// plus the oldest rollback-reachable ring entries on sliding
+    /// layers (the linear rewrite the verification's prefill path
+    /// performs is the only destructive step a rollback must undo).
+    /// Saved entries are anchored at position offset - min(offset, w-1),
+    /// the same origin the rollback computes, so a saturated post-decode
+    /// ring (which holds one entry older than that) skips its oldest
+    /// slot.
+    fn cache_mark(&self, offset: usize, span: usize) -> AlmostResult<AttentionMark> {
+        let Some(window) = self.sliding_window else {
+            return Ok(AttentionMark {
+                full_len: self.full_cache_len,
+                saved_key: None,
+                saved_value: None,
+            });
+        };
+        let past_len = offset.min(window - 1);
+        snafu::ensure_whatever!(
+            self.ring_len >= past_len,
+            "sliding ring holds {} entries but offset {} implies {}",
+            self.ring_len,
+            offset,
+            past_len
+        );
+        let skip = self.ring_len - past_len;
+        let save = span.min(past_len);
+        let (saved_key, saved_value) = if save == 0 {
+            (None, None)
+        } else {
+            let (Some(ring_key), Some(ring_value)) = (&self.ring_key, &self.ring_value) else {
+                snafu::whatever!("sliding ring absent with nonzero occupancy");
+            };
+            (
+                Some(ring_linear_span(ring_key, self.ring_head, skip, save)?.contiguous()?),
+                Some(ring_linear_span(ring_value, self.ring_head, skip, save)?.contiguous()?),
+            )
+        };
+        Ok(AttentionMark {
+            full_len: 0,
+            saved_key,
+            saved_value,
+        })
+    }
+
+    /// Rewind to `accepted` of the `span` verified tokens. Full layers
+    /// shrink their length; sliding rings re-point into the linear
+    /// rewrite the verification left, restoring displaced oldest
+    /// entries from the mark when the window saturated across the span.
+    fn cache_rollback(
+        &mut self,
+        mark: &AttentionMark,
+        offset_before: usize,
+        accepted: usize,
+        span: usize,
+    ) -> AlmostResult<()> {
+        let Some(window) = self.sliding_window else {
+            self.full_cache_len = mark.full_len + accepted;
+            return Ok(());
+        };
+        let total_after = offset_before + span;
+        let total_target = offset_before + accepted;
+        let keep_after = total_after.min(window - 1);
+        let keep_target = total_target.min(window - 1);
+        let after_start = total_after - keep_after;
+        let target_start = total_target - keep_target;
+        if target_start >= after_start {
+            // Everything needed survived the rewrite; re-point into it.
+            self.ring_head = target_start - after_start;
+            self.ring_len = keep_target;
+            return Ok(());
+        }
+        let missing = after_start - target_start;
+        let (Some(saved_key), Some(saved_value)) = (&mark.saved_key, &mark.saved_value) else {
+            snafu::whatever!("ring rollback needs {missing} displaced entries but none were saved");
+        };
+        let saved_len = saved_key.dims()[2];
+        let old_start = offset_before - offset_before.min(window - 1);
+        let need_from = target_start - old_start;
+        snafu::ensure_whatever!(
+            need_from + missing <= saved_len,
+            "ring rollback needs saved entries [{need_from}, {}) but only {saved_len} were saved",
+            need_from + missing
+        );
+        let (Some(ring_key), Some(ring_value)) = (&self.ring_key, &self.ring_value) else {
+            snafu::whatever!("sliding ring absent during rollback");
+        };
+        let restore_key = saved_key.narrow(2, need_from, missing)?.contiguous()?;
+        let restore_value = saved_value.narrow(2, need_from, missing)?.contiguous()?;
+        ring_key.slice_set(&restore_key, 2, window - missing)?;
+        ring_value.slice_set(&restore_value, 2, window - missing)?;
+        self.ring_head = window - missing;
+        self.ring_len = keep_target;
+        Ok(())
     }
 
     fn cached_len(&self) -> usize {

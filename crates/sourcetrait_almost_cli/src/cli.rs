@@ -28,9 +28,14 @@ pub(crate) enum Command {
         #[arg(long)]
         greedy: bool,
         /// Flash attention (needs a flash-attn build, cuda, bf16/f16;
-        /// errors otherwise). Sliding prefills past the window stay eager.
+        /// errors otherwise)
         #[arg(long)]
         flash: bool,
+        /// Prompt-lookup speculation: draft repeats from earlier context,
+        /// verify in one batched forward. Greedy-only, token-exact vs
+        /// plain greedy; big wins on copy-heavy output
+        #[arg(long)]
+        speculate: bool,
         #[arg(long, default_value_t = lib::consts::DEFAULT_TEMPERATURE)]
         temperature: f64,
         #[arg(long, default_value_t = lib::consts::DEFAULT_TOP_P)]

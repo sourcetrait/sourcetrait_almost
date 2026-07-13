@@ -7,6 +7,7 @@ pub(crate) mod hub;
 pub(crate) mod load;
 pub(crate) mod model;
 pub(crate) mod rope;
+pub(crate) mod speculate;
 pub(crate) mod token_stream;
 pub(crate) mod verify;
 
@@ -15,12 +16,14 @@ pub(crate) mod tests {
     pub(crate) mod chat;
     pub(crate) mod model;
     pub(crate) mod rope;
+    pub(crate) mod speculate;
 }
 
 pub(crate) use std::{
     collections::{
         BTreeSet,
         HashMap,
+        VecDeque,
     },
     io::{
         self,
@@ -58,8 +61,10 @@ pub(crate) use crate::{
         banded_mask_values,
         sliding_trim_bounds,
         AttnMask,
+        CacheMark,
     },
     rope::RopeTables,
+    speculate::LookupIndex,
     token_stream::TokenStream,
 };
 

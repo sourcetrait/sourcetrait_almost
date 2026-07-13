@@ -27,6 +27,7 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
             raw,
             greedy,
             flash,
+            speculate,
             temperature,
             top_p,
             sample_len,
@@ -60,6 +61,7 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
                 top_p,
                 sample_len,
                 seed,
+                speculate,
                 dump_logits,
             };
             let mut generation = model.generate(&loaded.tokenizer, &text, &options)?;
@@ -78,14 +80,26 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
             if let Some(path) = &options.dump_logits {
                 eprintln!("almost: logits dumped to {}", path.display());
             }
+            let speculation_note = if report.drafted_token_count > 0 {
+                format!(
+                    "; drafted {} accepted {} ({:.0}%)",
+                    report.drafted_token_count,
+                    report.accepted_draft_token_count,
+                    100.0 * report.accepted_draft_token_count as f64
+                        / report.drafted_token_count as f64
+                )
+            } else {
+                String::new()
+            };
             eprintln!(
-                "almost: prefill {} tokens in {:.2}s ({:.1} tok/s); decode {} tokens in {:.2}s ({:.1} tok/s); stopped by {}",
+                "almost: prefill {} tokens in {:.2}s ({:.1} tok/s); decode {} tokens in {:.2}s ({:.1} tok/s){}; stopped by {}",
                 report.prompt_token_count,
                 report.prefill_seconds,
                 report.prompt_token_count as f64 / report.prefill_seconds.max(f64::EPSILON),
                 report.generated_token_count,
                 report.decode_seconds,
                 report.generated_token_count as f64 / report.decode_seconds.max(f64::EPSILON),
+                speculation_note,
                 match report.finish_reason {
                     Some(lib::FinishReason::StopToken) => "stop token",
                     Some(lib::FinishReason::SampleLen) => "sample_len",

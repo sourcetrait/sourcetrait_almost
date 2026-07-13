@@ -8,6 +8,12 @@ pub struct GenerateOptions {
     pub top_p: f64,
     pub sample_len: usize,
     pub seed: u64,
+    /// E5a prompt-lookup speculation: draft from earlier context
+    /// occurrences, verify in one batched forward. Greedy only (the
+    /// verification path reuses the same argmax sampler, so output is
+    /// token-exact vs non-speculative greedy); incompatible with
+    /// dump_logits.
+    pub speculate: bool,
     /// When set, capture a parity dump - "logits" (rows, vocab) f32 over
     /// every fed position of [prompt ++ fed], plus prompt/fed/generated
     /// ids - written by finish(). No repeat penalty exists anywhere: logits
@@ -40,6 +46,9 @@ pub struct GenerationReport {
     pub finish_reason: Option<FinishReason>,
     pub prompt_token_count: usize,
     pub generated_token_count: usize,
+    /// Speculation tallies (zero when speculate was off or never fired).
+    pub drafted_token_count: usize,
+    pub accepted_draft_token_count: usize,
     pub prefill_seconds: f64,
     pub decode_seconds: f64,
     pub rest: Option<String>,
@@ -61,6 +70,12 @@ pub struct Generation<'m, 't> {
     generated_ids: Vec<u32>,
     dump_rows: Vec<candle_core::Tensor>,
     pending: Option<u32>,
+    /// Speculation-verified tokens awaiting emission; already consumed
+    /// into the caches and counted in offset.
+    queued: VecDeque<u32>,
+    index: LookupIndex,
+    drafted_count: usize,
+    accepted_draft_count: usize,
     offset: usize,
     finish_reason: Option<FinishReason>,
     failed: bool,
@@ -85,6 +100,20 @@ impl Model {
         snafu::ensure_whatever!(!prompt_ids.is_empty(), "the prompt tokenized to zero tokens");
         let stop_ids = resolve_stop_ids(tokenizer);
         let dumping = options.dump_logits.is_some();
+        if options.speculate {
+            snafu::ensure_whatever!(
+                options.greedy,
+                "speculation is greedy-only (sampling verification is a later track)"
+            );
+            snafu::ensure_whatever!(
+                !dumping,
+                "speculation and --dump-logits do not combine; parity dumps run non-speculative"
+            );
+        }
+        let mut index = LookupIndex::new();
+        if options.speculate {
+            index.extend(&prompt_ids);
+        }
 
         let sampling = if options.greedy {
             r::candle::Sampling::ArgMax
@@ -142,6 +171,10 @@ impl Model {
             generated_ids: Vec::new(),
             dump_rows,
             pending: Some(first),
+            queued: VecDeque::new(),
+            index,
+            drafted_count: 0,
+            accepted_draft_count: 0,
             offset,
             finish_reason: None,
             failed: false,
@@ -172,6 +205,8 @@ impl Generation<'_, '_> {
             finish_reason: self.finish_reason,
             prompt_token_count: self.prompt_ids.len(),
             generated_token_count: self.generated_ids.len(),
+            drafted_token_count: self.drafted_count,
+            accepted_draft_token_count: self.accepted_draft_count,
             prefill_seconds: self.prefill_seconds,
             decode_seconds: self.decode_seconds,
             rest,
@@ -196,15 +231,101 @@ impl Generation<'_, '_> {
         self.offset += 1;
         Ok(self.processor.sample(&step_logits)?)
     }
+
+    /// One decode-or-verify round for the emitted token: with a lookup
+    /// hit, verify [token ++ draft] in one batched forward, roll the
+    /// caches back to the accepted prefix, queue the verified
+    /// continuation, and stage the model's own next token (the
+    /// correction/bonus row) - token-exact vs plain greedy because every
+    /// row goes through the same argmax sampler. Without a hit, plain
+    /// stage_next.
+    fn stage_or_speculate(&mut self, token: u32) -> AlmostResult<()> {
+        // The emitted token is committed context NOW - it must be in the
+        // index before drafting, or every draft continues the pre-token
+        // tail and competes with the token itself (an off-by-one that
+        // rejects everything).
+        if self.options.speculate {
+            self.index.extend(&[token]);
+        }
+        let budget = self
+            .options
+            .sample_len
+            .saturating_sub(self.generated_ids.len());
+        let draft = if self.options.speculate && budget > 0 {
+            self.index.draft(budget)
+        } else {
+            None
+        };
+        let Some(draft) = draft else {
+            let next_token = self.stage_next(token)?;
+            self.pending = Some(next_token);
+            return Ok(());
+        };
+
+        let span = 1 + draft.len();
+        let mark = self.model.cache_mark(self.offset, span)?;
+        let mut block: Vec<u32> = Vec::with_capacity(span);
+        block.push(token);
+        block.extend_from_slice(&draft);
+        let input = candle_core::Tensor::new(block.as_slice(), self.model.device())?.unsqueeze(0)?;
+        let logits = self
+            .model
+            .forward_all(&input, self.offset)?
+            .squeeze(0)?
+            .to_device(&candle_core::Device::Cpu)?
+            .to_dtype(candle_core::DType::F32)?;
+        self.drafted_count += draft.len();
+
+        let mut greedy_next: Vec<u32> = Vec::with_capacity(span);
+        for row_index in 0..span {
+            let row = logits.narrow(0, row_index, 1)?.squeeze(0)?;
+            greedy_next.push(self.processor.sample(&row)?);
+        }
+
+        let mut accepted: Vec<u32> = vec![token];
+        for (draft_index, &draft_token) in draft.iter().enumerate() {
+            if greedy_next[draft_index] == draft_token {
+                accepted.push(draft_token);
+            } else {
+                break;
+            }
+        }
+        let consumed = accepted.len();
+        self.accepted_draft_count += consumed - 1;
+        let bonus = greedy_next[consumed - 1];
+
+        self.model.cache_rollback(&mark, consumed)?;
+        self.offset += consumed;
+        self.fed_ids.extend(&accepted);
+        // token is already indexed; the verified continuation joins now.
+        self.index.extend(&accepted[1..]);
+
+        let mut queued: Vec<u32> = accepted[1..].to_vec();
+        let mut pending = bonus;
+        if let Some(stop_at) = queued.iter().position(|t| self.stop_ids.contains(t)) {
+            pending = queued[stop_at];
+            queued.truncate(stop_at);
+        }
+        self.queued = queued.into();
+        self.pending = Some(pending);
+        Ok(())
+    }
 }
 
 impl Iterator for Generation<'_, '_> {
     type Item = AlmostResult<GenerationStep>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let token = self.pending?;
+        let (token, from_queue) = match self.queued.pop_front() {
+            Some(queued_token) => (queued_token, true),
+            None => match self.pending {
+                Some(pending_token) => (pending_token, false),
+                None => return None,
+            },
+        };
         if self.stop_ids.contains(&token) {
             self.pending = None;
+            self.queued.clear();
             self.finish_reason = Some(FinishReason::StopToken);
             return None;
         }
@@ -214,24 +335,29 @@ impl Iterator for Generation<'_, '_> {
             Ok(chunk) => chunk,
             Err(error) => {
                 self.pending = None;
+                self.queued.clear();
                 self.failed = true;
                 return Some(Err(error));
             }
         };
         if self.generated_ids.len() >= self.options.sample_len {
             self.pending = None;
+            self.queued.clear();
             self.finish_reason = Some(FinishReason::SampleLen);
             return Some(Ok(GenerationStep { token_id: token, chunk }));
         }
-        let staged = self.stage_next(token);
+        if from_queue {
+            // Verified continuation: already consumed into the caches,
+            // no forward owed on this call.
+            return Some(Ok(GenerationStep { token_id: token, chunk }));
+        }
+        let staged = self.stage_or_speculate(token);
         self.decode_seconds += step_start.elapsed().as_secs_f64();
         match staged {
-            Ok(next_token) => {
-                self.pending = Some(next_token);
-                Some(Ok(GenerationStep { token_id: token, chunk }))
-            }
+            Ok(()) => Some(Ok(GenerationStep { token_id: token, chunk })),
             Err(error) => {
                 self.pending = None;
+                self.queued.clear();
                 self.failed = true;
                 Some(Err(error))
             }
