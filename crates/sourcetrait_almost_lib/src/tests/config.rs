@@ -6,6 +6,7 @@ fn partial_config_overlays_code_defaults() {
     let config: Config = toml::from_str("[generation]\ngreedy = true").unwrap();
     assert!(config.generation.greedy);
     assert_eq!(config.generation.temperature, crate::consts::DEFAULT_TEMPERATURE);
+    assert_eq!(config.generation.sample_len, crate::consts::DEFAULT_SAMPLE_LEN);
     assert_eq!(config.model_id, crate::consts::DEFAULT_MODEL_ID);
     assert_eq!(config.device, DeviceConfig::Auto);
 }

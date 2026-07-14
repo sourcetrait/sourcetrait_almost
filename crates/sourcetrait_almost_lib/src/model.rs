@@ -413,6 +413,10 @@ impl Model {
         &self.device
     }
 
+    pub(crate) fn max_position_embeddings(&self) -> usize {
+        self.max_position_embeddings
+    }
+
     pub(crate) fn flash_enabled(&self) -> bool {
         self.settings.use_flash_attn
     }
@@ -646,14 +650,21 @@ impl Model {
             ring_head == 0 || ring_len == self.sliding_window,
             "graph arming expects head-0 linear rings until saturation (head {ring_head}, len {ring_len})"
         );
-        // The run ceiling: the largest valid width decode can reach -
-        // eviction bounds the store at decode cap + slack + 1; exact
-        // runs bound at the position ceiling.
+        // The run ceiling: the largest width the arm pre-pays. Eviction
+        // bounds the store at decode cap + slack + 1. Exact runs clamp
+        // the sample budget's contribution to the reserve margin - a
+        // large budget (the 32768 default) would otherwise pre-grow
+        // gigabytes a typical decode never touches, and overflow the
+        // card outright at 32K prompts. A decode that outruns the
+        // armed capacity falls to the classic path via the capacity
+        // epoch (graph_disarm_when_full).
         let ceiling = match &self.settings.eviction {
             Some(eviction) => {
                 full_len.max(eviction.decode_phase_cap() + evict::DECODE_EVICT_SLACK + 1)
             }
-            None => expected_total.min(self.max_position_embeddings),
+            None => expected_total
+                .min(full_len + 1 + consts::RESERVE_DECODE_MARGIN)
+                .min(self.max_position_embeddings),
         };
         let capacity = graph::bucket_for(ceiling.max(full_len + 1));
         let device = self.device.clone();
@@ -728,6 +739,41 @@ impl Model {
     #[cfg(not(feature = "cuda"))]
     pub(crate) fn set_graph_capture(&mut self, _enabled: bool) -> AlmostResult<()> {
         snafu::whatever!("this build carries no cuda support (decode graphs need --features cuda)")
+    }
+
+    /// E4 capacity epoch: when the next staged append would exceed the
+    /// armed kv capacity (a decode outran the arm's bounded headroom),
+    /// disarm and retire capture for this Model - the remaining steps
+    /// take the classic path, whose append growth applies the park
+    /// containment (full_grow). Without this, the graph-mode narrow
+    /// past the buffer would error mid-step. Eviction-armed runs never
+    /// reach it (their store is capped under the armed capacity).
+    #[cfg(feature = "cuda")]
+    pub(crate) fn graph_disarm_when_full(&mut self) -> AlmostResult<()> {
+        if !self.graph_armed() {
+            return Ok(());
+        }
+        let capacity = self
+            .layers
+            .iter()
+            .find(|layer| layer.layer_type == LayerType::Full)
+            .map(|layer| layer.self_attn.full_capacity())
+            .unwrap_or(0);
+        let (full_len, _, _) = self.graph_type_state()?;
+        if full_len + 1 > capacity {
+            self.flush_captured_graphs();
+            if let Some(stage) = &mut self.graph_stage {
+                stage.armed = false;
+                stage.capture_enabled = false;
+                stage.capture_permitted = false;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    pub(crate) fn graph_disarm_when_full(&mut self) -> AlmostResult<()> {
+        Ok(())
     }
 
     /// Largest full-layer store length currently held (the eviction

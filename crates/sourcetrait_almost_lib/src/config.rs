@@ -85,7 +85,7 @@ impl Default for GenerationConfig {
             greedy: false,
             temperature: consts::DEFAULT_TEMPERATURE,
             top_p: consts::DEFAULT_TOP_P,
-            sample_len: 256,
+            sample_len: consts::DEFAULT_SAMPLE_LEN,
             seed: 299_792_458,
             speculate: false,
         }

@@ -6,6 +6,9 @@ pub struct GenerateOptions {
     pub greedy: bool,
     pub temperature: f64,
     pub top_p: f64,
+    /// Decode budget (tokens to yield); generation clamps it to the
+    /// position ceiling for the run's context, so a deep session stops
+    /// (SampleLen) at the window edge instead of erroring mid-reply.
     pub sample_len: usize,
     pub seed: u64,
     /// E5a prompt-lookup speculation: draft from earlier context
@@ -168,6 +171,13 @@ impl Model {
             prefilled < context_ids.len(),
             "nothing to prefill (the context carries no new tokens)"
         );
+        // The budget clamps to the position ceiling: a deep context
+        // stops at the window edge (SampleLen) instead of erroring
+        // mid-reply on the forward assert.
+        let mut options = options.clone();
+        options.sample_len = options
+            .sample_len
+            .min(self.max_position_embeddings().saturating_sub(context_ids.len()));
         let stop_ids = resolve_stop_ids(tokenizer);
         let dumping = options.dump_logits.is_some();
         if options.speculate {
@@ -317,8 +327,11 @@ impl Generation<'_, '_> {
 
     /// The decode work of one next(): forward the yielded token, stage the
     /// next sample. An armed graph stage routes through the staged decode
-    /// step (E4); the classic path is unchanged.
+    /// step (E4); the classic path is unchanged. A decode that outruns
+    /// the armed capacity disarms first (the capacity epoch) and
+    /// continues classic.
     fn stage_next(&mut self, token: u32) -> AlmostResult<u32> {
+        self.model.graph_disarm_when_full()?;
         if self.model.graph_armed() {
             let step_logits = self.model.graph_decode_step(token, self.offset)?;
             self.fed_ids.push(token);

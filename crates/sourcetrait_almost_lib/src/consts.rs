@@ -8,6 +8,13 @@ pub const STOP_TOKENS: [&str; 2] = ["<|im_end|>", "<|endoftext|>"];
 pub const DEFAULT_TEMPERATURE: f64 = 0.6;
 pub const DEFAULT_TOP_P: f64 = 0.95;
 
+/// Decode budget default: the checkpoint's generation_config
+/// max_new_tokens (the model card's recommendation). A budget, not a
+/// reservation - caches grow with the actual decode, the graph arm
+/// pre-pays only a reserve-sized headroom, and generation clamps the
+/// effective budget to the position ceiling at start.
+pub const DEFAULT_SAMPLE_LEN: usize = 32768;
+
 /// Eager prompt-prefill chunk (tokens per forward). Bounds the eager
 /// attention transient - scores plus the f32-softmax parity copies scale
 /// with chunk * context: ~1.3 GiB at 32K bf16, which beside the weights
