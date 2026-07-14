@@ -36,6 +36,49 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 8)]
         top: usize,
     },
+    /// Train a LoRA adapter over the frozen checkpoint (plain LM loss
+    /// over packed corpus chunks; needs a --features cuda,train build)
+    #[cfg(feature = "train")]
+    Train {
+        /// Corpus roots, walked recursively (Cargo.toml, .rs, .nu,
+        /// .nuon, README.md)
+        #[arg(long, required = true)]
+        data: Vec<PathBuf>,
+        /// Directory names to skip while walking (dot-dirs always skip)
+        #[arg(long)]
+        exclude: Vec<String>,
+        /// Adapter output path (safetensors)
+        #[arg(long)]
+        out: PathBuf,
+        /// tokenizer.json; defaults to <model-dir>/tokenizer.json
+        #[arg(long)]
+        tokenizer: Option<PathBuf>,
+        /// Checkpoint directory; defaults to the shared model dir
+        #[arg(long)]
+        model_dir: Option<PathBuf>,
+        #[arg(long, default_value_t = 1024)]
+        seq_len: usize,
+        #[arg(long, default_value_t = 100)]
+        steps: usize,
+        #[arg(long, default_value_t = 64)]
+        rank: usize,
+        /// LoRA alpha; 0 resolves to 2 * rank
+        #[arg(long, default_value_t = 0.0)]
+        alpha: f64,
+        #[arg(long, default_value_t = 2e-4)]
+        lr: f64,
+        /// Linear lr warmup steps
+        #[arg(long, default_value_t = 10)]
+        warmup: usize,
+        /// Chunk-shuffle seed
+        #[arg(long, default_value_t = 299_792_458)]
+        seed: u64,
+        /// Rows per lm-head/loss chunk (bounds the logits transient)
+        #[arg(long, default_value_t = 512)]
+        loss_chunk: usize,
+        #[arg(long, default_value_t = 10)]
+        log_every: usize,
+    },
 }
 
 /// Mirrors lmst's default layout so the two binaries share a checkpoint:

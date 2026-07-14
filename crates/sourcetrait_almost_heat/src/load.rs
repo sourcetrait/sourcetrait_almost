@@ -7,6 +7,12 @@ pub(crate) struct Weights {
 }
 
 impl Weights {
+    /// Synthetic tensor set for unit tests (toy configs, no checkpoint).
+    #[cfg(test)]
+    pub(crate) fn from_tensors(tensors: HashMap<String, (Vec<usize>, Vec<f32>)>) -> Self {
+        Self { tensors }
+    }
+
     /// Read every shard, converting bf16 payloads to f32.
     pub(crate) fn load(shards: &[PathBuf]) -> HeatResult<Self> {
         let mut tensors = HashMap::new();

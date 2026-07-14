@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_almost_heat"
-version = "0.0.0-2"
+version = "0.0.0-3"
 edition = "2024"
 description = "Independent burn-based Olmo 3 parity oracle for almost"
 authors = ["SourceTrait <development@sourcetrait.com>"]
@@ -16,6 +16,12 @@ path = "src/main.rs"
 
 [features]
 cuda = ["burn/cuda", "burn/autotune"]
+train = ["burn/autodiff", "dep:tokenizers"]
+# Training smoke target: cuda WITHOUT autotune - the head-matmul
+# autotune's benchmark churn at ~22 GiB residency kills the cubecl
+# allocator (measured); default kernel selection trades speed for a
+# bounded pool.
+train-cuda = ["train", "burn/cuda"]
 
 [dependencies]
 burn.workspace = true
@@ -25,3 +31,4 @@ safetensors.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
+tokenizers = { workspace = true, optional = true }

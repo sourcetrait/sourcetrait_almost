@@ -6652,7 +6652,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_almost_heat"
-version = "0.0.0-2"
+version = "0.0.0-3"
 dependencies = [
  "burn",
  "clap",
@@ -6661,6 +6661,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu",
+ "tokenizers 0.23.1",
 ]
 
 [[package]]

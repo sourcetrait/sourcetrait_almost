@@ -11,21 +11,21 @@ type FloatTensor<B, const D: usize> = burn::tensor::Tensor<B, D>;
 /// CpuBack (ndarray f32) is the reference grade, CudaBack (bf16) the fast
 /// grade.
 pub(crate) struct HeatModel<B: Backend> {
-    embed_rows: Vec<f32>,
-    embed_hidden: usize,
-    layers: Vec<HeatLayer<B>>,
-    final_norm: FloatTensor<B, 1>,
-    lm_head_transposed: FloatTensor<B, 2>,
-    cos_full: Vec<f32>,
-    sin_full: Vec<f32>,
-    cos_sliding: Vec<f32>,
-    sin_sliding: Vec<f32>,
-    heads: usize,
-    head_dim: usize,
-    window: usize,
-    eps: f64,
-    max_positions: usize,
-    device: B::Device,
+    pub(crate) embed_rows: Vec<f32>,
+    pub(crate) embed_hidden: usize,
+    pub(crate) layers: Vec<HeatLayer<B>>,
+    pub(crate) final_norm: FloatTensor<B, 1>,
+    pub(crate) lm_head_transposed: FloatTensor<B, 2>,
+    pub(crate) cos_full: Vec<f32>,
+    pub(crate) sin_full: Vec<f32>,
+    pub(crate) cos_sliding: Vec<f32>,
+    pub(crate) sin_sliding: Vec<f32>,
+    pub(crate) heads: usize,
+    pub(crate) head_dim: usize,
+    pub(crate) window: usize,
+    pub(crate) eps: f64,
+    pub(crate) max_positions: usize,
+    pub(crate) device: B::Device,
 }
 
 impl<B: Backend> HeatModel<B> {
@@ -140,7 +140,7 @@ impl<B: Backend> HeatModel<B> {
 
     /// Additive 0/-inf visibility mask (n, n); window w hides keys more
     /// than w-1 positions back.
-    fn mask(&self, n: usize, window: Option<usize>) -> FloatTensor<B, 2> {
+    pub(crate) fn mask(&self, n: usize, window: Option<usize>) -> FloatTensor<B, 2> {
         let mut values = vec![0f32; n * n];
         for query in 0..n {
             for key in 0..n {
@@ -154,7 +154,7 @@ impl<B: Backend> HeatModel<B> {
         FloatTensor::<B, 2>::from_data(burn::tensor::TensorData::new(values, [n, n]), &self.device)
     }
 
-    fn table_slice(&self, cos: &[f32], sin: &[f32], n: usize) -> (FloatTensor<B, 2>, FloatTensor<B, 2>) {
+    pub(crate) fn table_slice(&self, cos: &[f32], sin: &[f32], n: usize) -> (FloatTensor<B, 2>, FloatTensor<B, 2>) {
         let width = self.head_dim;
         let cos = FloatTensor::<B, 2>::from_data(
             burn::tensor::TensorData::new(cos[..n * width].to_vec(), [n, width]),
@@ -168,19 +168,19 @@ impl<B: Backend> HeatModel<B> {
     }
 }
 
-struct HeatLayer<B: Backend> {
-    q_transposed: FloatTensor<B, 2>,
-    k_transposed: FloatTensor<B, 2>,
-    v_transposed: FloatTensor<B, 2>,
-    o_transposed: FloatTensor<B, 2>,
-    q_norm: FloatTensor<B, 1>,
-    k_norm: FloatTensor<B, 1>,
-    gate_transposed: FloatTensor<B, 2>,
-    up_transposed: FloatTensor<B, 2>,
-    down_transposed: FloatTensor<B, 2>,
-    post_attention_norm: FloatTensor<B, 1>,
-    post_feedforward_norm: FloatTensor<B, 1>,
-    kind: LayerKind,
+pub(crate) struct HeatLayer<B: Backend> {
+    pub(crate) q_transposed: FloatTensor<B, 2>,
+    pub(crate) k_transposed: FloatTensor<B, 2>,
+    pub(crate) v_transposed: FloatTensor<B, 2>,
+    pub(crate) o_transposed: FloatTensor<B, 2>,
+    pub(crate) q_norm: FloatTensor<B, 1>,
+    pub(crate) k_norm: FloatTensor<B, 1>,
+    pub(crate) gate_transposed: FloatTensor<B, 2>,
+    pub(crate) up_transposed: FloatTensor<B, 2>,
+    pub(crate) down_transposed: FloatTensor<B, 2>,
+    pub(crate) post_attention_norm: FloatTensor<B, 1>,
+    pub(crate) post_feedforward_norm: FloatTensor<B, 1>,
+    pub(crate) kind: LayerKind,
 }
 
 impl<B: Backend> HeatLayer<B> {
@@ -265,12 +265,12 @@ impl<B: Backend> HeatLayer<B> {
 }
 
 /// (n, hidden) -> (heads, n, head_dim).
-fn to_heads<B: Backend>(x: FloatTensor<B, 2>, n: usize, heads: usize, head_dim: usize) -> FloatTensor<B, 3> {
+pub(crate) fn to_heads<B: Backend>(x: FloatTensor<B, 2>, n: usize, heads: usize, head_dim: usize) -> FloatTensor<B, 3> {
     x.reshape([n, heads, head_dim]).swap_dims(0, 1)
 }
 
 /// HF rotate-half rope: t*cos + rotate_half(t)*sin, cos/sin (n, head_dim).
-fn apply_rope<B: Backend>(
+pub(crate) fn apply_rope<B: Backend>(
     t: FloatTensor<B, 3>,
     cos: &FloatTensor<B, 2>,
     sin: &FloatTensor<B, 2>,
@@ -287,7 +287,7 @@ fn apply_rope<B: Backend>(
 }
 
 /// HF RMSNorm: x * rsqrt(mean(x^2) + eps) * weight.
-fn rms_norm<B: Backend>(x: FloatTensor<B, 2>, weight: &FloatTensor<B, 1>, eps: f64) -> FloatTensor<B, 2> {
+pub(crate) fn rms_norm<B: Backend>(x: FloatTensor<B, 2>, weight: &FloatTensor<B, 1>, eps: f64) -> FloatTensor<B, 2> {
     let [n, width] = x.dims();
     let mean_square = (x.clone() * x.clone()).mean_dim(1);
     let scale = (mean_square + eps).sqrt().recip().expand([n, width]);

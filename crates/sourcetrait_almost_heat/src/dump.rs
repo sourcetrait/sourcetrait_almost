@@ -79,7 +79,7 @@ fn forward_on<B: burn::tensor::backend::Backend>(
 }
 
 /// Shard list from the model dir's safetensors index.
-fn shard_paths(model_dir: &Path) -> HeatResult<Vec<PathBuf>> {
+pub(crate) fn shard_paths(model_dir: &Path) -> HeatResult<Vec<PathBuf>> {
     let index_path = model_dir.join("model.safetensors.index.json");
     let index: serde_json::Value = serde_json::from_reader(std::fs::File::open(&index_path)?)?;
     let Some(weight_map) = index.get("weight_map").and_then(|value| value.as_object()) else {

@@ -30,5 +30,42 @@ fn dispatch(cli: Cli) -> HeatResult<()> {
             reference,
             top,
         } => diff::diff(&candidate, &reference, top),
+        #[cfg(feature = "train")]
+        Command::Train {
+            data,
+            exclude,
+            out,
+            tokenizer,
+            model_dir,
+            seq_len,
+            steps,
+            rank,
+            alpha,
+            lr,
+            warmup,
+            seed,
+            loss_chunk,
+            log_every,
+        } => {
+            let model_dir = model_dir.unwrap_or_else(cli::default_model_dir);
+            let tokenizer = tokenizer.unwrap_or_else(|| model_dir.join("tokenizer.json"));
+            let options = train::TrainOptions {
+                data_roots: data,
+                exclude_dirs: exclude,
+                tokenizer,
+                model_dir,
+                out,
+                seq_len,
+                steps,
+                rank,
+                alpha: if alpha == 0.0 { 2.0 * rank as f64 } else { alpha },
+                learning_rate: lr,
+                warmup_steps: warmup,
+                seed,
+                loss_chunk,
+                log_every,
+            };
+            train::train(&options)
+        }
     }
 }
