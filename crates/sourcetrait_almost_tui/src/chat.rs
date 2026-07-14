@@ -16,6 +16,78 @@ pub(crate) struct Turn {
     pub(crate) text: String,
 }
 
+/// One conversation: its base62 nom (the top-right title and the log
+/// file's stem), the transcript, and the model-side continuation state.
+/// /new replaces the whole thing (and clears the KV cache).
+struct Session {
+    nom: String,
+    log_path: Option<PathBuf>,
+    turns: Vec<Turn>,
+    restored: Option<lib::RestoredContext>,
+    /// Transcript lines scrolled back from the bottom (PgUp/PgDn).
+    scroll_back: usize,
+}
+
+impl Session {
+    fn new(log: bool) -> lib::AlmostResult<Self> {
+        let nom = base62(RandomState::new().build_hasher().finish());
+        let log_path = if log {
+            let dir = lib::default_sessions_dir();
+            std::fs::create_dir_all(&dir)?;
+            Some(dir.join(format!("{nom}.txt")))
+        } else {
+            None
+        };
+        Ok(Self {
+            nom,
+            log_path,
+            turns: Vec::new(),
+            restored: None,
+            scroll_back: 0,
+        })
+    }
+
+    /// Rewrite the session log with the whole transcript (each turn
+    /// updates it; cheap at chat sizes).
+    fn write_log(&self) -> lib::AlmostResult<()> {
+        if let Some(path) = &self.log_path {
+            std::fs::write(path, render_log(&self.turns))?;
+        }
+        Ok(())
+    }
+}
+
+/// base62 rendering of a u64 (0-9A-Za-z), the session nom form.
+pub(crate) fn base62(mut value: u64) -> String {
+    const DIGITS: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    if value == 0 {
+        return String::from("0");
+    }
+    let mut out: Vec<u8> = Vec::new();
+    while value > 0 {
+        out.push(DIGITS[(value % 62) as usize]);
+        value /= 62;
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// The transcript as plain text (the session log's file form).
+pub(crate) fn render_log(turns: &[Turn]) -> String {
+    let mut text = String::new();
+    for turn in turns {
+        let label = match turn.speaker {
+            Speaker::You => "you: ",
+            Speaker::Almost => "almost: ",
+            Speaker::Note => "",
+        };
+        text.push_str(label);
+        text.push_str(&turn.text);
+        text.push_str("\n\n");
+    }
+    text
+}
+
 /// Byte offset of a char index into `text` (UTF-8 safe; clamps to end).
 pub(crate) fn byte_index(text: &str, char_index: usize) -> usize {
     text.char_indices()
@@ -90,7 +162,7 @@ fn cursor_row_col(input: &str, cursor: usize) -> (u16, u16) {
 
 fn draw(
     terminal: &mut ratatui::DefaultTerminal,
-    turns: &[Turn],
+    session: &Session,
     input: &str,
     cursor: usize,
     status: &str,
@@ -105,12 +177,17 @@ fn draw(
 
         let session_width = chunks[0].width.saturating_sub(2).max(1) as usize;
         let session_height = chunks[0].height.saturating_sub(2) as usize;
-        let lines = transcript_lines(turns, session_width);
-        let scroll = lines.len().saturating_sub(session_height) as u16;
+        let lines = transcript_lines(&session.turns, session_width);
+        let bottom = lines.len().saturating_sub(session_height);
+        let scroll = bottom.saturating_sub(session.scroll_back) as u16;
         frame.render_widget(
             ratatui::widgets::Paragraph::new(ratatui::text::Text::from(lines))
                 .scroll((scroll, 0))
-                .block(ratatui::widgets::Block::bordered().title("almost chat")),
+                .block(
+                    ratatui::widgets::Block::bordered()
+                        .title("almost chat")
+                        .title(ratatui::text::Line::from(session.nom.clone()).right_aligned()),
+                ),
             chunks[0],
         );
 
@@ -131,36 +208,38 @@ fn draw(
 }
 
 /// Run one submitted turn: stream the generation into the transcript,
-/// honoring Esc (stop this generation) and ctrl+c (stop + quit).
-/// Returns whether the app should quit. Takes the whole LoadedModel so
-/// the cli never names the tokenizer's crate (field borrows split it).
+/// honoring Esc (stop this generation) and ctrl+c (stop + quit), then
+/// update the session log. Returns whether the app should quit. Takes
+/// the whole LoadedModel so the tui never names the tokenizer's crate
+/// (field borrows split it).
 fn run_turn(
     terminal: &mut ratatui::DefaultTerminal,
     loaded: &mut lib::LoadedModel,
     options: &lib::GenerateOptions,
-    turns: &mut Vec<Turn>,
-    restored: &mut Option<lib::RestoredContext>,
+    session: &mut Session,
     status: &mut String,
     text: &str,
 ) -> lib::AlmostResult<bool> {
-    turns.push(Turn { speaker: Speaker::You, text: String::from(text) });
-    turns.push(Turn { speaker: Speaker::Almost, text: String::new() });
+    session.scroll_back = 0;
+    session.turns.push(Turn { speaker: Speaker::You, text: String::from(text) });
+    session.turns.push(Turn { speaker: Speaker::Almost, text: String::new() });
     *status = String::from("generating - esc stops");
-    draw(terminal, turns, "", 0, status)?;
+    draw(terminal, session, "", 0, status)?;
 
-    let rendered = match restored {
+    let rendered = match session.restored {
         Some(_) => lib::chat_continue(text),
         None => lib::chat_wrap(text),
     };
-    let started = match restored.as_ref() {
+    let started = match session.restored.as_ref() {
         Some(context) => loaded.model.generate_from(&loaded.tokenizer, context, &rendered, options),
         None => loaded.model.generate(&loaded.tokenizer, &rendered, options),
     };
     let mut generation = match started {
         Ok(generation) => generation,
         Err(error) => {
-            turns.push(Turn { speaker: Speaker::Note, text: format!("error: {error}") });
+            session.turns.push(Turn { speaker: Speaker::Note, text: format!("error: {error}") });
             *status = String::from("ready");
+            session.write_log()?;
             return Ok(false);
         }
     };
@@ -171,17 +250,17 @@ fn run_turn(
         match step {
             Ok(step) => {
                 if let Some(chunk) = step.chunk
-                    && let Some(last) = turns.last_mut()
+                    && let Some(last) = session.turns.last_mut()
                 {
                     last.text.push_str(&chunk);
                 }
             }
             Err(error) => {
-                turns.push(Turn { speaker: Speaker::Note, text: format!("error: {error}") });
+                session.turns.push(Turn { speaker: Speaker::Note, text: format!("error: {error}") });
                 break;
             }
         }
-        draw(terminal, turns, "", 0, status)?;
+        draw(terminal, session, "", 0, status)?;
         while r::term::event::poll(Duration::from_millis(0))? {
             if let r::term::Event::Key(key) = r::term::event::read()?
                 && key.kind != r::term::KeyEventKind::Release
@@ -204,7 +283,7 @@ fn run_turn(
     }
     let report = generation.finish()?;
     if let Some(rest) = &report.rest
-        && let Some(last) = turns.last_mut()
+        && let Some(last) = session.turns.last_mut()
         && last.speaker == Speaker::Almost
     {
         last.text.push_str(rest);
@@ -216,23 +295,32 @@ fn run_turn(
         rate,
         if stopped { " (stopped)" } else { "" }
     );
-    *restored = Some(lib::RestoredContext {
+    session.restored = Some(lib::RestoredContext {
         context_len,
         context_ids: report.context_ids,
     });
+    session.write_log()?;
     Ok(quit)
 }
 
 /// Interactive chat TUI: the session transcript above a multiline input
 /// box. Enter submits, shift+enter inserts a newline (distinguishing the
 /// two needs a kitty-protocol terminal; elsewhere shift+enter arrives as
-/// plain Enter and submits), /exit quits, Esc stops a generation early,
-/// ctrl+c quits anywhere. Turns stay in VRAM: each generation's report
-/// seeds the next turn's RestoredContext, so the KV cache carries the
-/// whole conversation without disk snapshots. The model arrives loaded
+/// plain Enter and submits), /exit quits, /new starts a fresh session
+/// (new nom + log, cleared transcript and KV), PgUp/PgDn scroll the
+/// transcript, Esc stops a generation early, ctrl+c quits anywhere.
+/// Turns stay in VRAM: each generation's report seeds the next turn's
+/// RestoredContext, so the KV cache carries the whole conversation
+/// without disk snapshots. Sessions log to
+/// <cache>/sourcetrait/almost/session/<nom>.txt per turn when
+/// config [chat] log = true (the default). The model arrives loaded
 /// (stderr diagnostics happen before the alternate screen); this wraps
 /// the event loop in terminal setup/teardown.
 pub(crate) fn chat(loaded: lib::LoadedModel, config: &lib::Config) -> lib::AlmostResult<()> {
+    let session = Session::new(config.chat.log)?;
+    if let Some(path) = &session.log_path {
+        eprintln!("talmost: logging session to {}", path.display());
+    }
     let mut terminal = ratatui::try_init()?;
     let enhanced = r::term::supports_keyboard_enhancement().unwrap_or(false);
     if enhanced {
@@ -244,7 +332,7 @@ pub(crate) fn chat(loaded: lib::LoadedModel, config: &lib::Config) -> lib::Almos
         );
     }
     let _ = r::term::execute!(io::stdout(), r::term::EnableBracketedPaste);
-    let result = chat_loop(&mut terminal, loaded, config, enhanced);
+    let result = chat_loop(&mut terminal, loaded, config, session, enhanced);
     let _ = r::term::execute!(io::stdout(), r::term::DisableBracketedPaste);
     if enhanced {
         let _ = r::term::execute!(io::stdout(), r::term::PopKeyboardEnhancementFlags);
@@ -257,9 +345,11 @@ fn chat_loop(
     terminal: &mut ratatui::DefaultTerminal,
     loaded: lib::LoadedModel,
     config: &lib::Config,
+    session: Session,
     enhanced: bool,
 ) -> lib::AlmostResult<()> {
     let mut loaded = loaded;
+    let mut session = session;
     let options = lib::GenerateOptions {
         greedy: config.generation.greedy,
         temperature: config.generation.temperature,
@@ -270,18 +360,17 @@ fn chat_loop(
         dump_logits: None,
     };
     let hint = if enhanced {
-        "enter submits, shift+enter newline, /exit quits"
+        "enter submits, shift+enter newline, /new restarts, /exit quits, pgup/pgdn scroll"
     } else {
-        "enter submits (shift+enter needs a kitty-protocol terminal), /exit quits"
+        "enter submits (shift+enter needs a kitty-protocol terminal), /new restarts, /exit quits"
     };
-    let mut turns: Vec<Turn> = vec![Turn { speaker: Speaker::Note, text: String::from(hint) }];
+    session.turns.push(Turn { speaker: Speaker::Note, text: String::from(hint) });
     let mut input = String::new();
     let mut cursor = 0usize;
-    let mut restored: Option<lib::RestoredContext> = None;
     let mut status = String::from("ready");
 
     loop {
-        draw(terminal, &turns, &input, cursor, &status)?;
+        draw(terminal, &session, &input, cursor, &status)?;
         match r::term::event::read()? {
             r::term::Event::Key(key) if key.kind != r::term::KeyEventKind::Release => {
                 match key.code {
@@ -301,18 +390,33 @@ fn chat_loop(
                         if text == "/exit" {
                             return Ok(());
                         }
+                        if text == "/new" {
+                            loaded.model.clear_kv_cache();
+                            session = Session::new(config.chat.log)?;
+                            session.turns.push(Turn {
+                                speaker: Speaker::Note,
+                                text: String::from(hint),
+                            });
+                            status = String::from("ready - new session");
+                            continue;
+                        }
                         let quit = run_turn(
                             terminal,
                             &mut loaded,
                             &options,
-                            &mut turns,
-                            &mut restored,
+                            &mut session,
                             &mut status,
                             &text,
                         )?;
                         if quit {
                             return Ok(());
                         }
+                    }
+                    r::term::KeyCode::PageUp => {
+                        session.scroll_back = session.scroll_back.saturating_add(8);
+                    }
+                    r::term::KeyCode::PageDown => {
+                        session.scroll_back = session.scroll_back.saturating_sub(8);
                     }
                     r::term::KeyCode::Char('c')
                         if key.modifiers.contains(r::term::KeyModifiers::CONTROL) =>

@@ -195,6 +195,16 @@ impl candle_core::InplaceOp3 for SlotWrite {
     }
 }
 
+/// Release the device's cached CUDA-graph memory pools (device 0 - the
+/// single-device box). Destroyed graphs leave their in-graph
+/// allocation pools driver-cached (~GBs after big-bucket captures);
+/// the trim returns them to the allocator. Safe beside live graphs
+/// (only unreferenced cached memory is reclaimed); failures are
+/// ignored (best-effort reclamation).
+pub(crate) fn trim_graph_memory() {
+    let _ = unsafe { cudarc::driver::sys::cuDeviceGraphMemTrim(0) };
+}
+
 /// Bucket grain for graph-mode attention widths: the kv narrows are
 /// static per graph, so valid widths round up to this and the pad mask
 /// hides the tail - at most one grain of padded compute, and a small
@@ -259,6 +269,11 @@ pub(crate) struct DecodeStage {
     /// uploads replay from dead temporary host memory (the root cause
     /// the capture contract test pins).
     pub(crate) capture_enabled: bool,
+    /// Lifetime switch: once a regrow parks captured buffers, capture
+    /// stays off for this Model (rearm restores capture_enabled from
+    /// THIS, not from true) - recapturing would re-arm the same
+    /// park-at-regrow cost on every later growth.
+    pub(crate) capture_permitted: bool,
     /// Whether generate() has armed stepping for the current cache
     /// state (clear/restore epochs unset it; rearm sets it).
     pub(crate) armed: bool,
@@ -316,6 +331,7 @@ impl DecodeStage {
             ring_masks,
             graphs: GraphCache::default(),
             capture_enabled: true,
+            capture_permitted: true,
             armed: true,
             // The creator records the true capacity right after
             // construction (kept out of the signature for arity).
@@ -386,7 +402,7 @@ impl DecodeStage {
             self.dtype,
             &self.device,
         )?;
-        self.capture_enabled = true;
+        self.capture_enabled = self.capture_permitted;
         self.armed = true;
         Ok(())
     }

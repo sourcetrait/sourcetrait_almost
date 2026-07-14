@@ -1,4 +1,4 @@
-use crate::chat::{byte_index, wrap_line};
+use crate::chat::{base62, byte_index, render_log, wrap_line, Speaker, Turn};
 
 #[test]
 fn wrap_respects_width_and_words() {
@@ -30,14 +30,23 @@ fn byte_index_is_utf8_safe() {
 }
 
 #[test]
-fn edit_round_trip_with_cursor() {
-    let mut input = String::from("héllo");
-    let mut cursor = 5usize;
-    input.insert(byte_index(&input, cursor), '!');
-    cursor += 1;
-    assert_eq!(input, "héllo!");
-    cursor -= 1;
-    input.remove(byte_index(&input, cursor));
-    assert_eq!(input, "héllo");
-    let _ = cursor;
+fn base62_renders_the_full_alphabet() {
+    assert_eq!(base62(0), "0");
+    assert_eq!(base62(9), "9");
+    assert_eq!(base62(10), "A");
+    assert_eq!(base62(35), "Z");
+    assert_eq!(base62(36), "a");
+    assert_eq!(base62(61), "z");
+    assert_eq!(base62(62), "10");
+    assert_eq!(base62(u64::MAX), "LygHa16AHYF");
+}
+
+#[test]
+fn log_renders_speaker_prefixed_turns()  {
+    let turns = vec![
+        Turn { speaker: Speaker::You, text: String::from("hi") },
+        Turn { speaker: Speaker::Almost, text: String::from("hello") },
+        Turn { speaker: Speaker::Note, text: String::from("note") },
+    ];
+    assert_eq!(render_log(&turns), "you: hi\n\nalmost: hello\n\nnote\n\n");
 }

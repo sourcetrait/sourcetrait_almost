@@ -44,18 +44,6 @@ pub(crate) enum Command {
         #[arg(long, conflicts_with = "from")]
         dump_logits: Option<PathBuf>,
     },
-    /// Interactive chat session (basic TUI): enter submits, shift+enter
-    /// inserts a newline, /exit quits
-    Chat {
-        /// Config profile snake or TOML path (declared intent: model,
-        /// device, dtype, generation, eviction)
-        #[arg(short = 'c', long)]
-        config: Option<String>,
-        /// Settings profile snake or TOML path (surgical runtime
-        /// overrides; absent auto-pairs the config profile's name)
-        #[arg(short = 's', long)]
-        settings: Option<String>,
-    },
     /// Manage saved contexts (E2 KV snapshots)
     Snapshot {
         #[command(subcommand)]

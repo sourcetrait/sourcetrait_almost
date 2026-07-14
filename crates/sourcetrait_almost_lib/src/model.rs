@@ -340,13 +340,62 @@ impl Model {
     /// up-to-a-step tail overshoot of append-time growth without
     /// re-introducing per-chunk reallocation. Growth past the reserve
     /// keeps the coarse FULL_CACHE_STEP behavior.
+    ///
+    /// A regrow REPLACES the old kv tensors, and ever-captured tensors
+    /// refuse their free (the chained generate_from class; see
+    /// full_grow's park). A growing reserve therefore flushes the graph
+    /// cache first (stale for the next arm anyway) and, when the
+    /// buffers were captured against, disables capture for this Model's
+    /// lifetime so the park below stays a one-time cost.
     pub(crate) fn reserve_full_caches(&mut self, total_len: usize) -> AlmostResult<()> {
+        #[cfg(feature = "cuda")]
+        {
+            let grows = self.layers.iter().any(|layer| {
+                layer
+                    .self_attn
+                    .reserve_target(total_len)
+                    .is_some_and(|target| target > layer.self_attn.full_capacity())
+            });
+            if grows {
+                self.flush_captured_graphs();
+                let any_captured = self
+                    .layers
+                    .iter()
+                    .any(|layer| layer.self_attn.buffers_captured);
+                if any_captured && let Some(stage) = &mut self.graph_stage {
+                    // The regrow below PARKS the captured buffers (see
+                    // full_grow); recapturing against the fresh buffers
+                    // would re-arm the same trap at the next regrow, so
+                    // capture is disabled for this Model's lifetime -
+                    // the staged-uncaptured decode carries on (phase D
+                    // priced replay at +-1-3%).
+                    stage.capture_permitted = false;
+                    stage.capture_enabled = false;
+                }
+            }
+        }
         let device = self.device.clone();
         for layer in self.layers.iter_mut() {
             layer.self_attn.reserve_full(total_len, self.dtype, &device)?;
         }
         Ok(())
     }
+
+    /// Drop every captured decode graph (the staged buffers and masks
+    /// stay) and trim the driver's cached graph pools. Runs ahead of
+    /// anything that frees buffers a captured graph references, and
+    /// ahead of classic-path generations that would append-grow under
+    /// a stale stage.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn flush_captured_graphs(&mut self) {
+        if let Some(stage) = &mut self.graph_stage {
+            stage.graphs.clear();
+            graph::trim_graph_memory();
+        }
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    pub(crate) fn flush_captured_graphs(&mut self) {}
 
     /// Largest sliding-layer ring occupancy currently held; the T4
     /// invariant pins it at window-1 between prefill chunks and window
@@ -831,6 +880,14 @@ impl Model {
                 // twice (and double the eviction scores).
                 let captured = self.capture_decode_graph(stage)?;
                 stage.graphs.insert(key, captured);
+                // The kv/score buffers are baked into a captured graph
+                // now: their eventual replacement must PARK them
+                // (full_grow), never free them.
+                for layer in self.layers.iter_mut() {
+                    if layer.layer_type == LayerType::Full {
+                        layer.self_attn.buffers_captured = true;
+                    }
+                }
             }
         }
         Ok(())
@@ -1198,6 +1255,10 @@ struct Attention {
     full_last_mass: Option<candle_core::Tensor>,
     /// A3 per-entry observation-pass counts (f32 for uniform arithmetic).
     full_counts: Option<candle_core::Tensor>,
+    /// Whether the CURRENT full buffers have been referenced by a graph
+    /// capture: replacement must PARK them (full_grow), never drop them
+    /// (the driver refuses their free; see full_grow).
+    buffers_captured: bool,
     /// A3 eviction config; armed on full layers only.
     eviction: Option<EvictionSettings>,
     num_heads: usize,
@@ -1246,6 +1307,7 @@ impl Attention {
             full_scores: None,
             full_last_mass: None,
             full_counts: None,
+            buffers_captured: false,
             eviction: if sliding_window.is_none() {
                 settings.eviction
             } else {
@@ -1287,6 +1349,22 @@ impl Attention {
             new_key.slice_set(&old_key.narrow(2, 0, self.full_cache_len)?.contiguous()?, 2, 0)?;
             new_value.slice_set(&old_value.narrow(2, 0, self.full_cache_len)?.contiguous()?, 2, 0)?;
         }
+        // Buffers that lived through a graph capture REFUSE cuMemFreeAsync
+        // on this driver (CUDA_ERROR_INVALID_VALUE recorded at drop and
+        // delivered at the next cuda call; graph destruction, sync, and
+        // cuDeviceGraphMemTrim all leave the refusal standing - measured,
+        // and the refused free leaks regardless). Park them deliberately
+        // instead: mem::forget skips the poisoned drop, the VRAM returns
+        // at context teardown, and the reserve path disabled further
+        // capture so this costs at most one buffer set per Model.
+        if self.buffers_captured {
+            if let Some(old_key) = self.full_key_buffer.take() {
+                std::mem::forget(old_key);
+            }
+            if let Some(old_value) = self.full_value_buffer.take() {
+                std::mem::forget(old_value);
+            }
+        }
         self.full_key_buffer = Some(new_key);
         self.full_value_buffer = Some(new_value);
         if self.eviction.is_some() {
@@ -1307,11 +1385,56 @@ impl Attention {
             }
             let len = self.full_cache_len;
             let shape = (b_size, self.num_heads, capacity);
-            self.full_scores = Some(grow_aux(&self.full_scores, len, shape, device)?);
-            self.full_last_mass = Some(grow_aux(&self.full_last_mass, len, shape, device)?);
-            self.full_counts = Some(grow_aux(&self.full_counts, len, shape, device)?);
+            // The score-state buffers ride the captured sequence too
+            // (in-graph scoring); park them under the same rule.
+            let fresh_scores = grow_aux(&self.full_scores, len, shape, device)?;
+            let fresh_last_mass = grow_aux(&self.full_last_mass, len, shape, device)?;
+            let fresh_counts = grow_aux(&self.full_counts, len, shape, device)?;
+            if self.buffers_captured {
+                for old in [
+                    self.full_scores.take(),
+                    self.full_last_mass.take(),
+                    self.full_counts.take(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    std::mem::forget(old);
+                }
+            }
+            self.full_scores = Some(fresh_scores);
+            self.full_last_mass = Some(fresh_last_mass);
+            self.full_counts = Some(fresh_counts);
         }
+        self.buffers_captured = false;
         Ok(())
+    }
+
+    /// The grain-rounded capacity a known-length reserve wants for this
+    /// layer; None on sliding layers (they never reserve). Under
+    /// eviction the store never exceeds the prefill cap plus one flash
+    /// chunk of appended headroom - reserving the full prompt would
+    /// defeat the peak bound.
+    fn reserve_target(&self, total_len: usize) -> Option<usize> {
+        if self.sliding_window.is_some() {
+            return None;
+        }
+        let total_len = match &self.eviction {
+            Some(eviction) => {
+                total_len.min(eviction.prefill_cap.saturating_add(consts::PREFILL_CHUNK_FLASH))
+            }
+            None => total_len,
+        };
+        Some(total_len.div_ceil(FULL_CACHE_RESERVE_GRAIN) * FULL_CACHE_RESERVE_GRAIN)
+    }
+
+    /// Current full-buffer slot capacity (0 before first allocation).
+    #[cfg(feature = "cuda")]
+    fn full_capacity(&self) -> usize {
+        self.full_key_buffer
+            .as_ref()
+            .map(|buffer| buffer.dims()[2])
+            .unwrap_or(0)
     }
 
     /// Known-length capacity reserve at the fine grain; no-op on sliding
@@ -1322,19 +1445,9 @@ impl Attention {
         dtype: candle_core::DType,
         device: &candle_core::Device,
     ) -> AlmostResult<()> {
-        if self.sliding_window.is_some() {
+        let Some(capacity) = self.reserve_target(total_len) else {
             return Ok(());
-        }
-        // Under eviction the store never exceeds the prefill cap plus one
-        // flash chunk of appended headroom; reserving the full prompt
-        // would defeat the peak bound.
-        let total_len = match &self.eviction {
-            Some(eviction) => {
-                total_len.min(eviction.prefill_cap.saturating_add(consts::PREFILL_CHUNK_FLASH))
-            }
-            None => total_len,
         };
-        let capacity = total_len.div_ceil(FULL_CACHE_RESERVE_GRAIN) * FULL_CACHE_RESERVE_GRAIN;
         self.full_grow(1, capacity, dtype, device)
     }
 

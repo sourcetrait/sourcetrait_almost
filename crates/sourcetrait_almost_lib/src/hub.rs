@@ -20,13 +20,26 @@ fn cache_home() -> PathBuf {
     }
 }
 
-/// $XDG_CACHE_HOME/huggingface/model/<owner>--<name> (cache-home
-/// fallback rules above).
+/// $XDG_DATA_HOME, with ~/.local/share as the fallback when the
+/// variable is unset or empty (the XDG spec's own default).
+fn data_home() -> PathBuf {
+    match std::env::var("XDG_DATA_HOME") {
+        Ok(data_home) if !data_home.is_empty() => PathBuf::from(data_home),
+        _ => {
+            let home = std::env::var("HOME").unwrap_or_else(|_| String::from("."));
+            PathBuf::from(home).join(".local").join("share")
+        }
+    }
+}
+
+/// $XDG_DATA_HOME/huggingface/model/<owner>/<name> - the author rides
+/// as a subdirectory (the model id's own `/`), and checkpoints are
+/// DATA, not cache (data-home fallback rules above).
 pub fn default_model_dir(model_id: &str) -> PathBuf {
-    cache_home()
+    data_home()
         .join("huggingface")
         .join("model")
-        .join(model_id.replace('/', "--"))
+        .join(model_id)
 }
 
 /// E2 saved-context home: $XDG_CACHE_HOME/sourcetrait/almost/snapshots
@@ -36,6 +49,14 @@ pub fn default_snapshots_dir() -> PathBuf {
         .join("sourcetrait")
         .join("almost")
         .join("snapshots")
+}
+
+/// Chat session logs: $XDG_CACHE_HOME/sourcetrait/almost/session.
+pub fn default_sessions_dir() -> PathBuf {
+    cache_home()
+        .join("sourcetrait")
+        .join("almost")
+        .join("session")
 }
 
 /// A --from/--to token that is purely a snake names a save under the

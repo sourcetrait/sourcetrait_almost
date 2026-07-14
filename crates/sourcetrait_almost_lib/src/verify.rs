@@ -429,9 +429,14 @@ pub fn verify_graph(paths: &ModelPaths) -> AlmostResult<()> {
 
     // (comparison, argmax_gated): the captured-vs-classic rows also
     // demand argmax identity; the captured-vs-uncaptured and
-    // determinism rows demand exactly zero.
+    // determinism rows demand exactly zero. One shared model, lengths
+    // DESCENDING: the 32K leg allocates the run's whole capacity up
+    // front, so no later leg regrows captured buffers (a regrow here
+    // would park them - the chained leg covers that class on its own
+    // model; dropped captured models leak their refused ring/kv frees,
+    // so legs share this model rather than reload per length).
     let mut results: Vec<(Comparison, bool)> = Vec::new();
-    for &target in &[2048usize, 32768] {
+    for &target in &[32768usize, 2048] {
         let (prefix, continuation) = graph_ids(&tokenizer, target, GRAPH_CHECK_STEPS)?;
         let leg_start = Instant::now();
         chunked_prefill(&mut model, &prefix, &device)?;
@@ -485,6 +490,12 @@ pub fn verify_graph(paths: &ModelPaths) -> AlmostResult<()> {
     // graph resumed). Captured and uncaptured staged decode must agree
     // exactly and the store must hold the cap.
     drop(model);
+    // Dropping a captured-against model records refused ring/kv frees
+    // on the cuda context (delivered at the NEXT fallible call);
+    // drain deliberately so the next load does not inherit them.
+    let _ = device.synchronize();
+    #[cfg(feature = "cuda")]
+    graph::trim_graph_memory();
     let evict_settings = Settings {
         use_flash_attn: cfg!(feature = "flash-attn"),
         profile_attn: false,
@@ -530,6 +541,70 @@ pub fn verify_graph(paths: &ModelPaths) -> AlmostResult<()> {
         false,
     ));
 
+    // Chained-continuation leg LAST, on its own fresh model with small
+    // buffers (the park's one-time cost must not ride beside the 32K
+    // leg's peak): turn 1 sized so its arm ceiling lands inside the
+    // 2048 bucket, a continuation whose known-length reserve must
+    // REGROW the kv buffers after turn 1 captured graphs against them
+    // - the regression class (the captured buffers' refused free
+    // poisoned the next allocation before the park-at-regrow fix) -
+    // then a third turn on the staged-uncaptured path.
+    drop(model);
+    {
+        // Same drain as above: the evict model's drop records refused
+        // frees the chained leg's load would otherwise inherit.
+        let _ = device.synchronize();
+        #[cfg(feature = "cuda")]
+        graph::trim_graph_memory();
+        let vb = unsafe {
+            candle_nn::VarBuilder::from_mmaped_safetensors(&paths.shards, dtype, &device)?
+        };
+        let mut model = Model::new(&config, settings, vb)?;
+        let leg_start = Instant::now();
+        let prompt = chained_prompt(&tokenizer)?;
+        let mut options = GenerateOptions {
+            greedy: true,
+            temperature: consts::DEFAULT_TEMPERATURE,
+            top_p: consts::DEFAULT_TOP_P,
+            sample_len: 128,
+            seed: 1,
+            speculate: false,
+            dump_logits: None,
+        };
+        let mut restored: Option<RestoredContext> = None;
+        for (turn, sample_len) in [128usize, 24, 24].into_iter().enumerate() {
+            options.sample_len = sample_len;
+            let mut generation = match &restored {
+                Some(context) => model.generate_from(
+                    &tokenizer,
+                    context,
+                    &chat_continue("Add one more sentence."),
+                    &options,
+                )?,
+                None => model.generate(&tokenizer, &chat_wrap(&prompt), &options)?,
+            };
+            let mut steps = 0usize;
+            for step in &mut generation {
+                step?;
+                steps += 1;
+            }
+            snafu::ensure_whatever!(
+                steps > 0,
+                "chained leg turn {turn} generated nothing"
+            );
+            let report = generation.finish()?;
+            restored = Some(RestoredContext {
+                context_len: report.context_ids.len(),
+                context_ids: report.context_ids,
+            });
+        }
+        eprintln!(
+            "almost verify-graph: chained generate_from leg done ({:.0}s elapsed)",
+            leg_start.elapsed().as_secs_f32()
+        );
+        println!("chained generate_from (park-at-regrow, then staged-uncaptured) | PASS");
+    }
+
     let mut failed: Vec<String> = Vec::new();
     println!("check | rows | max_abs | nmse | argmax_match | verdict");
     for (result, argmax_gated) in &results {
@@ -562,6 +637,29 @@ pub fn verify_graph(paths: &ModelPaths) -> AlmostResult<()> {
         failed.join("; ")
     );
     Ok(())
+}
+
+/// A prompt whose chat-wrapped token count lands in [1700, 1900]: the
+/// chained leg's turn-1 arm ceiling (prompt + 128 + 1) stays inside the
+/// 2048 bucket while the follow-up's reserve (context + suffix + the
+/// 256 decode margin) crosses it and must regrow.
+fn chained_prompt(tokenizer: &tokenizers::Tokenizer) -> AlmostResult<String> {
+    let mut text = String::from("Retell this drifting chronicle in your own words. ");
+    loop {
+        let wrapped = chat_wrap(&text);
+        let length = match tokenizer.encode(wrapped, true) {
+            Ok(encoding) => encoding.get_ids().len(),
+            Err(error) => snafu::whatever!("chained-leg tokenization failed: {error}"),
+        };
+        if length >= 1700 {
+            snafu::ensure_whatever!(
+                length <= 1900,
+                "chained-leg prompt overshot ({length} tokens)"
+            );
+            return Ok(text);
+        }
+        text.push_str(LONG_SENTENCE);
+    }
 }
 
 /// Filler ids for one graph-gate leg: a `target`-token prefix plus

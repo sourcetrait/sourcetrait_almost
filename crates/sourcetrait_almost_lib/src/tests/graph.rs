@@ -1,4 +1,7 @@
 use crate::graph::{bucket_for, pad_mask_values, SlotWrite, BUCKET_GRAIN};
+use crate::{
+    chat_continue, chat_wrap, consts, GenerateOptions, RestoredContext, Settings,
+};
 
 /// The E4 building-block contract: a raw-launched slot_write at a
 /// device-resident index lands exactly where a host-offset slice_set
@@ -247,4 +250,125 @@ fn pad_mask_hides_exactly_the_tail() {
     assert_eq!(values.len(), 8);
     assert!(values[..3].iter().all(|v| *v == 0.0));
     assert!(values[3..].iter().all(|v| *v == f32::NEG_INFINITY));
+}
+
+/// The almost-chat flow: generate() then generate_from() chained in ONE
+/// process (RestoredContext seeded from each report), decode graph-armed.
+/// Needs the pulled checkpoint + a cuda device; run one variant per
+/// process:
+///   cargo test --release --features flash-attn chained_generate_from \
+///     -- --ignored --nocapture
+/// Variants: ALMOST_PROBE_GRAPH=0 (classic decode), ALMOST_PROBE_CAPTURE=0
+/// (staged decode without capture+replay from turn 2 on).
+#[test]
+#[ignore]
+fn chained_generate_from_under_graph() {
+    if !crate::r::candle::cuda_is_available() {
+        return;
+    }
+    let graph = std::env::var("ALMOST_PROBE_GRAPH").map(|v| v != "0").unwrap_or(true);
+    let capture = std::env::var("ALMOST_PROBE_CAPTURE").map(|v| v != "0").unwrap_or(true);
+    let model_dir = crate::hub::default_model_dir(consts::DEFAULT_MODEL_ID);
+    let paths = crate::hub::ensure_model(consts::DEFAULT_MODEL_ID, &model_dir).unwrap();
+    let device = candle_core::Device::new_cuda(0).unwrap();
+    let settings = Settings {
+        use_flash_attn: cfg!(feature = "flash-attn"),
+        profile_attn: false,
+        eviction: None,
+        graph,
+    };
+    let loaded = crate::load::load_model(&paths, &device, candle_core::DType::BF16, settings).unwrap();
+    let mut model = loaded.model;
+    // Mirror Config::default().generation (the chat-session defaults)
+    // unless the env overrides pieces for bisection.
+    let greedy = std::env::var("ALMOST_PROBE_GREEDY").map(|v| v != "0").unwrap_or(false);
+    let sample_len: usize = std::env::var("ALMOST_PROBE_SAMPLE_LEN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(256);
+    let options = GenerateOptions {
+        greedy,
+        temperature: consts::DEFAULT_TEMPERATURE,
+        top_p: consts::DEFAULT_TOP_P,
+        sample_len,
+        seed: 299_792_458,
+        speculate: false,
+        dump_logits: None,
+    };
+    // A big first turn (ALMOST_PROBE_PROMPT_FILE's contents) mirrors the
+    // failing chat session's paste; absent, a short built-in.
+    let pasted = std::env::var("ALMOST_PROBE_PROMPT_FILE")
+        .ok()
+        .map(|path| std::fs::read_to_string(path).unwrap());
+    let turns: usize = std::env::var("ALMOST_PROBE_TURNS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3);
+    let mut restored: Option<RestoredContext> = None;
+    for turn in 0..turns {
+        if turn == 1 && !capture {
+            model.set_graph_capture(false).unwrap();
+        }
+        // ALMOST_PROBE_CLEAR=1: replace the generate_from continuation
+        // with the needle-shaped flow - clear + a LONGER fresh prompt,
+        // so the regrow happens at length 0 with graphs alive.
+        let clear_flow = std::env::var("ALMOST_PROBE_CLEAR").map(|v| v == "1").unwrap_or(false);
+        if clear_flow && turn > 0 {
+            restored = None;
+        }
+        let text = match (&restored, turn) {
+            (None, 0) => match &pasted {
+                Some(pasted) => {
+                    chat_wrap(&format!("{pasted}\n\nDo you understand NUON now?"))
+                }
+                None => chat_wrap("Say hi."),
+            },
+            (None, _) => match &pasted {
+                Some(pasted) => chat_wrap(&format!(
+                    "{pasted}\n{pasted}\n\nDo you understand NUON now?"
+                )),
+                None => chat_wrap("Say hi again."),
+            },
+            (Some(_), 1) => chat_continue(
+                "good job. let's try it out. output a nuon table that represents name and age. bob is 42 years old. cindy is 3 months old. todd is 12 years old.",
+            ),
+            (Some(_), _) => chat_continue("test"),
+        };
+        let mut generation = match &restored {
+            Some(context) => model
+                .generate_from(&loaded.tokenizer, context, &text, &options)
+                .unwrap(),
+            None => model.generate(&loaded.tokenizer, &text, &options).unwrap(),
+        };
+        let mut generated = 0usize;
+        for step in &mut generation {
+            let step = step.unwrap_or_else(|error| panic!("turn {turn} step failed: {error}"));
+            let _ = step;
+            generated += 1;
+        }
+        // Deferred-error checkpoints: cudarc destructors record failures
+        // on the context and the NEXT fallible call delivers them; a
+        // failing sync here localizes which teardown recorded.
+        if let Err(error) = device.synchronize() {
+            eprintln!("turn {turn} checkpoint A (post-loop, pre-finish): {error}");
+        }
+        let report = generation.finish().unwrap();
+        if let Err(error) = device.synchronize() {
+            eprintln!("turn {turn} checkpoint B (post-finish): {error}");
+        }
+        let (free_bytes, _total) = cudarc::driver::result::mem_get_info().unwrap();
+        eprintln!(
+            "turn {turn}: {generated} steps, ctx {} ({:?}), vram free {} MiB",
+            report.context_ids.len(),
+            report.finish_reason,
+            free_bytes / (1024 * 1024)
+        );
+        restored = Some(RestoredContext {
+            context_len: report.context_ids.len(),
+            context_ids: report.context_ids,
+        });
+        if let Err(error) = device.synchronize() {
+            eprintln!("turn {turn} checkpoint C (pre-next-turn): {error}");
+        }
+    }
 }

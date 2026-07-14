@@ -1,17 +1,17 @@
 [package]
-name = "sourcetrait_almost_cli"
-version = "0.0.0-14"
+name = "sourcetrait_almost_tui"
+version = "0.0.0-1"
 edition = "2024"
-description = "almost: the command-line interface over sourcetrait_almost_lib"
+description = "talmost: the interactive terminal chat over sourcetrait_almost_lib"
 authors = ["SourceTrait <development@sourcetrait.com>"]
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/sourcetrait/sourcetrait_almost"
 homepage = "https://sourcetrait.com"
 categories = []
-keywords = ["sourcetrait", "almost", "cli", "olmo"]
+keywords = ["sourcetrait", "almost", "tui", "chat", "olmo"]
 
 [[bin]]
-name = "almost"
+name = "talmost"
 path = "src/main.rs"
 
 [features]
@@ -21,5 +21,5 @@ flash-attn = ["cuda", "sourcetrait_almost_lib/flash-attn"]
 
 [dependencies]
 clap.workspace = true
-snafu.workspace = true
+ratatui.workspace = true
 sourcetrait_almost_lib.workspace = true

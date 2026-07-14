@@ -5,6 +5,7 @@ members = [
   "crates/sourcetrait_almost_compat",
   "crates/sourcetrait_almost_heat",
   "crates/sourcetrait_almost_cli",
+  "crates/sourcetrait_almost_tui",
   "crates/sourcetrait_almost_plugin",
 ]
 

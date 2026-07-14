@@ -17,6 +17,7 @@ pub struct Config {
     pub generation: GenerationConfig,
     /// A3 eviction intent; absent (or capless) = the exact configuration.
     pub eviction: Option<EvictionConfig>,
+    pub chat: ChatConfig,
 }
 
 impl Default for Config {
@@ -28,7 +29,22 @@ impl Default for Config {
             dtype: DtypeConfig::Auto,
             generation: GenerationConfig::default(),
             eviction: None,
+            chat: ChatConfig::default(),
         }
+    }
+}
+
+/// Chat-surface intent (talmost). log defaults ON: each turn rewrites
+/// <cache>/sourcetrait/almost/session/<session nom>.txt.
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ChatConfig {
+    pub log: bool,
+}
+
+impl Default for ChatConfig {
+    fn default() -> Self {
+        Self { log: true }
     }
 }
 

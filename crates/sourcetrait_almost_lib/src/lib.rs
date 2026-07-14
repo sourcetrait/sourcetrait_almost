@@ -101,6 +101,7 @@ pub use crate::{
         load_settings,
         resolve_device,
         resolve_dtype,
+        ChatConfig,
         Config,
         DeviceConfig,
         DtypeConfig,
@@ -121,6 +122,7 @@ pub use crate::{
     },
     hub::{
         default_model_dir,
+        default_sessions_dir,
         default_snapshots_dir,
         ensure_model,
         resolve_snapshot,

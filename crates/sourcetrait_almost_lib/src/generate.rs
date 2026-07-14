@@ -200,6 +200,15 @@ impl Model {
         let mut processor = r::candle::LogitsProcessor::from_sampling(options.seed, sampling);
         let mut dump_rows: Vec<candle_core::Tensor> = Vec::new();
 
+        // A run that will not arm the graph path (speculation keeps the
+        // classic path; cpu and graph-off likewise) must not carry
+        // captured graphs into classic append-growth - the regrow frees
+        // buffers those graphs reference (the reserve-time flush below
+        // covers arming runs).
+        let will_arm = self.settings().graph && self.device().is_cuda() && !options.speculate;
+        if !will_arm {
+            self.flush_captured_graphs();
+        }
         // The context length is known here: fine-grain reserve so the
         // context tail does not pay FULL_CACHE_STEP rounding; the margin
         // covers a short decode and longer decodes grow coarsely as before.

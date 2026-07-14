@@ -6628,10 +6628,9 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_almost_cli"
-version = "0.0.0-13"
+version = "0.0.0-14"
 dependencies = [
  "clap",
- "ratatui",
  "snafu",
  "sourcetrait_almost_lib",
 ]
@@ -6666,7 +6665,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_almost_lib"
-version = "0.0.0-14"
+version = "0.0.0-15"
 dependencies = [
  "candle-core 0.11.0",
  "candle-flash-attn",
@@ -6690,6 +6689,15 @@ dependencies = [
  "nu-protocol",
  "nuon",
  "snafu",
+]
+
+[[package]]
+name = "sourcetrait_almost_tui"
+version = "0.0.0-1"
+dependencies = [
+ "clap",
+ "ratatui",
+ "sourcetrait_almost_lib",
 ]
 
 [[package]]
