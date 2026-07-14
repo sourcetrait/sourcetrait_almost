@@ -22,22 +22,18 @@ impl SplitMix64 {
     }
 }
 
-/// File extensions and exact names the corpus walker accepts (the leg-1
-/// repo filter: source + manifests + readmes).
-fn wanted(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-        return false;
-    };
-    if name == "Cargo.toml" || name == "README.md" {
-        return true;
-    }
-    matches!(
-        path.extension().and_then(|e| e.to_str()),
-        Some("rs") | Some("nu") | Some("nuon")
-    )
+fn wanted(path: &Path, extensions: &[String]) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| extensions.iter().any(|wanted| wanted == ext))
 }
 
-fn walk(dir: &Path, excludes: &[String], out: &mut Vec<PathBuf>) -> HeatResult<()> {
+fn walk(
+    dir: &Path,
+    excludes: &[String],
+    extensions: &[String],
+    out: &mut Vec<PathBuf>,
+) -> HeatResult<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -47,19 +43,24 @@ fn walk(dir: &Path, excludes: &[String], out: &mut Vec<PathBuf>) -> HeatResult<(
             if name.starts_with('.') || excludes.iter().any(|e| e.as_str() == name) {
                 continue;
             }
-            walk(&path, excludes, out)?;
-        } else if wanted(&path) {
+            walk(&path, excludes, extensions, out)?;
+        } else if wanted(&path, extensions) {
             out.push(path);
         }
     }
     Ok(())
 }
 
-/// Walk the corpus roots, tokenize each document under a path-header line,
-/// join with the eos id, and pack into shuffled (seq_len + 1) chunks.
+/// Walk the corpus roots for the given extensions, tokenize each document
+/// (under a `### FILE:` path-header line when with_headers - the domain
+/// convention; general admixture text stays raw), join with the eos id,
+/// and pack into shuffled (seq_len + 1) chunks.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn load_packed(
     roots: &[PathBuf],
     excludes: &[String],
+    extensions: &[String],
+    with_headers: bool,
     tokenizer: &tokenizers::Tokenizer,
     seq_len: usize,
     eos: u32,
@@ -69,14 +70,18 @@ pub(crate) fn load_packed(
     let mut documents = 0usize;
     for root in roots {
         let mut files: Vec<PathBuf> = Vec::new();
-        walk(root, excludes, &mut files)?;
+        walk(root, excludes, extensions, &mut files)?;
         files.sort();
         for file in files {
             let Ok(content) = std::fs::read_to_string(&file) else {
                 continue;
             };
-            let relative = file.strip_prefix(root).unwrap_or(&file);
-            let text = format!("### FILE: {}\n{content}", relative.display());
+            let text = if with_headers {
+                let relative = file.strip_prefix(root).unwrap_or(&file);
+                format!("### FILE: {}\n{content}", relative.display())
+            } else {
+                content
+            };
             let encoding = match tokenizer.encode(text, false) {
                 Ok(encoding) => encoding,
                 Err(error) => snafu::whatever!("tokenization of {} failed: {error}", file.display()),
@@ -111,4 +116,33 @@ pub(crate) fn load_packed(
         chunks,
         documents,
     })
+}
+
+/// Interleave general-admixture chunks into the domain schedule at
+/// `ratio` general chunks per domain chunk (credit-accumulated, so
+/// fractional ratios pace evenly). General chunks cycle when the domain
+/// pass outlasts them; both inputs arrive pre-shuffled.
+pub(crate) fn compose_mixed(domain: Packed, general: Packed, ratio: f64) -> Packed {
+    if general.chunks.is_empty() || ratio <= 0.0 {
+        return domain;
+    }
+    let mut chunks = Vec::with_capacity(
+        domain.chunks.len() + (domain.chunks.len() as f64 * ratio) as usize + 1,
+    );
+    let mut general_cursor = 0usize;
+    let mut credit = 0f64;
+    for domain_chunk in domain.chunks {
+        chunks.push(domain_chunk);
+        credit += ratio;
+        while credit >= 1.0 {
+            chunks.push(general.chunks[general_cursor % general.chunks.len()].clone());
+            general_cursor += 1;
+            credit -= 1.0;
+        }
+    }
+    Packed {
+        total_tokens: domain.total_tokens + general.total_tokens,
+        documents: domain.documents + general.documents,
+        chunks,
+    }
 }
