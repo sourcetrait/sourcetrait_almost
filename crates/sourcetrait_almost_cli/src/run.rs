@@ -158,6 +158,18 @@ fn dispatch(cli: Cli) -> lib::AlmostResult<()> {
             );
             Ok(())
         }
+        Command::Chat { config, settings } => {
+            let (config, settings, paths) = resolve_run(config.as_deref(), settings.as_deref())?;
+            let device = lib::resolve_device(&config)?;
+            let dtype = lib::resolve_dtype(&config, &device);
+            eprintln!(
+                "almost: device {device:?}, dtype {dtype:?}{}",
+                if settings.use_flash_attn { ", flash" } else { "" }
+            );
+            let loaded = lib::load_model(&paths, &device, dtype, settings)?;
+            eprintln!("almost: weights loaded in {:.1}s", loaded.load_seconds);
+            chat::chat(loaded, &config)
+        }
         Command::Snapshot { action } => match action {
             SnapshotAction::List => {
                 let dir = lib::default_snapshots_dir();
