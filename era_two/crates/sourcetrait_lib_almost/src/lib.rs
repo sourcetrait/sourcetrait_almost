@@ -5,6 +5,8 @@ pub mod consts;
 pub(crate) mod error;
 pub(crate) mod gdn;
 pub(crate) mod generate;
+#[cfg(feature = "cuda")]
+pub(crate) mod graph;
 pub(crate) mod load;
 pub(crate) mod model;
 pub(crate) mod norms;
@@ -12,6 +14,7 @@ pub(crate) mod tokenizer;
 
 #[allow(unused_imports)]
 pub(crate) use std::{
+    collections::HashMap,
     env,
     fs,
     io,
@@ -86,6 +89,8 @@ mod tests {
     mod config;
     mod gdn;
     mod generate;
+    #[cfg(feature = "cuda")]
+    mod graph;
     mod load;
     mod model;
     mod norms;

@@ -399,18 +399,22 @@ pub struct GenerationToml {
 pub struct LibSettingsToml {
     pub use_flash_attn: Option<bool>,
     pub graph: Option<bool>,
+    pub graph_bucket_grain: Option<usize>,
     pub generation: Option<GenerationToml>,
 }
 
 /// The lib component's NUANCE - the execution and posture tweaks.
 /// use_flash_attn arms the flash prefill dispatch where eligible (a
 /// flash-attn build on cuda at bf16/f16 - ineligible runs stay
-/// eager); graph arms CUDA-graph decode capture; generation is the
-/// sampling/budget posture.
+/// eager); graph arms CUDA-graph decode capture and
+/// graph_bucket_grain is its static attention-width grain (pad
+/// columns carry zero softmax mass - at most one grain of padded
+/// compute per step); generation is the sampling/budget posture.
 #[derive(Debug, Clone)]
 pub struct LibSettings {
     pub use_flash_attn: bool,
     pub graph: bool,
+    pub graph_bucket_grain: usize,
     pub generation: GenerateOptions,
 }
 
@@ -442,6 +446,10 @@ impl TryFrom<LibSettingsToml> for LibSettings {
                 .or(base.use_flash_attn)
                 .unwrap_or(true),
             graph: user.graph.or(base.graph).unwrap_or(false),
+            graph_bucket_grain: user
+                .graph_bucket_grain
+                .or(base.graph_bucket_grain)
+                .unwrap_or(2048),
             generation: merged_generation(
                 user.generation.unwrap_or_default(),
                 base.generation.unwrap_or_default(),

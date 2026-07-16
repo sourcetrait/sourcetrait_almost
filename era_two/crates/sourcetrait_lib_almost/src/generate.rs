@@ -167,6 +167,12 @@ impl OlmoHybrid {
             start += len;
         }
         let last_logits = last_logits.expect("non-empty prompt");
+        // Arm the staged graph decode after prefill (settings.graph;
+        // cuda builds only - Model::new already rejected the rest).
+        if generation.model.settings().graph {
+            let expected_total = generation.prompt_token_count + generation.sample_len;
+            generation.model.arm_graph_decode(expected_total)?;
+        }
         generation.pending_id = Some(generation.sample(&last_logits)?);
         generation.prefill_seconds = prefill_started.elapsed().as_secs_f64();
         generation.decode_started = std::time::Instant::now();
@@ -222,12 +228,22 @@ impl Generation<'_> {
             self.finish_reason = Some(FinishReason::SampleLen);
             return Ok(Some(GenerationStep { token_id, chunk }));
         }
-        let step_ids = candle_core::Tensor::from_vec(
-            vec![token_id],
-            1,
-            self.model.device(),
-        )?;
-        let logits = self.model.forward_chunk(&step_ids)?;
+        let logits = if self.model.graph_armed() {
+            // A decode outrunning the armed capacity falls to the
+            // classic path (the capacity epoch).
+            self.model.graph_disarm_when_full()?;
+            if self.model.graph_armed() {
+                self.model.graph_decode_step(token_id)?
+            } else {
+                let step_ids =
+                    candle_core::Tensor::from_vec(vec![token_id], 1, self.model.device())?;
+                self.model.forward_chunk(&step_ids)?
+            }
+        } else {
+            let step_ids =
+                candle_core::Tensor::from_vec(vec![token_id], 1, self.model.device())?;
+            self.model.forward_chunk(&step_ids)?
+        };
         self.pending_id = Some(self.sample(&logits)?);
         Ok(Some(GenerationStep { token_id, chunk }))
     }

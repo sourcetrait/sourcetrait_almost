@@ -1,5 +1,6 @@
 use_flash_attn = true
 graph = false
+graph_bucket_grain = 2048
 
 [generation]
 greedy = false

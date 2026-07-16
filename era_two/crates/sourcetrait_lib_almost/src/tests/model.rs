@@ -58,7 +58,7 @@ fn build_model_on(device: &candle_core::Device, dtype: candle_core::DType) -> Ol
     let dir = model_dir(consts::DPO_MODEL_NAME).expect("dpo dir");
     let config = load_config(&dir).expect("config parses + validates");
     let weights = mmap_weights(&dir, dtype, device).expect("weights mmap");
-    OlmoHybrid::new(&config, weights).expect("model builds")
+    OlmoHybrid::new(&config, LibSettings::default(), weights).expect("model builds")
 }
 
 fn build_model() -> OlmoHybrid {

@@ -279,11 +279,16 @@ impl GdnLayer {
     /// prepend the chunk, the persisted state seeds the rule, and both
     /// advance. Decode (seq 1) rides the recurrent step; larger chunks
     /// ride the chunked rule - the upstream's own path split.
+    /// The carried caches (state, conv tail) update IN PLACE via
+    /// slice_set - never rebind - so their device addresses stay
+    /// stable for the lifetime of the layer. Captured decode graphs
+    /// bake those addresses; a rebind anywhere (this path, clear)
+    /// would leave every cached graph reading dead memory.
     fn mixer_carried(&mut self, x: &candle_core::Tensor) -> LibAlmostResult<candle_core::Tensor> {
         let (seq_len, _) = x.dims2()?;
         let (conv_in, gate) = self.project_fused(x)?;
         let (conv_out, tail) = gdn::conv_with_tail(&conv_in, &self.conv_weight, &self.conv_tail)?;
-        self.conv_tail = tail;
+        self.conv_tail.slice_set(&tail, 0, 0)?;
         let (q, k, v) = self.split_conv(&conv_out)?;
         let (q, k, v, g, beta) = self.heads_and_gates(q, k, v, x, seq_len)?;
         let y = if seq_len == 1 {
@@ -295,19 +300,22 @@ impl GdnLayer {
                 &g.exp()?.squeeze(0)?,
                 &beta.squeeze(0)?,
             )?;
-            self.state = next_state;
+            self.state.slice_set(&next_state, 0, 0)?;
             y_t.unsqueeze(0)?
         } else {
             let (out, next_state) = gdn::chunk_rule(&q, &k, &v, &g, &beta, &self.state)?;
-            self.state = next_state;
+            self.state.slice_set(&next_state, 0, 0)?;
             out
         };
         self.finish_mixer(y, gate, seq_len)
     }
 
+    /// Zero the carried caches in place (address-stable; see
+    /// mixer_carried).
     fn clear_cache(&mut self) -> LibAlmostResult<()> {
-        self.state = self.state.zeros_like()?;
-        self.conv_tail = self.conv_tail.zeros_like()?;
+        self.state.slice_set(&self.state.zeros_like()?, 0, 0)?;
+        self.conv_tail
+            .slice_set(&self.conv_tail.zeros_like()?, 0, 0)?;
         Ok(())
     }
 }
@@ -344,11 +352,27 @@ struct AttnLayer {
     num_heads: usize,
     head_dim: usize,
     rms_eps: f64,
+    /// Drives the flash prefill dispatch; only read under the
+    /// flash-attn feature (dead by construction on cuda-only builds).
+    #[cfg_attr(not(feature = "flash-attn"), allow(dead_code))]
+    use_flash_attn: bool,
     kv: Option<AttnKv>,
+    /// The KV buffers are baked into a captured decode graph: their
+    /// eventual replacement must PARK them (mem::forget), never free
+    /// them - ever-captured buffers refuse cuMemFreeAsync (the
+    /// captured-buffer free law).
+    buffers_captured: bool,
+    /// Latched by a reserve that parked captured buffers; the model
+    /// collects it and retires capture for its lifetime.
+    parked_graphs: bool,
 }
 
 impl AttnLayer {
-    fn new(config: &OlmoHybridConfig, vb: candle_nn::VarBuilder) -> LibAlmostResult<Self> {
+    fn new(
+        config: &OlmoHybridConfig,
+        use_flash_attn: bool,
+        vb: candle_nn::VarBuilder,
+    ) -> LibAlmostResult<Self> {
         let hidden = config.hidden_size;
         let width = config.num_attention_heads * config.head_dim();
         let vb_attn = vb.pp("self_attn");
@@ -375,8 +399,35 @@ impl AttnLayer {
             num_heads: config.num_attention_heads,
             head_dim: config.head_dim(),
             rms_eps: config.rms_norm_eps,
+            use_flash_attn,
             kv: None,
+            buffers_captured: false,
+            parked_graphs: false,
         })
+    }
+
+    fn kv_len(&self) -> usize {
+        self.kv.as_ref().map_or(0, |kv| kv.len)
+    }
+
+    fn kv_capacity(&self) -> usize {
+        self.kv
+            .as_ref()
+            .and_then(|kv| kv.k.dims().get(1).copied())
+            .unwrap_or(0)
+    }
+
+    /// Host bookkeeping for a staged decode step (the device write
+    /// already happened in-graph).
+    fn advance_len(&mut self) {
+        if let Some(kv) = &mut self.kv {
+            kv.len += 1;
+        }
+    }
+
+    /// Read-and-clear the park latch.
+    fn take_parked(&mut self) -> bool {
+        std::mem::take(&mut self.parked_graphs)
     }
 
     fn forward(
@@ -416,18 +467,24 @@ impl AttnLayer {
         template: &candle_core::Tensor,
     ) -> LibAlmostResult<()> {
         let needed = self.kv.as_ref().map_or(added, |kv| kv.len + added);
-        if let Some(kv) = &self.kv
-            && needed <= kv.k.dim(1)?
-        {
+        let capacity = needed.div_ceil(KV_RESERVE_STEP) * KV_RESERVE_STEP;
+        self.reserve_capacity(capacity, template.dtype(), template.device())
+    }
+
+    /// Ensure the KV buffers hold at least `capacity` rows (the graph
+    /// arm's pre-grow; also the append path's grow core). Replaced
+    /// buffers that a captured graph baked are PARKED, never freed.
+    fn reserve_capacity(
+        &mut self,
+        capacity: usize,
+        dtype: candle_core::DType,
+        device: &candle_core::Device,
+    ) -> LibAlmostResult<()> {
+        if self.kv_capacity() >= capacity.max(1) {
             return Ok(());
         }
-        let (heads, _, head_dim) = template.dims3()?;
-        let capacity = needed.div_ceil(KV_RESERVE_STEP) * KV_RESERVE_STEP;
-        let new_k = candle_core::Tensor::zeros(
-            (heads, capacity, head_dim),
-            template.dtype(),
-            template.device(),
-        )?;
+        let (heads, head_dim) = (self.num_heads, self.head_dim);
+        let new_k = candle_core::Tensor::zeros((heads, capacity, head_dim), dtype, device)?;
         let new_v = new_k.zeros_like()?;
         let len = self.kv.as_ref().map_or(0, |kv| kv.len);
         if let Some(kv) = &self.kv
@@ -435,6 +492,14 @@ impl AttnLayer {
         {
             new_k.slice_set(&kv.k.narrow(1, 0, kv.len)?.contiguous()?, 1, 0)?;
             new_v.slice_set(&kv.v.narrow(1, 0, kv.len)?.contiguous()?, 1, 0)?;
+        }
+        if let Some(old) = self.kv.take()
+            && self.buffers_captured
+        {
+            std::mem::forget(old.k);
+            std::mem::forget(old.v);
+            self.buffers_captured = false;
+            self.parked_graphs = true;
         }
         self.kv = Some(AttnKv { k: new_k, v: new_v, len });
         Ok(())
@@ -493,7 +558,8 @@ impl AttnLayer {
         mask: Option<&candle_core::Tensor>,
     ) -> LibAlmostResult<candle_core::Tensor> {
         #[cfg(feature = "flash-attn")]
-        if q.dim(1)? > 1
+        if self.use_flash_attn
+            && q.dim(1)? > 1
             && q.device().is_cuda()
             && matches!(
                 q.dtype(),
@@ -552,6 +618,40 @@ impl AttnLayer {
             kv.len = 0;
         }
     }
+
+    /// The staged decode step (batch-1, t=1): the same math as the
+    /// classic mask-free decode, over a static bucket width - the new
+    /// k/v scatter to a device-resident slot, the pad mask hides the
+    /// bucket's tail (exactly zero post-softmax mass), and every
+    /// per-step value rides a staged buffer.
+    #[cfg(feature = "cuda")]
+    fn forward_graph(
+        &self,
+        x: &candle_core::Tensor,
+        stage: &graph::DecodeStage,
+    ) -> LibAlmostResult<candle_core::Tensor> {
+        let (q, k_new, v_new) = self.qkv(x)?;
+        let Some(kv) = &self.kv else {
+            snafu::whatever!("graph decode reached unallocated KV buffers");
+        };
+        let write = graph::SlotWrite { dtype: k_new.dtype() };
+        kv.k.inplace_op3(&k_new, &stage.kv_slot, &write)?;
+        kv.v.inplace_op3(&v_new, &stage.kv_slot, &write)?;
+        let keys = kv.k.narrow(1, 0, stage.bucket)?;
+        let values = kv.v.narrow(1, 0, stage.bucket)?;
+        let dtype = q.dtype();
+        let scores = (q.matmul(&keys.transpose(1, 2)?)? * (self.head_dim as f64).powf(-0.5))?;
+        let scores = scores.broadcast_add(&stage.kv_mask)?;
+        let probs = candle_nn::ops::softmax_last_dim(&scores.to_dtype(candle_core::DType::F32)?)?
+            .to_dtype(dtype)?;
+        let out = probs
+            .matmul(&values)?
+            .transpose(0, 1)?
+            .contiguous()?
+            .reshape((1, self.num_heads * self.head_dim))?;
+        let attended = self.o_proj.forward(&out)?;
+        self.close_halves(x, attended)
+    }
 }
 
 enum Layer {
@@ -559,9 +659,16 @@ enum Layer {
     Attn(AttnLayer),
 }
 
+/// The margin a graph arm pre-reserves past the live length when the
+/// sample budget exceeds it (the 32768 default budget would
+/// otherwise pre-grow gigabytes a typical decode never touches).
+const RESERVE_DECODE_MARGIN: usize = 256;
+
 /// The era-two hybrid model: forward_all (stateless whole-sequence,
 /// the parity instrument) plus the carried forward_chunk path
-/// (chunked prefill + decode over the layers' internal caches).
+/// (chunked prefill + decode over the layers' internal caches), and,
+/// under settings.graph on a cuda build, the staged decode path that
+/// CUDA graphs capture and replay.
 pub struct OlmoHybrid {
     embed_tokens: candle_core::Tensor,
     layers: Vec<Layer>,
@@ -569,11 +676,27 @@ pub struct OlmoHybrid {
     lm_head: candle_nn::Linear,
     rms_eps: f64,
     context_len: usize,
+    settings: LibSettings,
+    #[cfg(feature = "cuda")]
+    graph_stage: Option<graph::DecodeStage>,
 }
 
 impl OlmoHybrid {
-    pub fn new(config: &OlmoHybridConfig, vb: candle_nn::VarBuilder) -> LibAlmostResult<Self> {
+    pub fn new(
+        config: &OlmoHybridConfig,
+        settings: LibSettings,
+        vb: candle_nn::VarBuilder,
+    ) -> LibAlmostResult<Self> {
         config.validate()?;
+        if settings.graph {
+            #[cfg(not(feature = "cuda"))]
+            snafu::whatever!("decode graphs need a cuda build (--features cuda)");
+            #[cfg(feature = "cuda")]
+            snafu::ensure_whatever!(
+                vb.device().is_cuda(),
+                "decode graphs need a cuda device"
+            );
+        }
         let vb_model = vb.pp("model");
         let embed_tokens = vb_model
             .pp("embed_tokens")
@@ -583,7 +706,9 @@ impl OlmoHybrid {
             let vb_layer = vb_model.pp(format!("layers.{layer_idx}"));
             layers.push(match config.layer_kind(layer_idx) {
                 LayerKind::LinearAttention => Layer::Gdn(GdnLayer::new(config, vb_layer)?),
-                LayerKind::FullAttention => Layer::Attn(AttnLayer::new(config, vb_layer)?),
+                LayerKind::FullAttention => {
+                    Layer::Attn(AttnLayer::new(config, settings.use_flash_attn, vb_layer)?)
+                }
             });
         }
         Ok(Self {
@@ -597,7 +722,15 @@ impl OlmoHybrid {
             )?,
             rms_eps: config.rms_norm_eps,
             context_len: 0,
+            settings,
+            #[cfg(feature = "cuda")]
+            graph_stage: None,
         })
+    }
+
+    /// The settings this model was built with.
+    pub fn settings(&self) -> &LibSettings {
+        &self.settings
     }
 
     /// All-position logits for one unbatched id sequence: [T] u32 in,
@@ -648,13 +781,42 @@ impl OlmoHybrid {
             };
         }
         self.context_len += seq_len;
+        self.contain_parked_grows();
         let hidden = norms::rms_norm(&hidden, &self.norm, self.rms_eps)?;
         Ok(self.lm_head.forward(&hidden)?)
     }
 
+    /// Collect the layers' park latches: a grow replaced
+    /// ever-captured KV buffers, so every cached graph is stale and
+    /// capture retires for this Model (one parked buffer set per
+    /// lifetime stays the bound).
+    #[cfg(feature = "cuda")]
+    fn contain_parked_grows(&mut self) {
+        let mut parked = false;
+        for layer in &mut self.layers {
+            if let Layer::Attn(attn) = layer
+                && attn.take_parked()
+            {
+                parked = true;
+            }
+        }
+        if parked {
+            self.flush_captured_graphs();
+            if let Some(stage) = &mut self.graph_stage {
+                stage.armed = false;
+                stage.capture_enabled = false;
+                stage.capture_permitted = false;
+            }
+        }
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    fn contain_parked_grows(&mut self) {}
+
     /// Reset every carried cache (GDN states, conv tails, attention
     /// KV) and the context length; the next forward_chunk starts a
-    /// fresh context.
+    /// fresh context. A staged graph stage disarms (an epoch) - its
+    /// buffers and cached graphs survive for the next arm.
     pub fn clear_cache(&mut self) -> LibAlmostResult<()> {
         for layer in &mut self.layers {
             match layer {
@@ -663,6 +825,10 @@ impl OlmoHybrid {
             }
         }
         self.context_len = 0;
+        #[cfg(feature = "cuda")]
+        if let Some(stage) = &mut self.graph_stage {
+            stage.armed = false;
+        }
         Ok(())
     }
 
@@ -674,6 +840,321 @@ impl OlmoHybrid {
     /// The device the model's tensors live on.
     pub fn device(&self) -> &candle_core::Device {
         self.embed_tokens.device()
+    }
+
+    /// The uniform attention KV length graph staging derives from
+    /// (uniform by construction - every layer sees every token;
+    /// asserted at arming).
+    #[cfg(feature = "cuda")]
+    fn graph_kv_state(&self) -> LibAlmostResult<(usize, usize)> {
+        let mut kv_len: Option<usize> = None;
+        let mut capacity = 0usize;
+        for layer in &self.layers {
+            if let Layer::Attn(attn) = layer {
+                let len = attn.kv_len();
+                if let Some(existing) = kv_len {
+                    snafu::ensure_whatever!(
+                        existing == len,
+                        "attention KV lengths disagree ({existing} vs {len})"
+                    );
+                } else {
+                    kv_len = Some(len);
+                }
+                capacity = attn.kv_capacity();
+            }
+        }
+        let Some(kv_len) = kv_len else {
+            snafu::whatever!("graph staging found no attention layers");
+        };
+        Ok((kv_len, capacity))
+    }
+
+    /// E4: arm the staged graph-mode decode path (generate() calls
+    /// this after prefill). Pre-grows every attention layer's KV once
+    /// to the run's bucket ceiling - so later bucket crossings never
+    /// reallocate under a captured graph - then builds or re-arms the
+    /// staged buffers from the live cache state.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn arm_graph_decode(&mut self, expected_total: usize) -> LibAlmostResult<()> {
+        snafu::ensure_whatever!(
+            self.device().is_cuda(),
+            "graph-mode decode requires a cuda device"
+        );
+        let device = self.device().clone();
+        let dtype = self.embed_tokens.dtype();
+        let (kv_len, _) = self.graph_kv_state()?;
+        snafu::ensure_whatever!(
+            kv_len == self.context_len,
+            "attention KV length {kv_len} does not match the context length {}",
+            self.context_len
+        );
+        let grain = self.settings.graph_bucket_grain;
+        // The run ceiling: the sample budget's contribution clamps to
+        // the reserve margin; a decode that outruns the armed
+        // capacity falls to the classic path (the capacity epoch).
+        let ceiling = expected_total
+            .min(kv_len + 1 + RESERVE_DECODE_MARGIN)
+            .max(kv_len + 1);
+        let capacity = graph::bucket_for(ceiling, grain);
+        for layer in &mut self.layers {
+            if let Layer::Attn(attn) = layer {
+                attn.reserve_capacity(capacity, dtype, &device)?;
+            }
+        }
+        self.contain_parked_grows();
+        let (_, kv_capacity) = self.graph_kv_state()?;
+        let vocab = self.embed_tokens.dim(0)?;
+        match &mut self.graph_stage {
+            Some(stage) => {
+                if stage.kv_capacity != kv_capacity {
+                    stage.graphs.clear();
+                    graph::trim_graph_memory();
+                    stage.kv_capacity = kv_capacity;
+                }
+                stage.rearm(kv_len)?;
+            }
+            None => {
+                let mut stage =
+                    graph::DecodeStage::new(kv_len, grain, vocab, dtype, &device)?;
+                stage.kv_capacity = kv_capacity;
+                self.graph_stage = Some(stage);
+            }
+        }
+        Ok(())
+    }
+
+    /// Non-cuda builds carry no graph path; arming is a hard error
+    /// (settings.graph is already rejected at Model::new).
+    #[cfg(not(feature = "cuda"))]
+    pub(crate) fn arm_graph_decode(&mut self, _expected_total: usize) -> LibAlmostResult<()> {
+        snafu::whatever!("this build carries no cuda support (decode graphs need --features cuda)")
+    }
+
+    /// Whether the staged graph-mode decode path is armed for the
+    /// current cache state.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn graph_armed(&self) -> bool {
+        self.graph_stage.as_ref().is_some_and(|stage| stage.armed)
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    pub(crate) fn graph_armed(&self) -> bool {
+        false
+    }
+
+    /// Gate-side switch between capture+replay and uncaptured staged
+    /// stepping (the gates' reference legs).
+    #[cfg(feature = "cuda")]
+    pub(crate) fn set_graph_capture(&mut self, enabled: bool) -> LibAlmostResult<()> {
+        let Some(stage) = &mut self.graph_stage else {
+            snafu::whatever!("no graph stage to configure (arm first)");
+        };
+        stage.capture_enabled = enabled;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    pub(crate) fn set_graph_capture(&mut self, _enabled: bool) -> LibAlmostResult<()> {
+        snafu::whatever!("this build carries no cuda support (decode graphs need --features cuda)")
+    }
+
+    /// E4 capacity epoch: when the next staged append would exceed
+    /// the armed KV capacity, disarm and retire capture for this
+    /// Model - the remaining steps take the classic path, whose
+    /// append growth applies the park containment.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn graph_disarm_when_full(&mut self) -> LibAlmostResult<()> {
+        if !self.graph_armed() {
+            return Ok(());
+        }
+        let (kv_len, capacity) = self.graph_kv_state()?;
+        // The BUCKET the next step needs is the binding width (it
+        // rounds up by the grain, so it can overshoot a capacity the
+        // grain does not divide before the raw length would).
+        let next_bucket = graph::bucket_for(kv_len + 1, self.settings.graph_bucket_grain);
+        if next_bucket > capacity {
+            self.flush_captured_graphs();
+            if let Some(stage) = &mut self.graph_stage {
+                stage.armed = false;
+                stage.capture_enabled = false;
+                stage.capture_permitted = false;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    pub(crate) fn graph_disarm_when_full(&mut self) -> LibAlmostResult<()> {
+        Ok(())
+    }
+
+    /// Drop every captured decode graph (the staged buffers and masks
+    /// stay) and trim the driver's cached graph pools.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn flush_captured_graphs(&mut self) {
+        if let Some(stage) = &mut self.graph_stage {
+            stage.graphs.clear();
+            graph::trim_graph_memory();
+        }
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    pub(crate) fn flush_captured_graphs(&mut self) {}
+
+    /// One staged decode step: consume `token`, return the persistent
+    /// (1, vocab) f32 logits buffer (valid until the next step
+    /// overwrites it). Host bookkeeping (KV lengths, context length)
+    /// advances in lockstep with the device writes.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn graph_decode_step(
+        &mut self,
+        token: u32,
+    ) -> LibAlmostResult<candle_core::Tensor> {
+        let kv_len = self.context_len;
+        let mut stage = match self.graph_stage.take() {
+            Some(stage) => stage,
+            None => snafu::whatever!("graph decode step without an armed stage"),
+        };
+        // Run the step with the stage held out, then ALWAYS put it
+        // back - an error must not destroy the persistent staging.
+        let step_result = self.graph_step_with(&mut stage, token, kv_len);
+        let out = stage.logits_out.clone();
+        self.graph_stage = Some(stage);
+        step_result?;
+        for layer in &mut self.layers {
+            if let Layer::Attn(attn) = layer {
+                attn.advance_len();
+            }
+        }
+        self.context_len += 1;
+        Ok(out)
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    pub(crate) fn graph_decode_step(
+        &mut self,
+        _token: u32,
+    ) -> LibAlmostResult<candle_core::Tensor> {
+        snafu::whatever!("this build carries no cuda support (decode graphs need --features cuda)")
+    }
+
+    /// One staged step against a held-out stage: stage the dynamics,
+    /// then either replay the bucket's captured graph (capturing it
+    /// first if uncached) or run the sequence as ordinary ops (the
+    /// uncaptured reference mode).
+    #[cfg(feature = "cuda")]
+    fn graph_step_with(
+        &mut self,
+        stage: &mut graph::DecodeStage,
+        token: u32,
+        kv_len: usize,
+    ) -> LibAlmostResult<()> {
+        snafu::ensure_whatever!(
+            stage.armed,
+            "graph decode step on a disarmed stage (cleared mid-run; re-arm first)"
+        );
+        stage.ensure_bucket(kv_len)?;
+        stage.stage_step(token, kv_len)?;
+        if !stage.capture_enabled {
+            return self.graph_forward_sequence(stage);
+        }
+        let key = stage.bucket;
+        match stage.graphs.get(key) {
+            Some(graph) => {
+                if let Err(error) = graph.launch() {
+                    snafu::whatever!("decode graph launch failed: {error}");
+                }
+            }
+            None => {
+                // First step at this bucket: the capture's WARMUP run
+                // performs this step's real work (and populates
+                // candle's param cache); the recording that follows
+                // only records - launching here would execute the
+                // step twice.
+                let captured = self.capture_decode_graph(stage)?;
+                stage.graphs.insert(key, captured);
+                // The KV buffers are baked into a captured graph now:
+                // their eventual replacement must PARK them.
+                for layer in self.layers.iter_mut() {
+                    if let Layer::Attn(attn) = layer {
+                        attn.buffers_captured = true;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Capture the current bucket's decode sequence into an
+    /// instantiated CUDA graph on candle's created stream. The pinned
+    /// recipe: hold candle's param-cache guard, WARMUP-run the
+    /// sequence uncaptured (populating the content-keyed dims/strides
+    /// cache, whose miss during active capture is a designed hard
+    /// error, and performing this step's real work), then record; the
+    /// recording performs no work and its intermediates drop as
+    /// in-graph free nodes. THREAD_LOCAL capture fails loudly on
+    /// capture-illegal calls from this thread; AUTO_FREE_ON_LAUNCH is
+    /// the relaunch semantic for in-graph memory nodes, and the exec
+    /// is pre-uploaded explicitly (UPLOAD is WithParams-only).
+    #[cfg(feature = "cuda")]
+    fn capture_decode_graph(
+        &mut self,
+        stage: &graph::DecodeStage,
+    ) -> LibAlmostResult<cudarc::driver::CudaGraph> {
+        let cuda_device = match self.device() {
+            candle_core::Device::Cuda(cuda_device) => cuda_device.clone(),
+            _ => snafu::whatever!("graph capture requires a cuda device"),
+        };
+        let stream = cuda_device.cuda_stream();
+        let _htod_cache = cuda_device.enable_cuda_graph_htod_cache();
+        // Warmup: the real step, param cache populated.
+        self.graph_forward_sequence(stage)?;
+        if let Err(error) = stream.begin_capture(
+            cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL,
+        ) {
+            snafu::whatever!("begin_capture failed: {error}");
+        }
+        let run_result = self.graph_forward_sequence(stage);
+        let end_result = stream.end_capture(
+            cudarc::driver::sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+        );
+        run_result?;
+        let graph = match end_result {
+            Ok(Some(graph)) => graph,
+            Ok(None) => snafu::whatever!("end_capture returned no graph"),
+            Err(error) => snafu::whatever!("end_capture failed: {error}"),
+        };
+        if let Err(error) = graph.upload() {
+            snafu::whatever!("graph upload failed: {error}");
+        }
+        Ok(graph)
+    }
+
+    /// The captured region: embed -> layers -> norm -> lm_head -> f32
+    /// cast -> the persistent logits_out write. GDN layers run their
+    /// classic t=1 carried step (fixed shapes, in-place state - the
+    /// captured form by construction); attention layers run the
+    /// staged bucket form. Every per-step value rides a staged
+    /// buffer; no host constant is baked.
+    #[cfg(feature = "cuda")]
+    fn graph_forward_sequence(
+        &mut self,
+        stage: &graph::DecodeStage,
+    ) -> LibAlmostResult<()> {
+        let mut hidden = self.embed_tokens.index_select(&stage.ids, 0)?;
+        for layer in &mut self.layers {
+            hidden = match layer {
+                Layer::Gdn(layer) => layer.forward_chunk(&hidden)?,
+                Layer::Attn(layer) => layer.forward_graph(&hidden, stage)?,
+            };
+        }
+        let hidden = norms::rms_norm(&hidden, &self.norm, self.rms_eps)?;
+        let logits = self
+            .lm_head
+            .forward(&hidden)?
+            .to_dtype(candle_core::DType::F32)?;
+        stage.logits_out.slice_set(&logits, 0, 0)?;
+        Ok(())
     }
 }
 

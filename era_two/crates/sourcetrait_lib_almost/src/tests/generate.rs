@@ -36,7 +36,7 @@ fn d6_gate_greedy_trajectory_matches_c2_f32() {
     let config = load_config(&dir).expect("config");
     let weights = mmap_weights(&dir, candle_core::DType::F32, &candle_core::Device::Cpu)
         .expect("mmap");
-    let mut model = OlmoHybrid::new(&config, weights).expect("model");
+    let mut model = OlmoHybrid::new(&config, LibSettings::default(), weights).expect("model");
     let tokenizer = load_tokenizer(&dir).expect("tokenizer");
 
     let options = GenerateOptions::greedy(20);
@@ -136,7 +136,14 @@ fn d6_bench_rows_cuda() {
     let config = load_config(&dir).expect("config");
     let device = candle_core::Device::new_cuda(0).expect("cuda");
     let weights = mmap_weights(&dir, candle_core::DType::BF16, &device).expect("mmap");
-    let mut model = OlmoHybrid::new(&config, weights).expect("model");
+    let settings = match env::var("ALMOST_BENCH_GRAPH").as_deref() {
+        Ok("1") => LibSettings {
+            graph: true,
+            ..LibSettings::default()
+        },
+        _ => LibSettings::default(),
+    };
+    let mut model = OlmoHybrid::new(&config, settings, weights).expect("model");
     let tokenizer = load_tokenizer(&dir).expect("tokenizer");
 
     // ALMOST_BENCH_FILES narrows the row set (csv of filenames) - the
@@ -192,7 +199,7 @@ fn d6_gate_needle_grid_cuda() {
     let config = load_config(&dir).expect("config");
     let device = candle_core::Device::new_cuda(0).expect("cuda");
     let weights = mmap_weights(&dir, candle_core::DType::BF16, &device).expect("mmap");
-    let mut model = OlmoHybrid::new(&config, weights).expect("model");
+    let mut model = OlmoHybrid::new(&config, LibSettings::default(), weights).expect("model");
     let tokenizer = load_tokenizer(&dir).expect("tokenizer");
 
     for &target in &lengths {
