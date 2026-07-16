@@ -1,0 +1,25 @@
+[package]
+name = "sourcetrait_yallmost"
+version = "0.0.0-1"
+edition = "2024"
+description = "yallmost: the interactive terminal chat over sourcetrait_lib_almost"
+authors = ["SourceTrait <development@sourcetrait.com>"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/sourcetrait/sourcetrait_almost"
+homepage = "https://sourcetrait.com"
+categories = []
+keywords = ["sourcetrait", "almost", "yallmost", "chat"]
+
+[[bin]]
+name = "yallmost"
+path = "src/main.rs"
+
+[features]
+cuda = ["sourcetrait_lib_almost/cuda"]
+flash-attn = ["cuda", "sourcetrait_lib_almost/flash-attn"]
+
+[dependencies]
+clap.workspace = true
+ratatui.workspace = true
+snafu.workspace = true
+sourcetrait_lib_almost.workspace = true

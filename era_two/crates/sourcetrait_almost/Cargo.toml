@@ -1,0 +1,24 @@
+[package]
+name = "sourcetrait_almost"
+version = "0.0.0-1"
+edition = "2024"
+description = "almost: the flagship smart command"
+authors = ["SourceTrait <development@sourcetrait.com>"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/sourcetrait/sourcetrait_almost"
+homepage = "https://sourcetrait.com"
+categories = []
+keywords = ["sourcetrait", "almost"]
+
+[[bin]]
+name = "almost"
+path = "src/main.rs"
+
+[features]
+cuda = ["sourcetrait_lib_almost/cuda"]
+flash-attn = ["cuda", "sourcetrait_lib_almost/flash-attn"]
+
+[dependencies]
+clap.workspace = true
+snafu.workspace = true
+sourcetrait_lib_almost.workspace = true

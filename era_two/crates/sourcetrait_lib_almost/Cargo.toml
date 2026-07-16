@@ -1,0 +1,30 @@
+[package]
+name = "sourcetrait_lib_almost"
+version = "0.0.0-1"
+edition = "2024"
+description = "The shared library common to the almost toolset"
+authors = ["SourceTrait <development@sourcetrait.com>"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/sourcetrait/sourcetrait_almost"
+homepage = "https://sourcetrait.com"
+categories = []
+keywords = ["sourcetrait", "almost", "lib"]
+
+[features]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "dep:cudarc", "dep:half"]
+flash-attn = ["cuda", "dep:candle-flash-attn"]
+
+[dependencies]
+candle-core.workspace = true
+candle-flash-attn = { workspace = true, optional = true }
+candle-nn.workspace = true
+candle-transformers.workspace = true
+cudarc = { workspace = true, optional = true }
+half = { workspace = true, optional = true }
+hf-hub.workspace = true
+safetensors.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+snafu.workspace = true
+tokenizers.workspace = true
+toml.workspace = true

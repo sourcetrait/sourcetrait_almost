@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/sourcetrait_lib_almost",
+  "crates/sourcetrait_almost",
+  "crates/sourcetrait_lmst",
+  "crates/sourcetrait_yallmost",
+  "crates/sourcetrait_lastmost",
+]
+
+[workspace.dependencies]
+burn = { version = "0.21", default-features = false, features = ["std", "ndarray"] }
+candle-core = { version = "0.11" }
+candle-flash-attn = { version = "0.11" }
+candle-nn = { version = "0.11" }
+candle-transformers = { version = "0.11" }
+clap = { version = "4", features = ["derive"] }
+cudarc = { version = "0.19", features = ["cuda-version-from-build-system"] }
+half = { version = "2" }
+hf-hub = { version = "1", features = ["blocking"] }
+nu-parser = { git = "https://github.com/nushell/nushell", tag = "0.114.1" }
+nu-protocol = { git = "https://github.com/nushell/nushell", tag = "0.114.1", default-features = false }
+nuon = { git = "https://github.com/nushell/nushell", tag = "0.114.1" }
+ratatui = { version = "0.29" }
+safetensors = { version = "0.8" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+snafu = { version = "0.9" }
+sourcetrait_lib_almost = { path = "crates/sourcetrait_lib_almost" }
+tokenizers = { version = "0.23" }
+toml = { version = "0.9" }
