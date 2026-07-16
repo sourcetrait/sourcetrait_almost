@@ -7,7 +7,6 @@
 use crate::*;
 
 /// Plain RMSNorm (rms_norm_eps everywhere it appears in this model).
-#[allow(dead_code)]
 pub(crate) fn rms_norm(
     x: &candle_core::Tensor,
     weight: &candle_core::Tensor,
@@ -25,7 +24,6 @@ pub(crate) fn rms_norm(
 /// in input dtype, gate = silu(gate) in f32, result back in input
 /// dtype. Eps here is 1e-5 (the fla FusedRMSNormGated default), NOT
 /// rms_norm_eps - the one eps exception in the model.
-#[allow(dead_code)]
 pub(crate) fn rms_norm_gated(
     x: &candle_core::Tensor,
     gate: &candle_core::Tensor,

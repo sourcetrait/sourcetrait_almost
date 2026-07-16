@@ -1,5 +1,4 @@
 //! Hand-pinned numeric locks over the norm primitives (cpu f32).
-use crate::gdn::{gdn_gates, softplus};
 use crate::norms::{rms_norm, rms_norm_gated};
 
 fn tensor(values: &[f32]) -> candle_core::Tensor {
@@ -59,38 +58,5 @@ fn rms_norm_gated_is_norm_before_gate() {
     assert_close(&values(&out), &[0.338_411, 0.676_822, 1.015_233], 1e-5);
 }
 
-#[test]
-fn softplus_guard_passes_large_inputs_through() {
-    let out = softplus(&tensor(&[0.0, 25.0, -5.0])).expect("softplus");
-    let got = values(&out);
-    assert_close(&[got[0]], &[std::f32::consts::LN_2], 1e-6);
-    assert_eq!(got[1], 25.0, "guarded region is exact passthrough");
-    assert_close(&[got[2]], &[0.006_715], 1e-6);
-}
-
-#[test]
-fn gdn_gates_pin_the_scalar_math() {
-    // a = 0, dt_bias = 0 -> softplus(0) = ln 2; A_log = 0 -> exp = 1;
-    // g = -ln 2. b = 0 -> sigmoid = 0.5 -> beta = 1.0 under
-    // neg-eigval, 0.5 without.
-    let (g, beta) = gdn_gates(
-        &tensor(&[0.0]),
-        &tensor(&[0.0]),
-        &tensor(&[0.0]),
-        &tensor(&[0.0]),
-        true,
-    )
-    .expect("gates");
-    assert_close(&values(&g), &[-std::f32::consts::LN_2], 1e-6);
-    assert_close(&values(&beta), &[1.0], 1e-7);
-
-    let (_, beta) = gdn_gates(
-        &tensor(&[0.0]),
-        &tensor(&[0.0]),
-        &tensor(&[0.0]),
-        &tensor(&[0.0]),
-        false,
-    )
-    .expect("gates");
-    assert_close(&values(&beta), &[0.5], 1e-7);
-}
+// The gdn primitives' hand pins (gdn_gates, softplus, l2_norm, conv,
+// recurrence) live in tests/gdn.rs, 1:1 with their module.

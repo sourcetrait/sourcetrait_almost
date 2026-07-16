@@ -39,19 +39,16 @@ impl OlmoHybridConfig {
         self.num_key_value_heads.unwrap_or(self.num_attention_heads)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn head_dim(&self) -> usize {
         self.hidden_size / self.num_attention_heads
     }
 
     /// GDN key projection width (heads x key head dim; 2880 pinned).
-    #[allow(dead_code)]
     pub(crate) fn key_dim(&self) -> usize {
         self.linear_num_key_heads * self.linear_key_head_dim
     }
 
     /// GDN value/gate projection width (heads x value head dim; 5760).
-    #[allow(dead_code)]
     pub(crate) fn value_dim(&self) -> usize {
         self.linear_num_value_heads * self.linear_value_head_dim
     }
@@ -85,6 +82,14 @@ impl OlmoHybridConfig {
                 "hidden_size {} not divisible by {} heads",
                 self.hidden_size,
                 self.num_attention_heads
+            );
+        }
+        if self.linear_num_key_heads != self.linear_num_value_heads {
+            snafu::whatever!(
+                "equal GDN head counts by policy (no repeat_interleave machinery): \
+                 {} key heads vs {} value heads",
+                self.linear_num_key_heads,
+                self.linear_num_value_heads
             );
         }
         if self.layer_types.len() != self.num_hidden_layers {

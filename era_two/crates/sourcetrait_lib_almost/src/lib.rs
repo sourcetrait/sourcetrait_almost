@@ -4,6 +4,7 @@ pub mod consts;
 pub(crate) mod error;
 pub(crate) mod gdn;
 pub(crate) mod load;
+pub(crate) mod model;
 pub(crate) mod norms;
 pub(crate) mod tokenizer;
 
@@ -17,6 +18,8 @@ pub(crate) use std::{
         PathBuf,
     },
 };
+
+pub(crate) use candle_nn::Module;
 
 pub use crate::chat::{
     chat_continue,
@@ -39,6 +42,7 @@ pub use crate::load::{
     mmap_weights,
     tensor_inventory,
 };
+pub use crate::model::OlmoHybrid;
 pub use crate::tokenizer::{
     load_tokenizer,
     verify_token_map,
@@ -48,7 +52,9 @@ pub use crate::tokenizer::{
 mod tests {
     mod chat;
     mod checkpoint;
+    mod gdn;
     mod load;
+    mod model;
     mod norms;
     mod tokenizer;
 }
