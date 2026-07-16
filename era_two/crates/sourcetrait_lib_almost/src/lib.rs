@@ -21,6 +21,13 @@ pub(crate) use std::{
 
 pub(crate) use candle_nn::Module;
 
+#[cfg(feature = "flash-attn")]
+pub(crate) mod r {
+    pub(crate) mod flash {
+        pub(crate) use candle_flash_attn::flash_attn;
+    }
+}
+
 pub use crate::chat::{
     chat_continue,
     chat_wrap,

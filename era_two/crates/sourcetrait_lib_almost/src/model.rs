@@ -368,6 +368,11 @@ impl AttnLayer {
     /// Eager MHA, NoPE: q [heads, t, d] against the given k/v span
     /// (its own chunk stateless, the whole cache carried); softmax in
     /// f32 cast back. A single-row query (decode) runs mask-free.
+    /// With the flash-attn feature compiled, an eligible prefill
+    /// (cuda, bf16/f16, q_len > 1) dispatches to the flash kernel
+    /// instead - decode stays eager (candle-flash-attn 0.11 has no
+    /// split-kv kernel; the era-one measured gate), and cpu/f32 legs
+    /// never dispatch, so they stay bitwise-identical either way.
     fn attend(
         &self,
         q: &candle_core::Tensor,
@@ -375,6 +380,16 @@ impl AttnLayer {
         v: &candle_core::Tensor,
         mask: Option<&candle_core::Tensor>,
     ) -> LibAlmostResult<candle_core::Tensor> {
+        #[cfg(feature = "flash-attn")]
+        if q.dim(1)? > 1
+            && q.device().is_cuda()
+            && matches!(
+                q.dtype(),
+                candle_core::DType::BF16 | candle_core::DType::F16
+            )
+        {
+            return self.attend_flash(q, k, v);
+        }
         let seq_len = q.dim(1)?;
         let dtype = q.dtype();
         let mut scores = (q.matmul(&k.transpose(1, 2)?)? * (self.head_dim as f64).powf(-0.5))?;
@@ -387,6 +402,34 @@ impl AttnLayer {
             .matmul(v)?
             .transpose(0, 1)?
             .contiguous()?
+            .reshape((seq_len, self.num_heads * self.head_dim))?;
+        Ok(self.o_proj.forward(&out)?)
+    }
+
+    /// The flash prefill: q the tail block of the k/v span, causal
+    /// with the kernel's bottom-right alignment (absolute-position
+    /// causality over the carried prefix - the era-one R1 finding).
+    /// Layout: flash takes [batch, seq, heads, head_dim].
+    #[cfg(feature = "flash-attn")]
+    fn attend_flash(
+        &self,
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+    ) -> LibAlmostResult<candle_core::Tensor> {
+        let seq_len = q.dim(1)?;
+        let block = |t: &candle_core::Tensor| -> LibAlmostResult<candle_core::Tensor> {
+            Ok(t.transpose(0, 1)?.unsqueeze(0)?.contiguous()?)
+        };
+        let out = r::flash::flash_attn(
+            &block(q)?,
+            &block(k)?,
+            &block(v)?,
+            (self.head_dim as f32).powf(-0.5),
+            true,
+        )?;
+        let out = out
+            .squeeze(0)?
             .reshape((seq_len, self.num_heads * self.head_dim))?;
         Ok(self.o_proj.forward(&out)?)
     }
