@@ -1,0 +1,456 @@
+//! The suite's -d/-c/-s profile framework: core model types stay
+//! format-free, serde TOML shells bridge via TryFrom (a future format
+//! adds a shell without touching the core model), and profiles are
+//! DIRECTORIES holding one file per suite component (lib/cli/tui/
+//! tool/baseline .toml) under config/ and settings/ roots.
+//!
+//! Name rules: `defaults` is reserved for the embedded base every
+//! load merges onto; `default` is the user's standing profile - the
+//! implied choice when no token is given, falling back to the
+//! embedded base when its file is absent. Any other explicit token
+//! errors when missing.
+use crate::*;
+
+/// The embedded base (the reserved `defaults` profile), one per kind.
+const DEFAULTS_LIB_CONFIG: &str = include_str!("../defaults/config/lib.toml");
+const DEFAULTS_LIB_SETTINGS: &str = include_str!("../defaults/settings/lib.toml");
+
+/// The user's standing profile name (the implied -c/-s choice).
+const DEFAULT_PROFILE: &str = "default";
+/// The reserved embedded-base profile name (never touches the fs).
+const DEFAULTS_PROFILE: &str = "defaults";
+
+/// XDG config home, honoring the spec fallback (~/.config).
+fn config_home() -> LibAlmostResult<PathBuf> {
+    if let Ok(dir) = env::var("XDG_CONFIG_HOME")
+        && !dir.is_empty()
+    {
+        return Ok(PathBuf::from(dir));
+    }
+    let Ok(home) = env::var("HOME") else {
+        snafu::whatever!("neither XDG_CONFIG_HOME nor HOME is set");
+    };
+    Ok(PathBuf::from(home).join(".config"))
+}
+
+/// The suite's config root under the XDG config home.
+fn suite_config_root() -> LibAlmostResult<PathBuf> {
+    Ok(config_home()?.join("sourcetrait/almost"))
+}
+
+/// A -c/-s token is a profile NAME when it is a pure snake; anything
+/// else is a filesystem path.
+fn is_profile_name(token: &Path) -> bool {
+    let Some(text) = token.to_str() else {
+        return false;
+    };
+    !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// A resolved config-profile DIRECTORY; the component accessors name
+/// the file inside it. A pure-snake token resolves under the suite's
+/// XDG config root (config/<name>); any other token is used as the
+/// directory itself. Exact component-FILE tokens bypass profiles
+/// entirely (the load fns take them directly).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigProfile(PathBuf);
+
+/// The shared -c token resolution (coherence forbids one generic
+/// TryFrom<P: AsRef<Path>> beside std's blanket, so the concrete
+/// impls below each delegate here).
+fn resolve_config_profile(token: &Path) -> LibAlmostResult<ConfigProfile> {
+    if is_profile_name(token) {
+        Ok(ConfigProfile(
+            suite_config_root()?.join("config").join(token),
+        ))
+    } else {
+        Ok(ConfigProfile(token.to_path_buf()))
+    }
+}
+
+impl TryFrom<&Path> for ConfigProfile {
+    type Error = LibAlmostError;
+
+    fn try_from(token: &Path) -> LibAlmostResult<Self> {
+        resolve_config_profile(token)
+    }
+}
+
+impl TryFrom<PathBuf> for ConfigProfile {
+    type Error = LibAlmostError;
+
+    fn try_from(token: PathBuf) -> LibAlmostResult<Self> {
+        resolve_config_profile(&token)
+    }
+}
+
+impl TryFrom<&str> for ConfigProfile {
+    type Error = LibAlmostError;
+
+    fn try_from(token: &str) -> LibAlmostResult<Self> {
+        resolve_config_profile(Path::new(token))
+    }
+}
+
+impl TryFrom<String> for ConfigProfile {
+    type Error = LibAlmostError;
+
+    fn try_from(token: String) -> LibAlmostResult<Self> {
+        resolve_config_profile(Path::new(&token))
+    }
+}
+
+impl ConfigProfile {
+    /// Resolve against a custom root (-d) instead of the XDG config
+    /// root: <dir>/config/<name> for a snake, the token as-is
+    /// otherwise.
+    pub fn try_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(
+        dir: P1,
+        token: P2,
+    ) -> LibAlmostResult<Self> {
+        let token = token.as_ref();
+        if is_profile_name(token) {
+            Ok(Self(dir.as_ref().join("config").join(token)))
+        } else {
+            Ok(Self(token.to_path_buf()))
+        }
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.0
+    }
+
+    pub fn lib_config(&self) -> PathBuf {
+        self.0.join("lib.toml")
+    }
+
+    pub fn cli_config(&self) -> PathBuf {
+        self.0.join("cli.toml")
+    }
+
+    pub fn tui_config(&self) -> PathBuf {
+        self.0.join("tui.toml")
+    }
+
+    pub fn tool_config(&self) -> PathBuf {
+        self.0.join("tool.toml")
+    }
+
+    pub fn baseline_config(&self) -> PathBuf {
+        self.0.join("baseline.toml")
+    }
+}
+
+/// A resolved settings-profile DIRECTORY (the settings/ sibling of
+/// ConfigProfile; same token rules).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsProfile(PathBuf);
+
+/// The shared -s token resolution (the same concrete-impl shape as
+/// ConfigProfile, for the same coherence reason).
+fn resolve_settings_profile(token: &Path) -> LibAlmostResult<SettingsProfile> {
+    if is_profile_name(token) {
+        Ok(SettingsProfile(
+            suite_config_root()?.join("settings").join(token),
+        ))
+    } else {
+        Ok(SettingsProfile(token.to_path_buf()))
+    }
+}
+
+impl TryFrom<&Path> for SettingsProfile {
+    type Error = LibAlmostError;
+
+    fn try_from(token: &Path) -> LibAlmostResult<Self> {
+        resolve_settings_profile(token)
+    }
+}
+
+impl TryFrom<PathBuf> for SettingsProfile {
+    type Error = LibAlmostError;
+
+    fn try_from(token: PathBuf) -> LibAlmostResult<Self> {
+        resolve_settings_profile(&token)
+    }
+}
+
+impl TryFrom<&str> for SettingsProfile {
+    type Error = LibAlmostError;
+
+    fn try_from(token: &str) -> LibAlmostResult<Self> {
+        resolve_settings_profile(Path::new(token))
+    }
+}
+
+impl TryFrom<String> for SettingsProfile {
+    type Error = LibAlmostError;
+
+    fn try_from(token: String) -> LibAlmostResult<Self> {
+        resolve_settings_profile(Path::new(&token))
+    }
+}
+
+impl SettingsProfile {
+    /// Resolve against a custom root (-d) instead of the XDG config
+    /// root: <dir>/settings/<name> for a snake, the token as-is
+    /// otherwise.
+    pub fn try_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(
+        dir: P1,
+        token: P2,
+    ) -> LibAlmostResult<Self> {
+        let token = token.as_ref();
+        if is_profile_name(token) {
+            Ok(Self(dir.as_ref().join("settings").join(token)))
+        } else {
+            Ok(Self(token.to_path_buf()))
+        }
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.0
+    }
+
+    pub fn lib_settings(&self) -> PathBuf {
+        self.0.join("lib.toml")
+    }
+
+    pub fn cli_settings(&self) -> PathBuf {
+        self.0.join("cli.toml")
+    }
+
+    pub fn tui_settings(&self) -> PathBuf {
+        self.0.join("tui.toml")
+    }
+
+    pub fn tool_settings(&self) -> PathBuf {
+        self.0.join("tool.toml")
+    }
+
+    pub fn baseline_settings(&self) -> PathBuf {
+        self.0.join("baseline.toml")
+    }
+}
+
+/// The lib component's config file shape (TOML format layer).
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LibConfigToml {
+    pub model: Option<String>,
+}
+
+/// The lib component's GENERAL OPERATION: which checkpoint. Nuance
+/// and tweaks (flash, graphs, the generation posture) are
+/// LibSettings.
+#[derive(Debug, Clone)]
+pub struct LibConfig {
+    pub model: String,
+}
+
+impl TryFrom<LibConfigToml> for LibConfig {
+    type Error = LibAlmostError;
+
+    fn try_from(user: LibConfigToml) -> LibAlmostResult<Self> {
+        let base: LibConfigToml = toml::from_str(DEFAULTS_LIB_CONFIG)?;
+        Ok(Self {
+            model: user
+                .model
+                .or(base.model)
+                .unwrap_or_else(|| consts::DPO_MODEL_NAME.to_string()),
+        })
+    }
+}
+
+impl Default for LibConfig {
+    fn default() -> Self {
+        LibConfigToml::default()
+            .try_into()
+            .expect("embedded defaults parse")
+    }
+}
+
+impl LibConfig {
+    /// Load from an explicit component-toml file path; an absent file
+    /// is an error (explicit tokens never fall back).
+    pub fn from_config_path(path: &Path) -> LibAlmostResult<Self> {
+        let text = fs::read_to_string(path)?;
+        let shell: LibConfigToml = toml::from_str(&text)?;
+        shell.try_into()
+    }
+
+    /// Resolve + load per the -c token rules against the XDG root:
+    /// None -> the `default` profile (absent file falls to the
+    /// embedded base); `defaults` -> the embedded base alone; another
+    /// snake -> that profile's lib.toml (absent = error); a path ->
+    /// that component toml file (absent = error).
+    pub fn load<P: AsRef<Path>>(token: Option<P>) -> LibAlmostResult<Self> {
+        Self::load_from_dir(None::<&Path>, token)
+    }
+
+    /// The -d variant of load: profile names resolve under `dir`
+    /// instead of the XDG config root; path tokens are unaffected.
+    pub fn load_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(
+        dir: Option<P1>,
+        token: Option<P2>,
+    ) -> LibAlmostResult<Self> {
+        let profile_for = |name: &str| -> LibAlmostResult<ConfigProfile> {
+            match &dir {
+                Some(dir) => ConfigProfile::try_from_dir(dir, name),
+                None => ConfigProfile::try_from(name),
+            }
+        };
+        let Some(token) = token else {
+            let path = profile_for(DEFAULT_PROFILE)?.lib_config();
+            if path.is_file() {
+                return Self::from_config_path(&path);
+            }
+            return LibConfigToml::default().try_into();
+        };
+        let token = token.as_ref();
+        if !is_profile_name(token) {
+            return Self::from_config_path(token);
+        }
+        let name = token.to_str().expect("snake tokens are utf-8");
+        if name == DEFAULTS_PROFILE {
+            return LibConfigToml::default().try_into();
+        }
+        let path = profile_for(name)?.lib_config();
+        if name == DEFAULT_PROFILE && !path.is_file() {
+            return LibConfigToml::default().try_into();
+        }
+        Self::from_config_path(&path)
+    }
+}
+
+/// The [generation] table of a lib settings file; every field
+/// optional (absent fields fall through the embedded base to the
+/// code defaults). greedy = true forces argmax by zeroing
+/// temperature and top_p, whatever else the file says.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenerationToml {
+    pub greedy: Option<bool>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub seed: Option<u64>,
+    pub sample_len: Option<usize>,
+    pub chat: Option<bool>,
+    pub ignore_stops: Option<bool>,
+}
+
+/// The lib component's settings file shape (TOML format layer).
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LibSettingsToml {
+    pub use_flash_attn: Option<bool>,
+    pub graph: Option<bool>,
+    pub generation: Option<GenerationToml>,
+}
+
+/// The lib component's NUANCE - the execution and posture tweaks.
+/// use_flash_attn arms the flash prefill dispatch where eligible (a
+/// flash-attn build on cuda at bf16/f16 - ineligible runs stay
+/// eager); graph arms CUDA-graph decode capture; generation is the
+/// sampling/budget posture.
+#[derive(Debug, Clone)]
+pub struct LibSettings {
+    pub use_flash_attn: bool,
+    pub graph: bool,
+    pub generation: GenerateOptions,
+}
+
+/// Overlay chain per field: the user file, then the embedded base,
+/// then the code defaults; greedy wins over sampling params.
+fn merged_generation(user: GenerationToml, base: GenerationToml) -> GenerateOptions {
+    let code = GenerateOptions::default();
+    let greedy = user.greedy.or(base.greedy).unwrap_or(false);
+    let temperature = user.temperature.or(base.temperature).or(code.temperature);
+    let top_p = user.top_p.or(base.top_p).or(code.top_p);
+    GenerateOptions {
+        temperature: if greedy { None } else { temperature },
+        top_p: if greedy { None } else { top_p },
+        seed: user.seed.or(base.seed).unwrap_or(code.seed),
+        sample_len: user.sample_len.or(base.sample_len).unwrap_or(code.sample_len),
+        chat: user.chat.or(base.chat).unwrap_or(code.chat),
+        ignore_stops: user.ignore_stops.or(base.ignore_stops).unwrap_or(code.ignore_stops),
+    }
+}
+
+impl TryFrom<LibSettingsToml> for LibSettings {
+    type Error = LibAlmostError;
+
+    fn try_from(user: LibSettingsToml) -> LibAlmostResult<Self> {
+        let base: LibSettingsToml = toml::from_str(DEFAULTS_LIB_SETTINGS)?;
+        Ok(Self {
+            use_flash_attn: user
+                .use_flash_attn
+                .or(base.use_flash_attn)
+                .unwrap_or(true),
+            graph: user.graph.or(base.graph).unwrap_or(false),
+            generation: merged_generation(
+                user.generation.unwrap_or_default(),
+                base.generation.unwrap_or_default(),
+            ),
+        })
+    }
+}
+
+impl Default for LibSettings {
+    fn default() -> Self {
+        LibSettingsToml::default()
+            .try_into()
+            .expect("embedded defaults parse")
+    }
+}
+
+impl LibSettings {
+    /// Load from an explicit component-toml file path; an absent file
+    /// is an error (explicit tokens never fall back).
+    pub fn from_settings_path(path: &Path) -> LibAlmostResult<Self> {
+        let text = fs::read_to_string(path)?;
+        let shell: LibSettingsToml = toml::from_str(&text)?;
+        shell.try_into()
+    }
+
+    /// Resolve + load per the -s token rules against the XDG root
+    /// (the same name rules as LibConfig::load).
+    pub fn load<P: AsRef<Path>>(token: Option<P>) -> LibAlmostResult<Self> {
+        Self::load_from_dir(None::<&Path>, token)
+    }
+
+    /// The -d variant of load: profile names resolve under `dir`
+    /// instead of the XDG config root; path tokens are unaffected.
+    pub fn load_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(
+        dir: Option<P1>,
+        token: Option<P2>,
+    ) -> LibAlmostResult<Self> {
+        let profile_for = |name: &str| -> LibAlmostResult<SettingsProfile> {
+            match &dir {
+                Some(dir) => SettingsProfile::try_from_dir(dir, name),
+                None => SettingsProfile::try_from(name),
+            }
+        };
+        let Some(token) = token else {
+            let path = profile_for(DEFAULT_PROFILE)?.lib_settings();
+            if path.is_file() {
+                return Self::from_settings_path(&path);
+            }
+            return LibSettingsToml::default().try_into();
+        };
+        let token = token.as_ref();
+        if !is_profile_name(token) {
+            return Self::from_settings_path(token);
+        }
+        let name = token.to_str().expect("snake tokens are utf-8");
+        if name == DEFAULTS_PROFILE {
+            return LibSettingsToml::default().try_into();
+        }
+        let path = profile_for(name)?.lib_settings();
+        if name == DEFAULT_PROFILE && !path.is_file() {
+            return LibSettingsToml::default().try_into();
+        }
+        Self::from_settings_path(&path)
+    }
+}

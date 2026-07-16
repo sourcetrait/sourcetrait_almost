@@ -1,5 +1,6 @@
 pub(crate) mod chat;
 pub(crate) mod checkpoint;
+pub(crate) mod config;
 pub mod consts;
 pub(crate) mod error;
 pub(crate) mod gdn;
@@ -47,6 +48,15 @@ pub use crate::checkpoint::{
     load_config,
     model_dir,
 };
+pub use crate::config::{
+    ConfigProfile,
+    GenerationToml,
+    LibConfig,
+    LibConfigToml,
+    LibSettings,
+    LibSettingsToml,
+    SettingsProfile,
+};
 pub use crate::error::{
     LibAlmostError,
     LibAlmostResult,
@@ -73,6 +83,7 @@ pub use crate::tokenizer::{
 mod tests {
     mod chat;
     mod checkpoint;
+    mod config;
     mod gdn;
     mod generate;
     mod load;

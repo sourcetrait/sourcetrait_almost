@@ -13,6 +13,8 @@ pub enum LibAlmostError {
     Json { source: serde_json::Error },
     #[snafu(transparent)]
     Candle { source: candle_core::Error },
+    #[snafu(transparent)]
+    Toml { source: toml::de::Error },
     #[snafu(whatever, display("{message}"))]
     Whatever {
         message: String,

@@ -20,6 +20,7 @@ pub(crate) const PREFILL_CHUNK: usize = 512;
 /// NoPE leaves the hybrid without a position ceiling, so sample_len
 /// is a plain budget - VRAM is the real bound (the era-one 65536
 /// clamp deliberately does not carry).
+#[derive(Debug, Clone)]
 pub struct GenerateOptions {
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
