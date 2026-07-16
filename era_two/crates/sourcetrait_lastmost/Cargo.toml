@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_lastmost"
-version = "0.0.0-3"
+version = "0.0.0-4"
 edition = "2024"
 description = "lastmost: baselining of the original model and its original tools"
 authors = ["SourceTrait <development@sourcetrait.com>"]
@@ -20,6 +20,7 @@ flash-attn = ["cuda", "sourcetrait_lib_almost/flash-attn"]
 
 [dependencies]
 clap.workspace = true
+safetensors.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
 sourcetrait_lib_almost.workspace = true

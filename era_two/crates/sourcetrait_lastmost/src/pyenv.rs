@@ -3,7 +3,11 @@ use crate::*;
 
 pub(crate) const LASTMOST_DATA_SUBDIR: &str = "sourcetrait/almost/lastmost";
 
-const GENERATE_DRIVER: &str = include_str!("../pysrc/generate.py");
+const PYSRC_FILES: [(&str, &str); 3] = [
+    ("common.py", include_str!("../pysrc/common.py")),
+    ("generate.py", include_str!("../pysrc/generate.py")),
+    ("dump.py", include_str!("../pysrc/dump.py")),
+];
 
 /// The lastmost data home (the venv and materialized pysrc live here).
 pub(crate) fn lastmost_home() -> LastmostResult<PathBuf> {
@@ -29,10 +33,12 @@ pub(crate) fn env_python() -> LastmostResult<PathBuf> {
 pub(crate) fn materialize_pysrc() -> LastmostResult<PathBuf> {
     let dir = lastmost_home()?.join("pysrc");
     fs::create_dir_all(&dir)?;
-    let path = dir.join("generate.py");
-    let current = fs::read_to_string(&path).unwrap_or_default();
-    if current != GENERATE_DRIVER {
-        fs::write(&path, GENERATE_DRIVER)?;
+    for (name, content) in PYSRC_FILES {
+        let path = dir.join(name);
+        let current = fs::read_to_string(&path).unwrap_or_default();
+        if current != content {
+            fs::write(&path, content)?;
+        }
     }
     Ok(dir)
 }

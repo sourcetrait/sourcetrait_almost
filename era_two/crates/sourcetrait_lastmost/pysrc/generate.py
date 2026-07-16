@@ -11,54 +11,10 @@ Exit code 0 on a completed generation.
 """
 
 import argparse
-import hashlib
-import json
-import os
 import sys
 import time
 
-
-def emit(event, **fields):
-    print(json.dumps({"event": event, **fields}, ensure_ascii=False), flush=True)
-
-
-def sha256_file(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def small_file_stamps(model_dir):
-    stamps = {}
-    for name in (
-        "config.json",
-        "generation_config.json",
-        "tokenizer.json",
-        "tokenizer_config.json",
-        "chat_template.jinja",
-    ):
-        path = os.path.join(model_dir, name)
-        if os.path.isfile(path):
-            stamps[name] = sha256_file(path)
-    shard = os.path.join(model_dir, "model.safetensors")
-    if os.path.isfile(shard):
-        st = os.stat(shard)
-        stamps["model.safetensors"] = {"bytes": st.st_size, "mtime": int(st.st_mtime)}
-    return stamps
-
-
-def package_versions():
-    from importlib import metadata
-
-    versions = {"python": sys.version.split()[0]}
-    for dist in ("torch", "transformers", "flash-linear-attention", "triton", "accelerate", "vllm"):
-        try:
-            versions[dist] = metadata.version(dist)
-        except metadata.PackageNotFoundError:
-            versions[dist] = None
-    return versions
+import common
 
 
 def parse_args(argv):
@@ -82,79 +38,30 @@ def parse_args(argv):
 
 def main(argv):
     args = parse_args(argv)
-
-    # The cpu grade must never touch cuda: fla availability is gated on
-    # torch-cuda visibility, and the fla norm module constructs itself on
-    # the current cuda device at model init.
-    no_fla = args.no_fla or args.device == "cpu"
-    if args.device == "cpu":
-        os.environ["CUDA_VISIBLE_DEVICES"] = ""
-    if args.determinism:
-        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    no_fla = common.prepare_process(args.device, args.no_fla, args.determinism)
 
     import torch
-    import transformers.utils.import_utils as tf_import_utils
 
     if no_fla:
-        tf_import_utils.is_flash_linear_attention_available = lambda: False
+        common.apply_fla_block()
+    determinism_state = common.set_determinism(args.seed, args.determinism)
 
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
-    torch.manual_seed(args.seed)
-    determinism_state = "off"
-    if args.determinism:
-        try:
-            torch.use_deterministic_algorithms(True)
-            determinism_state = "on"
-        except Exception as e:  # noqa: BLE001 - record, do not die
-            determinism_state = f"failed: {e}"
-
-    dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float32
+    tokenizer, model, load_s = common.load_model(args.model_dir, args.dtype, args.attn, args.device)
     device = args.device
-
-    t0 = time.perf_counter()
-    tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_dir, dtype=dtype, attn_implementation=args.attn
-    )
-    model.to(device)
-    model.eval()
-    if device == "cuda":
-        torch.cuda.synchronize()
-        torch.cuda.reset_peak_memory_stats()
-    load_s = time.perf_counter() - t0
 
     with open(args.prompt_file, "r", encoding="utf-8") as f:
         prompt_text = f.read()
-
-    if args.raw:
-        rendered = prompt_text
-        default_stops = ["<|endoftext|>"]
-    else:
-        if tokenizer.chat_template is None:
-            emit("error", message="checkpoint has no chat template; use --raw")
-            return 2
-        rendered = tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompt_text}],
-            add_generation_prompt=True,
-            tokenize=False,
-        )
-        default_stops = ["<|im_end|>", "<|endoftext|>"]
-
+    rendered, default_stops = common.render_prompt(tokenizer, prompt_text, args.raw)
     stops = args.stop if args.stop else default_stops
-    stop_ids = []
-    for s in stops:
-        tid = tokenizer.convert_tokens_to_ids(s)
-        if tid is not None and tid >= 0:
-            stop_ids.append(tid)
+    stop_ids = common.resolve_stop_ids(tokenizer, stops)
 
     input_ids = tokenizer(rendered, add_special_tokens=False, return_tensors="pt").input_ids.to(device)
 
-    emit(
+    common.emit(
         "meta",
-        versions=package_versions(),
+        versions=common.package_versions(),
         model_dir=args.model_dir,
-        file_stamps=small_file_stamps(args.model_dir),
+        file_stamps=common.small_file_stamps(args.model_dir),
         device=device,
         dtype=args.dtype,
         attn=args.attn,
@@ -226,7 +133,7 @@ def main(argv):
         decode_s = time.perf_counter() - t2
 
     prompt_tokens = int(input_ids.shape[1])
-    emit(
+    common.emit(
         "timing",
         load_s=round(load_s, 3),
         prefill_s=round(prefill_s, 4),
@@ -236,14 +143,13 @@ def main(argv):
         decode_tok_s=round(steps / decode_s, 2) if decode_s > 0 and steps > 0 else None,
     )
     if device == "cuda":
-        emit(
+        common.emit(
             "vram",
-            allocated_after_load=None,
             max_allocated=int(torch.cuda.max_memory_allocated()),
             max_reserved=int(torch.cuda.max_memory_reserved()),
         )
 
-    emit(
+    common.emit(
         "text",
         text=tokenizer.decode(generated, skip_special_tokens=True),
         ids=generated,

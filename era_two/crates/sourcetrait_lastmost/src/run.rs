@@ -6,6 +6,8 @@ pub fn run() {
     let cli = <Cli as clap::Parser>::parse();
     let result = match &cli.command {
         Command::Generate(args) => generate(args),
+        Command::Dump(args) => dump(args),
+        Command::Diff(args) => diff(args),
     };
     if let Err(e) = result {
         eprintln!("lastmost: {e}");

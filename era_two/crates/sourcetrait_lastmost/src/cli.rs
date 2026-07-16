@@ -13,6 +13,10 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     /// Original-stack generation through the pinned python environment.
     Generate(GenerateArgs),
+    /// All-position f32 logits dump (the era-one safetensors contract).
+    Dump(DumpArgs),
+    /// Compare two logits dumps: nmse + per-row argmax (same-ids only).
+    Diff(DiffArgs),
 }
 
 /// Arguments for `lastmost generate`. Prompts ride files, never argv.
@@ -60,6 +64,70 @@ pub(crate) struct GenerateArgs {
     /// Write the full JSON-lines event record here.
     #[arg(long)]
     pub(crate) record: Option<PathBuf>,
+}
+
+/// Arguments for `lastmost dump`.
+#[derive(Debug, clap::Args)]
+pub(crate) struct DumpArgs {
+    /// Which local hybrid checkpoint to drive.
+    #[arg(long, value_enum, default_value = "dpo")]
+    pub(crate) model: ModelPick,
+    /// Explicit checkpoint directory (overrides --model).
+    #[arg(long)]
+    pub(crate) model_dir: Option<PathBuf>,
+    /// Output safetensors path (parent dirs are created).
+    #[arg(long)]
+    pub(crate) out: PathBuf,
+    /// Prompt file (exactly one of --prompt-file / --ids-from).
+    #[arg(long)]
+    pub(crate) prompt_file: Option<PathBuf>,
+    /// Replay this dump's prompt+fed ids verbatim.
+    #[arg(long)]
+    pub(crate) ids_from: Option<PathBuf>,
+    /// Greedy tokens to generate when not replaying.
+    #[arg(long = "gen", default_value_t = 64)]
+    pub(crate) gen_tokens: usize,
+    /// single = chunked prefill path; incremental = recurrent decode path.
+    #[arg(long, value_enum, default_value = "single")]
+    pub(crate) mode: ModePick,
+    /// No chat template; pure continuation.
+    #[arg(long)]
+    pub(crate) raw: bool,
+    #[arg(long, value_enum, default_value = "cuda")]
+    pub(crate) device: DevicePick,
+    #[arg(long, value_enum, default_value = "bf16")]
+    pub(crate) dtype: DtypePick,
+    #[arg(long, value_enum, default_value = "eager")]
+    pub(crate) attn: AttnPick,
+    /// Force the in-tree torch GDN paths (auto-forced on cpu).
+    #[arg(long)]
+    pub(crate) no_fla: bool,
+    /// torch.use_deterministic_algorithms(True) in the driver.
+    #[arg(long)]
+    pub(crate) determinism: bool,
+    #[arg(long, default_value_t = 0)]
+    pub(crate) seed: u64,
+    /// Write the full JSON-lines event record here.
+    #[arg(long)]
+    pub(crate) record: Option<PathBuf>,
+}
+
+/// Arguments for `lastmost diff`.
+#[derive(Debug, clap::Args)]
+pub(crate) struct DiffArgs {
+    /// The dump under test.
+    pub(crate) candidate: PathBuf,
+    /// The reference dump.
+    pub(crate) reference: PathBuf,
+    /// Worst rows to report.
+    #[arg(long, default_value_t = 5)]
+    pub(crate) top: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum ModePick {
+    Single,
+    Incremental,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]

@@ -1,28 +1,33 @@
-//! The generate verb: spawn the pinned driver, split payload from events.
+//! The dump verb: all-position f32 logits in the era-one contract.
 use crate::*;
 
-/// Run `lastmost generate`: drives pysrc/generate.py through the pinned
-/// environment's python. Driver stdout (JSON-lines events) becomes: text
-/// payload on our stdout, terse summaries on stderr, and the full event
-/// record at --record when given. Driver stderr passes through.
-pub(crate) fn generate(args: &GenerateArgs) -> LastmostResult<()> {
+/// Run `lastmost dump`: drives pysrc/dump.py through the pinned env.
+pub(crate) fn dump(args: &DumpArgs) -> LastmostResult<()> {
     let model_dir = match &args.model_dir {
         Some(dir) => dir.clone(),
         None => resolve_model_dir(args.model)?,
     };
+    if let Some(parent) = args.out.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let python = env_python()?;
-    let driver = materialize_pysrc()?.join("generate.py");
+    let driver = materialize_pysrc()?.join("dump.py");
 
     let mut cmd = process::Command::new(&python);
     cmd.arg(&driver)
         .arg("--model-dir")
         .arg(&model_dir)
-        .arg("--prompt-file")
-        .arg(&args.prompt_file)
-        .arg("--max-new-tokens")
-        .arg(args.max_new_tokens.to_string())
+        .arg("--out")
+        .arg(&args.out)
+        .arg("--gen")
+        .arg(args.gen_tokens.to_string())
         .arg("--seed")
         .arg(args.seed.to_string())
+        .arg("--mode")
+        .arg(match args.mode {
+            ModePick::Single => "single",
+            ModePick::Incremental => "incremental",
+        })
         .arg("--device")
         .arg(match args.device {
             DevicePick::Cuda => "cuda",
@@ -38,15 +43,14 @@ pub(crate) fn generate(args: &GenerateArgs) -> LastmostResult<()> {
             AttnPick::Eager => "eager",
             AttnPick::Sdpa => "sdpa",
         });
+    if let Some(prompt_file) = &args.prompt_file {
+        cmd.arg("--prompt-file").arg(prompt_file);
+    }
+    if let Some(ids_from) = &args.ids_from {
+        cmd.arg("--ids-from").arg(ids_from);
+    }
     if args.raw {
         cmd.arg("--raw");
-    }
-    if args.sample {
-        cmd.arg("--sample")
-            .arg("--temperature")
-            .arg(args.temperature.to_string())
-            .arg("--top-p")
-            .arg(args.top_p.to_string());
     }
     if args.no_fla || args.device == DevicePick::Cpu {
         cmd.arg("--no-fla");
@@ -54,11 +58,7 @@ pub(crate) fn generate(args: &GenerateArgs) -> LastmostResult<()> {
     if args.determinism {
         cmd.arg("--determinism");
     }
-    for stop in &args.stop {
-        cmd.arg("--stop").arg(stop);
-    }
     if args.device == DevicePick::Cpu {
-        // Keep the cpu grade genuinely cuda-free (fla gating + no context).
         cmd.env("CUDA_VISIBLE_DEVICES", "");
     }
 
