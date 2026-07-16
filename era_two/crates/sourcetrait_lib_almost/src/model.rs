@@ -49,9 +49,10 @@ struct GdnLayer {
     b_proj: candle_nn::Linear,
     g_proj: candle_nn::Linear,
     o_proj: candle_nn::Linear,
-    q_conv: candle_core::Tensor,
-    k_conv: candle_core::Tensor,
-    v_conv: candle_core::Tensor,
+    /// The three depthwise conv weights concatenated along channels
+    /// ([2*key + value, 1, kernel]) - one batched conv pass per
+    /// forward instead of three; per-channel math is bit-identical.
+    conv_weight: candle_core::Tensor,
     a_log: candle_core::Tensor,
     dt_bias: candle_core::Tensor,
     o_norm: candle_core::Tensor,
@@ -59,12 +60,12 @@ struct GdnLayer {
     num_heads: usize,
     head_k_dim: usize,
     head_v_dim: usize,
+    key_width: usize,
+    value_width: usize,
     allow_neg_eigval: bool,
     rms_eps: f64,
     state: candle_core::Tensor,
-    conv_tail_q: candle_core::Tensor,
-    conv_tail_k: candle_core::Tensor,
-    conv_tail_v: candle_core::Tensor,
+    conv_tail: candle_core::Tensor,
 }
 
 impl GdnLayer {
@@ -85,9 +86,7 @@ impl GdnLayer {
                 candle_core::DType::F32,
                 &device,
             )?,
-            conv_tail_q: f32_zeros((kernel - 1, key_dim))?,
-            conv_tail_k: f32_zeros((kernel - 1, key_dim))?,
-            conv_tail_v: f32_zeros((kernel - 1, value_dim))?,
+            conv_tail: f32_zeros((kernel - 1, key_dim + key_dim + value_dim))?,
             input_layernorm: vb.pp("input_layernorm").get(hidden, "weight")?,
             post_attention_layernorm: vb.pp("post_attention_layernorm").get(hidden, "weight")?,
             q_proj: candle_nn::linear_no_bias(hidden, key_dim, vb_attn.pp("q_proj"))?,
@@ -97,9 +96,14 @@ impl GdnLayer {
             b_proj: candle_nn::linear_no_bias(hidden, heads, vb_attn.pp("b_proj"))?,
             g_proj: candle_nn::linear_no_bias(hidden, value_dim, vb_attn.pp("g_proj"))?,
             o_proj: candle_nn::linear_no_bias(value_dim, hidden, vb_attn.pp("o_proj"))?,
-            q_conv: vb_attn.pp("q_conv1d").get((key_dim, 1, kernel), "weight")?,
-            k_conv: vb_attn.pp("k_conv1d").get((key_dim, 1, kernel), "weight")?,
-            v_conv: vb_attn.pp("v_conv1d").get((value_dim, 1, kernel), "weight")?,
+            conv_weight: candle_core::Tensor::cat(
+                &[
+                    &vb_attn.pp("q_conv1d").get((key_dim, 1, kernel), "weight")?,
+                    &vb_attn.pp("k_conv1d").get((key_dim, 1, kernel), "weight")?,
+                    &vb_attn.pp("v_conv1d").get((value_dim, 1, kernel), "weight")?,
+                ],
+                0,
+            )?,
             a_log: vb_attn.get(heads, "A_log")?,
             dt_bias: vb_attn.get(heads, "dt_bias")?,
             o_norm: vb_attn.pp("o_norm").get(config.linear_value_head_dim, "weight")?,
@@ -107,9 +111,39 @@ impl GdnLayer {
             num_heads: heads,
             head_k_dim: config.linear_key_head_dim,
             head_v_dim: config.linear_value_head_dim,
+            key_width: key_dim,
+            value_width: value_dim,
             allow_neg_eigval: config.linear_allow_neg_eigval,
             rms_eps: config.rms_norm_eps,
         })
+    }
+
+    /// The batched conv input: q/k/v projections concatenated along
+    /// channels (packed - cat on a non-zero dim is a transposed view).
+    fn projected(&self, x: &candle_core::Tensor) -> LibAlmostResult<candle_core::Tensor> {
+        Ok(candle_core::Tensor::cat(
+            &[
+                &self.q_proj.forward(x)?,
+                &self.k_proj.forward(x)?,
+                &self.v_proj.forward(x)?,
+            ],
+            1,
+        )?
+        .contiguous()?)
+    }
+
+    /// Split a batched conv output back into contiguous q/k/v spans.
+    fn split_conv(
+        &self,
+        conv_out: &candle_core::Tensor,
+    ) -> LibAlmostResult<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
+        Ok((
+            conv_out.narrow(1, 0, self.key_width)?.contiguous()?,
+            conv_out.narrow(1, self.key_width, self.key_width)?.contiguous()?,
+            conv_out
+                .narrow(1, 2 * self.key_width, self.value_width)?
+                .contiguous()?,
+        ))
     }
 
     fn forward(&self, x: &candle_core::Tensor) -> LibAlmostResult<candle_core::Tensor> {
@@ -196,9 +230,8 @@ impl GdnLayer {
     /// instrument): zero-seeded per-token recurrence, no state kept.
     fn mixer_stateless(&self, x: &candle_core::Tensor) -> LibAlmostResult<candle_core::Tensor> {
         let (seq_len, _) = x.dims2()?;
-        let q = gdn::causal_conv_silu(&self.q_proj.forward(x)?, &self.q_conv)?;
-        let k = gdn::causal_conv_silu(&self.k_proj.forward(x)?, &self.k_conv)?;
-        let v = gdn::causal_conv_silu(&self.v_proj.forward(x)?, &self.v_conv)?;
+        let conv_out = gdn::causal_conv_silu(&self.projected(x)?, &self.conv_weight)?;
+        let (q, k, v) = self.split_conv(&conv_out)?;
         let (q, k, v, g, beta) = self.heads_and_gates(q, k, v, x, seq_len)?;
         let decay = g.exp()?;
         let mut state = self.state.zeros_like()?;
@@ -224,12 +257,10 @@ impl GdnLayer {
     /// ride the chunked rule - the upstream's own path split.
     fn mixer_carried(&mut self, x: &candle_core::Tensor) -> LibAlmostResult<candle_core::Tensor> {
         let (seq_len, _) = x.dims2()?;
-        let (q, tail_q) = gdn::conv_with_tail(&self.q_proj.forward(x)?, &self.q_conv, &self.conv_tail_q)?;
-        let (k, tail_k) = gdn::conv_with_tail(&self.k_proj.forward(x)?, &self.k_conv, &self.conv_tail_k)?;
-        let (v, tail_v) = gdn::conv_with_tail(&self.v_proj.forward(x)?, &self.v_conv, &self.conv_tail_v)?;
-        self.conv_tail_q = tail_q;
-        self.conv_tail_k = tail_k;
-        self.conv_tail_v = tail_v;
+        let (conv_out, tail) =
+            gdn::conv_with_tail(&self.projected(x)?, &self.conv_weight, &self.conv_tail)?;
+        self.conv_tail = tail;
+        let (q, k, v) = self.split_conv(&conv_out)?;
         let (q, k, v, g, beta) = self.heads_and_gates(q, k, v, x, seq_len)?;
         let y = if seq_len == 1 {
             let (next_state, y_t) = gdn::recurrent_step(
@@ -252,9 +283,7 @@ impl GdnLayer {
 
     fn clear_cache(&mut self) -> LibAlmostResult<()> {
         self.state = self.state.zeros_like()?;
-        self.conv_tail_q = self.conv_tail_q.zeros_like()?;
-        self.conv_tail_k = self.conv_tail_k.zeros_like()?;
-        self.conv_tail_v = self.conv_tail_v.zeros_like()?;
+        self.conv_tail = self.conv_tail.zeros_like()?;
         Ok(())
     }
 }
@@ -263,6 +292,20 @@ impl GdnLayer {
 /// (raw hidden enters attention, no input norm):
 /// h = x + post_attention_layernorm(attn(x)), then
 /// out = h + post_feedforward_layernorm(mlp(h)).
+/// The reserve grain for the carried KV buffers: growth happens in
+/// KV_RESERVE_STEP-token steps (one copy per grow, amortized), reads
+/// narrow to the live length, and clear keeps the capacity - the
+/// cat-per-append copy2d tax (12.6% of 32K prefill GPU time) dies.
+const KV_RESERVE_STEP: usize = 1024;
+
+/// Carried attention KV: capacity-reserved [heads, capacity,
+/// head_dim] buffers plus the live length.
+struct AttnKv {
+    k: candle_core::Tensor,
+    v: candle_core::Tensor,
+    len: usize,
+}
+
 struct AttnLayer {
     post_attention_layernorm: candle_core::Tensor,
     post_feedforward_layernorm: candle_core::Tensor,
@@ -276,7 +319,7 @@ struct AttnLayer {
     num_heads: usize,
     head_dim: usize,
     rms_eps: f64,
-    kv: Option<(candle_core::Tensor, candle_core::Tensor)>,
+    kv: Option<AttnKv>,
 }
 
 impl AttnLayer {
@@ -318,17 +361,50 @@ impl AttnLayer {
         x: &candle_core::Tensor,
         mask: Option<&candle_core::Tensor>,
     ) -> LibAlmostResult<candle_core::Tensor> {
-        let (q, k, v) = self.qkv(x)?;
-        let (k_all, v_all) = match self.kv.take() {
-            Some((past_k, past_v)) => (
-                candle_core::Tensor::cat(&[&past_k, &k], 1)?,
-                candle_core::Tensor::cat(&[&past_v, &v], 1)?,
-            ),
-            None => (k, v),
-        };
+        let (q, k_new, v_new) = self.qkv(x)?;
+        let added = k_new.dim(1)?;
+        self.reserve(added, &k_new)?;
+        let kv = self.kv.as_mut().expect("reserved");
+        kv.k.slice_set(&k_new, 1, kv.len)?;
+        kv.v.slice_set(&v_new, 1, kv.len)?;
+        kv.len += added;
+        let len = kv.len;
+        let k_all = kv.k.narrow(1, 0, len)?;
+        let v_all = kv.v.narrow(1, 0, len)?;
         let attended = self.attend(&q, &k_all, &v_all, mask)?;
-        self.kv = Some((k_all, v_all));
         self.close_halves(x, attended)
+    }
+
+    /// Ensure the KV buffers hold `added` more rows: allocate at the
+    /// next KV_RESERVE_STEP multiple and copy the live prefix once.
+    fn reserve(
+        &mut self,
+        added: usize,
+        template: &candle_core::Tensor,
+    ) -> LibAlmostResult<()> {
+        let needed = self.kv.as_ref().map_or(added, |kv| kv.len + added);
+        if let Some(kv) = &self.kv
+            && needed <= kv.k.dim(1)?
+        {
+            return Ok(());
+        }
+        let (heads, _, head_dim) = template.dims3()?;
+        let capacity = needed.div_ceil(KV_RESERVE_STEP) * KV_RESERVE_STEP;
+        let new_k = candle_core::Tensor::zeros(
+            (heads, capacity, head_dim),
+            template.dtype(),
+            template.device(),
+        )?;
+        let new_v = new_k.zeros_like()?;
+        let len = self.kv.as_ref().map_or(0, |kv| kv.len);
+        if let Some(kv) = &self.kv
+            && kv.len > 0
+        {
+            new_k.slice_set(&kv.k.narrow(1, 0, kv.len)?.contiguous()?, 1, 0)?;
+            new_v.slice_set(&kv.v.narrow(1, 0, kv.len)?.contiguous()?, 1, 0)?;
+        }
+        self.kv = Some(AttnKv { k: new_k, v: new_v, len });
+        Ok(())
     }
 
     /// The post-norm block's residual adds shared by both paths.
@@ -434,8 +510,11 @@ impl AttnLayer {
         Ok(self.o_proj.forward(&out)?)
     }
 
+    /// Length resets; reserved capacity stays (the era-one semantic).
     fn clear_cache(&mut self) {
-        self.kv = None;
+        if let Some(kv) = &mut self.kv {
+            kv.len = 0;
+        }
     }
 }
 
