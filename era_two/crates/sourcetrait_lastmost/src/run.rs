@@ -10,6 +10,7 @@ pub fn run() {
         Command::Diff(args) => diff(args),
         Command::Eval(args) => eval(args),
         Command::Bench(args) => bench(args),
+        Command::Env(args) => envcheck(args),
     };
     if let Err(e) = result {
         eprintln!("lastmost: {e}");

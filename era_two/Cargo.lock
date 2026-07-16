@@ -5627,7 +5627,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_lastmost"
-version = "0.0.0-5"
+version = "0.0.0-7"
 dependencies = [
  "clap",
  "safetensors 0.8.0",

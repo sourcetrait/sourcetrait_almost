@@ -21,6 +21,16 @@ pub(crate) enum Command {
     Eval(EvalArgs),
     /// One timed perf row: prefill/decode tok/s at a pinned recipe.
     Bench(BenchArgs),
+    /// Verify the pinned python environment; drift is a hard error.
+    Env(EnvArgs),
+}
+
+/// Arguments for `lastmost env`.
+#[derive(Debug, clap::Args)]
+pub(crate) struct EnvArgs {
+    /// Write the full JSON-lines event record here.
+    #[arg(long)]
+    pub(crate) record: Option<PathBuf>,
 }
 
 /// Arguments for `lastmost bench`.

@@ -3,13 +3,14 @@ use crate::*;
 
 pub(crate) const LASTMOST_DATA_SUBDIR: &str = "sourcetrait/almost/lastmost";
 
-const PYSRC_FILES: [(&str, &str); 6] = [
+const PYSRC_FILES: [(&str, &str); 7] = [
     ("common.py", include_str!("../pysrc/common.py")),
     ("generate.py", include_str!("../pysrc/generate.py")),
     ("dump.py", include_str!("../pysrc/dump.py")),
     ("needle.py", include_str!("../pysrc/needle.py")),
     ("needle_vllm.py", include_str!("../pysrc/needle_vllm.py")),
     ("bench_vllm.py", include_str!("../pysrc/bench_vllm.py")),
+    ("envcheck.py", include_str!("../pysrc/envcheck.py")),
 ];
 
 /// The lastmost data home (the venv and materialized pysrc live here).
@@ -29,6 +30,15 @@ pub(crate) fn env_python() -> LastmostResult<PathBuf> {
         );
     }
     Ok(python)
+}
+
+/// Run `lastmost env`: the pinned-environment drift check.
+pub(crate) fn envcheck(args: &EnvArgs) -> LastmostResult<()> {
+    let python = env_python()?;
+    let driver = materialize_pysrc()?.join("envcheck.py");
+    let mut cmd = process::Command::new(&python);
+    cmd.arg(&driver);
+    run_driver(cmd, args.record.as_deref())
 }
 
 /// Write the embedded driver scripts into the data home (only when their

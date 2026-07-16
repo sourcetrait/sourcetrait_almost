@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_lastmost"
-version = "0.0.0-6"
+version = "0.0.0-7"
 edition = "2024"
 description = "lastmost: baselining of the original model and its original tools"
 authors = ["SourceTrait <development@sourcetrait.com>"]

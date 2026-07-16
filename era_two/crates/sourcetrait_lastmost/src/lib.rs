@@ -53,6 +53,7 @@ pub(crate) use crate::cli::{
     DiffArgs,
     DtypePick,
     DumpArgs,
+    EnvArgs,
     EvalArgs,
     EvalSuite,
     GenerateArgs,
@@ -66,6 +67,7 @@ pub(crate) use crate::eval::eval;
 pub(crate) use crate::generate::generate;
 pub(crate) use crate::pyenv::{
     env_python,
+    envcheck,
     materialize_pysrc,
 };
 
