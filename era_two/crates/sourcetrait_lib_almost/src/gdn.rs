@@ -210,25 +210,33 @@ pub(crate) fn chunk_rule(
         .broadcast_mul(&lower_incl)?;
 
     // The in-chunk inversion: attn0 = -(k_beta k^T . decay), strict
-    // lower; row_i += row_i @ rows[..i] (forward substitution); + I.
-    let attn0 = k_beta
+    // lower; forward substitution row_i += row_i @ rows[..i] runs IN
+    // PLACE on one working matrix via slice_set. (The prior Vec+cat
+    // shape re-copied every prior row per iteration - ~2k copy
+    // kernels per call, measured at 39% of ALL 32K GPU time; this
+    // shape is ~5 kernels per row with bit-identical values. Reads
+    // materialize via contiguous()/cat before the row write, so no
+    // view observes its own mutation.)
+    let attn = k_beta
         .matmul(&k.transpose(2, 3)?.contiguous()?)?
         .mul(&decay_mask)?
         .broadcast_mul(&lower_strict)?
         .neg()?;
-    let mut rows: Vec<candle_core::Tensor> = Vec::with_capacity(CHUNK);
-    rows.push(attn0.narrow(2, 0, 1)?);
     for row_idx in 1..CHUNK {
-        let row = attn0.narrow(2, row_idx, 1)?;
+        let row = attn.narrow(2, row_idx, 1)?;
         let row_prefix = row.narrow(3, 0, row_idx)?.contiguous()?;
-        let sub = candle_core::Tensor::cat(&rows[0..row_idx], 2)?
+        let sub = attn
+            .narrow(2, 0, row_idx)?
             .narrow(3, 0, row_idx)?
             .contiguous()?;
         let updated = (&row_prefix + row_prefix.matmul(&sub)?)?;
         let tail = row.narrow(3, row_idx, CHUNK - row_idx)?;
-        rows.push(candle_core::Tensor::cat(&[&updated, &tail], 3)?);
+        // cat on a non-zero dim returns a TRANSPOSED VIEW (the
+        // era-one contiguity lesson); slice_set demands contiguity.
+        let full_row = candle_core::Tensor::cat(&[&updated, &tail], 3)?.contiguous()?;
+        attn.slice_set(&full_row, 2, row_idx)?;
     }
-    let attn = candle_core::Tensor::cat(&rows, 2)?.broadcast_add(&eye)?;
+    let attn = attn.broadcast_add(&eye)?;
 
     let value = attn.matmul(&v_beta)?;
     let g_exp = g.exp()?.unsqueeze(3)?;
