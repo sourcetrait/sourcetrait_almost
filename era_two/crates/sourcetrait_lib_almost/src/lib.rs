@@ -3,6 +3,7 @@ pub(crate) mod checkpoint;
 pub mod consts;
 pub(crate) mod error;
 pub(crate) mod gdn;
+pub(crate) mod generate;
 pub(crate) mod load;
 pub(crate) mod model;
 pub(crate) mod norms;
@@ -21,10 +22,16 @@ pub(crate) use std::{
 
 pub(crate) use candle_nn::Module;
 
-#[cfg(feature = "flash-attn")]
 pub(crate) mod r {
+    #[cfg(feature = "flash-attn")]
     pub(crate) mod flash {
         pub(crate) use candle_flash_attn::flash_attn;
+    }
+    pub(crate) mod sampling {
+        pub(crate) use candle_transformers::generation::{
+            LogitsProcessor,
+            Sampling,
+        };
     }
 }
 
@@ -49,6 +56,13 @@ pub use crate::load::{
     mmap_weights,
     tensor_inventory,
 };
+pub use crate::generate::{
+    FinishReason,
+    GenerateOptions,
+    Generation,
+    GenerationReport,
+    GenerationStep,
+};
 pub use crate::model::OlmoHybrid;
 pub use crate::tokenizer::{
     load_tokenizer,
@@ -60,6 +74,7 @@ mod tests {
     mod chat;
     mod checkpoint;
     mod gdn;
+    mod generate;
     mod load;
     mod model;
     mod norms;
