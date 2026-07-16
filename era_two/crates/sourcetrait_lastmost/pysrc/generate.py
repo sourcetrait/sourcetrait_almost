@@ -33,6 +33,7 @@ def parse_args(argv):
     ap.add_argument("--no-fla", action="store_true", help="force the in-tree torch GDN paths")
     ap.add_argument("--determinism", action="store_true", help="torch.use_deterministic_algorithms(True)")
     ap.add_argument("--stop", action="append", default=None, help="stop token string (repeatable)")
+    ap.add_argument("--ignore-stops", action="store_true", help="decode exactly max-new-tokens (bench rows)")
     return ap.parse_args(argv)
 
 
@@ -53,7 +54,7 @@ def main(argv):
         prompt_text = f.read()
     rendered, default_stops = common.render_prompt(tokenizer, prompt_text, args.raw)
     stops = args.stop if args.stop else default_stops
-    stop_ids = common.resolve_stop_ids(tokenizer, stops)
+    stop_ids = [] if args.ignore_stops else common.resolve_stop_ids(tokenizer, stops)
 
     input_ids = tokenizer(rendered, add_special_tokens=False, return_tensors="pt").input_ids.to(device)
 

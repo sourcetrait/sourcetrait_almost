@@ -19,6 +19,47 @@ pub(crate) enum Command {
     Diff(DiffArgs),
     /// Evaluation batteries through the original stack.
     Eval(EvalArgs),
+    /// One timed perf row: prefill/decode tok/s at a pinned recipe.
+    Bench(BenchArgs),
+}
+
+/// Arguments for `lastmost bench`.
+#[derive(Debug, clap::Args)]
+pub(crate) struct BenchArgs {
+    /// Which local hybrid checkpoint to drive.
+    #[arg(long, value_enum, default_value = "dpo")]
+    pub(crate) model: ModelPick,
+    /// Explicit checkpoint directory (overrides --model).
+    #[arg(long)]
+    pub(crate) model_dir: Option<PathBuf>,
+    /// The pinned prompt recipe (raw continuation).
+    #[arg(long)]
+    pub(crate) prompt_file: PathBuf,
+    #[arg(long, default_value_t = 128)]
+    pub(crate) max_new_tokens: usize,
+    /// hf = transformers path (via the generate driver); vllm = serving.
+    #[arg(long, value_enum, default_value = "hf")]
+    pub(crate) backend: BackendPick,
+    #[arg(long, value_enum, default_value = "cuda")]
+    pub(crate) device: DevicePick,
+    #[arg(long, value_enum, default_value = "bf16")]
+    pub(crate) dtype: DtypePick,
+    /// hf attention implementation (sdpa survives 8K+).
+    #[arg(long, value_enum, default_value = "sdpa")]
+    pub(crate) attn: AttnPick,
+    #[arg(long)]
+    pub(crate) no_fla: bool,
+    /// vllm only: fraction of total VRAM the engine may claim.
+    #[arg(long, default_value_t = 0.82)]
+    pub(crate) gpu_mem_util: f64,
+    /// vllm only: skip cuda-graph capture.
+    #[arg(long)]
+    pub(crate) enforce_eager: bool,
+    #[arg(long, default_value_t = 0)]
+    pub(crate) seed: u64,
+    /// Write the full JSON-lines event record here.
+    #[arg(long)]
+    pub(crate) record: Option<PathBuf>,
 }
 
 /// Arguments for `lastmost eval`.
@@ -121,6 +162,9 @@ pub(crate) struct GenerateArgs {
     /// Stop token string (repeatable; defaults per template mode).
     #[arg(long)]
     pub(crate) stop: Vec<String>,
+    /// Ignore stop tokens: decode exactly max-new-tokens (bench rows).
+    #[arg(long)]
+    pub(crate) ignore_stops: bool,
     /// Write the full JSON-lines event record here.
     #[arg(long)]
     pub(crate) record: Option<PathBuf>,

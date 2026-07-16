@@ -54,6 +54,9 @@ pub(crate) fn generate(args: &GenerateArgs) -> LastmostResult<()> {
     if args.determinism {
         cmd.arg("--determinism");
     }
+    if args.ignore_stops {
+        cmd.arg("--ignore-stops");
+    }
     for stop in &args.stop {
         cmd.arg("--stop").arg(stop);
     }

@@ -1,5 +1,6 @@
 pub mod run;
 
+pub(crate) mod bench;
 pub(crate) mod checkpoint;
 pub(crate) mod cli;
 pub(crate) mod diff;
@@ -41,9 +42,11 @@ pub(crate) use crate::checkpoint::{
     read_safetensors_header,
     resolve_model_dir,
 };
+pub(crate) use crate::bench::bench;
 pub(crate) use crate::cli::{
     AttnPick,
     BackendPick,
+    BenchArgs,
     Cli,
     Command,
     DevicePick,

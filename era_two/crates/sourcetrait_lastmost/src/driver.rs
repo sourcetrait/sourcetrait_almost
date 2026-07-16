@@ -19,6 +19,9 @@ pub(crate) fn run_driver(mut cmd: process::Command, record: Option<&Path>) -> La
     let status = child.wait()?;
 
     if let Some(record) = record {
+        if let Some(parent) = record.parent() {
+            fs::create_dir_all(parent)?;
+        }
         fs::write(record, events.join("\n") + "\n")?;
     }
     if !status.success() {

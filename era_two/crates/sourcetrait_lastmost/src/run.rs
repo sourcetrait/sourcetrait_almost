@@ -9,6 +9,7 @@ pub fn run() {
         Command::Dump(args) => dump(args),
         Command::Diff(args) => diff(args),
         Command::Eval(args) => eval(args),
+        Command::Bench(args) => bench(args),
     };
     if let Err(e) = result {
         eprintln!("lastmost: {e}");
