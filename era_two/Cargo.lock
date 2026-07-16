@@ -5627,9 +5627,10 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_lastmost"
-version = "0.0.0-2"
+version = "0.0.0-3"
 dependencies = [
  "clap",
+ "serde_json",
  "snafu",
  "sourcetrait_lib_almost",
 ]
