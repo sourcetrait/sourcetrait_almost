@@ -47,9 +47,45 @@ fn path_tokens_are_used_as_the_profile_directory() {
 }
 
 #[test]
+fn models_dir_defaults_to_the_data_home_and_overrides_by_file() {
+    let config = LibConfig::default();
+    assert!(config.models_dir.ends_with(consts::MODELS_HOME_RELATIVE));
+    assert!(config.model_dir().ends_with(format!(
+        "{}/{}/{}",
+        consts::MODELS_HOME_RELATIVE,
+        consts::MODEL_AUTHOR,
+        consts::DPO_MODEL_NAME
+    )));
+    let shell: LibConfigToml =
+        toml::from_str("models_dir = \"/mnt/models\"\n").expect("parses");
+    let config: LibConfig = shell.try_into().expect("merges");
+    assert_eq!(config.models_dir, PathBuf::from("/mnt/models"));
+}
+
+#[test]
+fn path_strings_expand_leading_tilde_and_env_vars() {
+    let shell: LibConfigToml =
+        toml::from_str("models_dir = \"~/models\"\n").expect("parses");
+    let config: LibConfig = shell.try_into().expect("expands");
+    assert!(!config.models_dir.to_string_lossy().contains('~'));
+    assert!(config.models_dir.is_absolute());
+    assert!(config.models_dir.ends_with("models"));
+
+    let shell: LibConfigToml =
+        toml::from_str("models_dir = \"$XDG_DATA_HOME/alt/models\"\n").expect("parses");
+    let config: LibConfig = shell.try_into().expect("expands");
+    assert!(!config.models_dir.to_string_lossy().contains('$'));
+    assert!(config.models_dir.ends_with("alt/models"));
+}
+
+#[test]
 fn embedded_defaults_carry_the_card_posture() {
     let config = LibConfig::default();
-    assert_eq!(config.model, consts::DPO_MODEL_NAME);
+    assert_eq!(
+        config.model,
+        format!("{}/{}", consts::MODEL_AUTHOR, consts::DPO_MODEL_NAME),
+        "the defaults file carries the author-qualified coordinate"
+    );
     let settings = LibSettings::default();
     assert!(settings.use_flash_attn);
     assert!(!settings.graph);
@@ -109,7 +145,10 @@ fn unspecified_token_prefers_the_default_profile_file() {
 fn unspecified_token_without_a_default_file_is_the_embedded_base() {
     let root = temp_root("no_default");
     let config = LibConfig::load_from_dir(Some(&root), None::<&Path>).expect("embedded");
-    assert_eq!(config.model, consts::DPO_MODEL_NAME);
+    assert_eq!(
+        config.model,
+        format!("{}/{}", consts::MODEL_AUTHOR, consts::DPO_MODEL_NAME)
+    );
     let settings = LibSettings::load_from_dir(Some(&root), None::<&Path>).expect("embedded");
     assert!(!settings.graph);
     fs::remove_dir_all(&root).expect("cleanup");

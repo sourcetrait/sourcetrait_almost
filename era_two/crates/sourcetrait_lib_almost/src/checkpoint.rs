@@ -151,7 +151,7 @@ pub(crate) fn data_home() -> LibAlmostResult<PathBuf> {
 /// cache, the author as a subdirectory).
 pub fn model_dir(model_name: &str) -> LibAlmostResult<PathBuf> {
     Ok(data_home()?
-        .join("huggingface/model")
+        .join(consts::MODELS_HOME_RELATIVE)
         .join(consts::MODEL_AUTHOR)
         .join(model_name))
 }

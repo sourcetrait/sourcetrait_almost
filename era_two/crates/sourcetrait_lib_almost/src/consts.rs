@@ -8,6 +8,11 @@ pub const DPO_MODEL_NAME: &str = "Olmo-Hybrid-Instruct-DPO-7B";
 pub const BASE_MODEL_NAME: &str = "Olmo-Hybrid-7B";
 /// Checkpoint author segment under the model data home.
 pub const MODEL_AUTHOR: &str = "allenai";
+/// The models home relative to the XDG data home (author-qualified
+/// model coordinates join beneath it).
+pub const MODELS_HOME_RELATIVE: &str = "huggingface/model";
+/// The suite's profile root relative to the XDG config home.
+pub const SUITE_CONFIG_RELATIVE: &str = "sourcetrait/almost";
 
 /// Stop tokens resolved by string at runtime, so tokenizer truth wins
 /// over any config-side id drift (the shipped generation_config only

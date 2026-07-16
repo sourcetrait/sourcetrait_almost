@@ -1,1 +1,2 @@
-model = "Olmo-Hybrid-Instruct-DPO-7B"
+model = "allenai/Olmo-Hybrid-Instruct-DPO-7B"
+models_dir = "$XDG_DATA_HOME/huggingface/model"

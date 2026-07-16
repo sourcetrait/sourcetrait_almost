@@ -20,22 +20,57 @@ const DEFAULT_PROFILE: &str = "default";
 /// The reserved embedded-base profile name (never touches the fs).
 const DEFAULTS_PROFILE: &str = "defaults";
 
+/// A $VAR value for path expansion; the XDG family falls back per
+/// the basedir spec when unset, anything else errors.
+fn xdg_or_env(name: &str) -> LibAlmostResult<String> {
+    if let Ok(value) = env::var(name)
+        && !value.is_empty()
+    {
+        return Ok(value);
+    }
+    let home = || -> LibAlmostResult<String> {
+        match env::var("HOME") {
+            Ok(home) if !home.is_empty() => Ok(home),
+            _ => snafu::whatever!("HOME is not set for the ${name} fallback"),
+        }
+    };
+    match name {
+        "XDG_DATA_HOME" => Ok(format!("{}/.local/share", home()?)),
+        "XDG_CONFIG_HOME" => Ok(format!("{}/.config", home()?)),
+        "XDG_STATE_HOME" => Ok(format!("{}/.local/state", home()?)),
+        "XDG_CACHE_HOME" => Ok(format!("{}/.cache", home()?)),
+        _ => snafu::whatever!("environment variable ${name} is not set"),
+    }
+}
+
+/// Expand a path STRING's leading `~` (HOME) or `$VAR` segment so
+/// config files carry portable strings; other paths pass through
+/// literally.
+fn expand_path(raw: &str) -> LibAlmostResult<PathBuf> {
+    if let Some(rest) = raw.strip_prefix("~") {
+        let Ok(home) = env::var("HOME") else {
+            snafu::whatever!("HOME is not set for ~ expansion");
+        };
+        return Ok(PathBuf::from(format!("{home}{rest}")));
+    }
+    if let Some(rest) = raw.strip_prefix("$") {
+        let (name, tail) = match rest.find('/') {
+            Some(split) => rest.split_at(split),
+            None => (rest, ""),
+        };
+        return Ok(PathBuf::from(format!("{}{tail}", xdg_or_env(name)?)));
+    }
+    Ok(PathBuf::from(raw))
+}
+
 /// XDG config home, honoring the spec fallback (~/.config).
 fn config_home() -> LibAlmostResult<PathBuf> {
-    if let Ok(dir) = env::var("XDG_CONFIG_HOME")
-        && !dir.is_empty()
-    {
-        return Ok(PathBuf::from(dir));
-    }
-    let Ok(home) = env::var("HOME") else {
-        snafu::whatever!("neither XDG_CONFIG_HOME nor HOME is set");
-    };
-    Ok(PathBuf::from(home).join(".config"))
+    Ok(PathBuf::from(xdg_or_env("XDG_CONFIG_HOME")?))
 }
 
 /// The suite's config root under the XDG config home.
 fn suite_config_root() -> LibAlmostResult<PathBuf> {
-    Ok(config_home()?.join("sourcetrait/almost"))
+    Ok(config_home()?.join(consts::SUITE_CONFIG_RELATIVE))
 }
 
 /// A -c/-s token is a profile NAME when it is a pure snake; anything
@@ -235,18 +270,24 @@ impl SettingsProfile {
 }
 
 /// The lib component's config file shape (TOML format layer).
+/// models_dir is a STRING so files stay portable - a leading `~` or
+/// `$VAR` expands at load (the XDG family with spec fallbacks).
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LibConfigToml {
     pub model: Option<String>,
+    pub models_dir: Option<String>,
 }
 
-/// The lib component's GENERAL OPERATION: which checkpoint. Nuance
-/// and tweaks (flash, graphs, the generation posture) are
-/// LibSettings.
+/// The lib component's GENERAL OPERATION - the stable choices: the
+/// checkpoint as an author-qualified coordinate (`author/name`,
+/// joined beneath models_dir) and where models live (models_dir
+/// defaults to the XDG data-home models root). Nuance and tweaks
+/// (flash, graphs, the generation posture) are LibSettings.
 #[derive(Debug, Clone)]
 pub struct LibConfig {
     pub model: String,
+    pub models_dir: PathBuf,
 }
 
 impl TryFrom<LibConfigToml> for LibConfig {
@@ -254,12 +295,24 @@ impl TryFrom<LibConfigToml> for LibConfig {
 
     fn try_from(user: LibConfigToml) -> LibAlmostResult<Self> {
         let base: LibConfigToml = toml::from_str(DEFAULTS_LIB_CONFIG)?;
+        let Some(models_dir_raw) = user.models_dir.or(base.models_dir) else {
+            snafu::whatever!("the embedded defaults carry no models_dir");
+        };
+        let Some(model) = user.model.or(base.model) else {
+            snafu::whatever!("the embedded defaults carry no model coordinate");
+        };
         Ok(Self {
-            model: user
-                .model
-                .or(base.model)
-                .unwrap_or_else(|| consts::DPO_MODEL_NAME.to_string()),
+            model,
+            models_dir: expand_path(&models_dir_raw)?,
         })
+    }
+}
+
+impl LibConfig {
+    /// The configured checkpoint's directory: the author-qualified
+    /// coordinate joined beneath the models home.
+    pub fn model_dir(&self) -> PathBuf {
+        self.models_dir.join(&self.model)
     }
 }
 
