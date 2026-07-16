@@ -139,12 +139,13 @@ fn d6_bench_rows_cuda() {
     let mut model = OlmoHybrid::new(&config, weights).expect("model");
     let tokenizer = load_tokenizer(&dir).expect("tokenizer");
 
-    for file in [
-        "mid_filler_2k.txt",
-        "long_filler_8k.txt",
-        "bench_filler_16k.txt",
-        "bench_filler_32k.txt",
-    ] {
+    // ALMOST_BENCH_FILES narrows the row set (csv of filenames) - the
+    // nsys profiling driver runs one row per process.
+    let files = env::var("ALMOST_BENCH_FILES").unwrap_or_else(|_| {
+        "mid_filler_2k.txt,long_filler_8k.txt,bench_filler_16k.txt,bench_filler_32k.txt"
+            .to_string()
+    });
+    for file in files.split(',').map(str::trim) {
         let prompt = fs::read_to_string(Path::new(&prompts_dir).join(file))
             .unwrap_or_else(|e| panic!("{file}: {e}"));
         let options = GenerateOptions {
