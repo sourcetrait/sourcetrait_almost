@@ -3,10 +3,12 @@ use crate::*;
 
 pub(crate) const LASTMOST_DATA_SUBDIR: &str = "sourcetrait/almost/lastmost";
 
-const PYSRC_FILES: [(&str, &str); 3] = [
+const PYSRC_FILES: [(&str, &str); 5] = [
     ("common.py", include_str!("../pysrc/common.py")),
     ("generate.py", include_str!("../pysrc/generate.py")),
     ("dump.py", include_str!("../pysrc/dump.py")),
+    ("needle.py", include_str!("../pysrc/needle.py")),
+    ("needle_vllm.py", include_str!("../pysrc/needle_vllm.py")),
 ];
 
 /// The lastmost data home (the venv and materialized pysrc live here).

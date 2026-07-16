@@ -6,6 +6,7 @@ pub(crate) mod diff;
 pub(crate) mod driver;
 pub(crate) mod dump;
 pub(crate) mod error;
+pub(crate) mod eval;
 pub(crate) mod generate;
 pub(crate) mod pyenv;
 
@@ -42,18 +43,23 @@ pub(crate) use crate::checkpoint::{
 };
 pub(crate) use crate::cli::{
     AttnPick,
+    BackendPick,
     Cli,
     Command,
     DevicePick,
     DiffArgs,
     DtypePick,
     DumpArgs,
+    EvalArgs,
+    EvalSuite,
     GenerateArgs,
     ModePick,
+    NeedleArgs,
 };
 pub(crate) use crate::diff::diff;
 pub(crate) use crate::driver::run_driver;
 pub(crate) use crate::dump::dump;
+pub(crate) use crate::eval::eval;
 pub(crate) use crate::generate::generate;
 pub(crate) use crate::pyenv::{
     env_python,

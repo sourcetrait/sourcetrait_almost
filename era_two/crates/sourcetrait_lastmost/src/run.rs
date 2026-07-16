@@ -8,6 +8,7 @@ pub fn run() {
         Command::Generate(args) => generate(args),
         Command::Dump(args) => dump(args),
         Command::Diff(args) => diff(args),
+        Command::Eval(args) => eval(args),
     };
     if let Err(e) = result {
         eprintln!("lastmost: {e}");

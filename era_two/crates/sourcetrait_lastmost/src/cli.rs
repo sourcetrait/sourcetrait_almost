@@ -17,6 +17,66 @@ pub(crate) enum Command {
     Dump(DumpArgs),
     /// Compare two logits dumps: nmse + per-row argmax (same-ids only).
     Diff(DiffArgs),
+    /// Evaluation batteries through the original stack.
+    Eval(EvalArgs),
+}
+
+/// Arguments for `lastmost eval`.
+#[derive(Debug, clap::Args)]
+pub(crate) struct EvalArgs {
+    #[command(subcommand)]
+    pub(crate) suite: EvalSuite,
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub(crate) enum EvalSuite {
+    /// Needle/passkey retrieval grid at one context length.
+    Needle(NeedleArgs),
+}
+
+/// Arguments for `lastmost eval needle`.
+#[derive(Debug, clap::Args)]
+pub(crate) struct NeedleArgs {
+    /// Which local hybrid checkpoint to drive.
+    #[arg(long, value_enum, default_value = "dpo")]
+    pub(crate) model: ModelPick,
+    /// Explicit checkpoint directory (overrides --model).
+    #[arg(long)]
+    pub(crate) model_dir: Option<PathBuf>,
+    /// Battery spec json (depths, keys, filler seed, templates).
+    #[arg(long)]
+    pub(crate) spec: PathBuf,
+    /// Target total prompt tokens for this batch.
+    #[arg(long)]
+    pub(crate) length: u64,
+    /// hf = transformers eager/fla; vllm = the production serving grade.
+    #[arg(long, value_enum, default_value = "hf")]
+    pub(crate) backend: BackendPick,
+    /// vllm only: fraction of total VRAM the engine may claim.
+    #[arg(long, default_value_t = 0.82)]
+    pub(crate) gpu_mem_util: f64,
+    /// vllm only: skip cuda-graph capture.
+    #[arg(long)]
+    pub(crate) enforce_eager: bool,
+    /// vllm only: allow max_model_len beyond the config cap (safe on the
+    /// NoPE hybrid; sets VLLM_ALLOW_LONG_MAX_MODEL_LEN=1).
+    #[arg(long)]
+    pub(crate) allow_long: bool,
+    #[arg(long, value_enum, default_value = "cuda")]
+    pub(crate) device: DevicePick,
+    #[arg(long, value_enum, default_value = "bf16")]
+    pub(crate) dtype: DtypePick,
+    /// sdpa is the battery default (eager OOMs at 8K+ on Tier A).
+    #[arg(long, value_enum, default_value = "sdpa")]
+    pub(crate) attn: AttnPick,
+    /// Force the in-tree torch GDN paths (auto-forced on cpu).
+    #[arg(long)]
+    pub(crate) no_fla: bool,
+    #[arg(long, default_value_t = 0)]
+    pub(crate) seed: u64,
+    /// Write the full JSON-lines event record here.
+    #[arg(long)]
+    pub(crate) record: Option<PathBuf>,
 }
 
 /// Arguments for `lastmost generate`. Prompts ride files, never argv.
@@ -128,6 +188,12 @@ pub(crate) struct DiffArgs {
 pub(crate) enum ModePick {
     Single,
     Incremental,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum BackendPick {
+    Hf,
+    Vllm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
