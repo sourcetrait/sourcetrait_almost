@@ -512,6 +512,11 @@ impl OlmoHybrid {
     pub fn context_len(&self) -> usize {
         self.context_len
     }
+
+    /// The device the model's tensors live on.
+    pub fn device(&self) -> &candle_core::Device {
+        self.embed_tokens.device()
+    }
 }
 
 /// Additive causal mask [T, T]: 0 on and below the diagonal, -inf
