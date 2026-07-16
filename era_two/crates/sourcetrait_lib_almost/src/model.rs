@@ -9,10 +9,13 @@
 use crate::*;
 
 /// SwiGLU MLP, present on every layer: down(silu(gate(x)) * up(x)).
+/// gate/up ride one row-fused projection ([2 * intermediate, hidden],
+/// row order gate | up); down stays separate (its input is the
+/// product, not x).
 struct Mlp {
-    gate_proj: candle_nn::Linear,
-    up_proj: candle_nn::Linear,
+    gate_up_proj: candle_nn::Linear,
     down_proj: candle_nn::Linear,
+    intermediate: usize,
 }
 
 impl Mlp {
@@ -21,16 +24,25 @@ impl Mlp {
         intermediate: usize,
         vb: candle_nn::VarBuilder,
     ) -> LibAlmostResult<Self> {
+        let gate_up = candle_core::Tensor::cat(
+            &[
+                &vb.pp("gate_proj").get((intermediate, hidden), "weight")?,
+                &vb.pp("up_proj").get((intermediate, hidden), "weight")?,
+            ],
+            0,
+        )?;
         Ok(Self {
-            gate_proj: candle_nn::linear_no_bias(hidden, intermediate, vb.pp("gate_proj"))?,
-            up_proj: candle_nn::linear_no_bias(hidden, intermediate, vb.pp("up_proj"))?,
+            gate_up_proj: candle_nn::Linear::new(gate_up, None),
             down_proj: candle_nn::linear_no_bias(intermediate, hidden, vb.pp("down_proj"))?,
+            intermediate,
         })
     }
 
     fn forward(&self, x: &candle_core::Tensor) -> LibAlmostResult<candle_core::Tensor> {
-        let gated = self.gate_proj.forward(x)?.silu()?;
-        Ok(self.down_proj.forward(&gated.mul(&self.up_proj.forward(x)?)?)?)
+        let gate_up = self.gate_up_proj.forward(x)?;
+        let gated = gate_up.narrow(1, 0, self.intermediate)?.silu()?;
+        let up = gate_up.narrow(1, self.intermediate, self.intermediate)?;
+        Ok(self.down_proj.forward(&gated.mul(&up)?)?)
     }
 }
 
@@ -42,12 +54,15 @@ impl Mlp {
 struct GdnLayer {
     input_layernorm: candle_core::Tensor,
     post_attention_layernorm: candle_core::Tensor,
-    q_proj: candle_nn::Linear,
-    k_proj: candle_nn::Linear,
-    v_proj: candle_nn::Linear,
+    /// q/k/v/g projections row-fused at load ([2*key + 2*value,
+    /// hidden]; row order q | k | v | g, so the first 2*key + value
+    /// columns of the output are exactly the batched conv's input).
+    /// a_proj/b_proj deliberately stay separate: folding them into
+    /// the fused gemv changes the gating scalars' accumulation order,
+    /// and that drift compounds through the recurrent state.
+    qkvg_proj: candle_nn::Linear,
     a_proj: candle_nn::Linear,
     b_proj: candle_nn::Linear,
-    g_proj: candle_nn::Linear,
     o_proj: candle_nn::Linear,
     /// The three depthwise conv weights concatenated along channels
     /// ([2*key + value, 1, kernel]) - one batched conv pass per
@@ -89,12 +104,20 @@ impl GdnLayer {
             conv_tail: f32_zeros((kernel - 1, key_dim + key_dim + value_dim))?,
             input_layernorm: vb.pp("input_layernorm").get(hidden, "weight")?,
             post_attention_layernorm: vb.pp("post_attention_layernorm").get(hidden, "weight")?,
-            q_proj: candle_nn::linear_no_bias(hidden, key_dim, vb_attn.pp("q_proj"))?,
-            k_proj: candle_nn::linear_no_bias(hidden, key_dim, vb_attn.pp("k_proj"))?,
-            v_proj: candle_nn::linear_no_bias(hidden, value_dim, vb_attn.pp("v_proj"))?,
+            qkvg_proj: candle_nn::Linear::new(
+                candle_core::Tensor::cat(
+                    &[
+                        &vb_attn.pp("q_proj").get((key_dim, hidden), "weight")?,
+                        &vb_attn.pp("k_proj").get((key_dim, hidden), "weight")?,
+                        &vb_attn.pp("v_proj").get((value_dim, hidden), "weight")?,
+                        &vb_attn.pp("g_proj").get((value_dim, hidden), "weight")?,
+                    ],
+                    0,
+                )?,
+                None,
+            ),
             a_proj: candle_nn::linear_no_bias(hidden, heads, vb_attn.pp("a_proj"))?,
             b_proj: candle_nn::linear_no_bias(hidden, heads, vb_attn.pp("b_proj"))?,
-            g_proj: candle_nn::linear_no_bias(hidden, value_dim, vb_attn.pp("g_proj"))?,
             o_proj: candle_nn::linear_no_bias(value_dim, hidden, vb_attn.pp("o_proj"))?,
             conv_weight: candle_core::Tensor::cat(
                 &[
@@ -118,18 +141,20 @@ impl GdnLayer {
         })
     }
 
-    /// The batched conv input: q/k/v projections concatenated along
-    /// channels (packed - cat on a non-zero dim is a transposed view).
-    fn projected(&self, x: &candle_core::Tensor) -> LibAlmostResult<candle_core::Tensor> {
-        Ok(candle_core::Tensor::cat(
-            &[
-                &self.q_proj.forward(x)?,
-                &self.k_proj.forward(x)?,
-                &self.v_proj.forward(x)?,
-            ],
-            1,
-        )?
-        .contiguous()?)
+    /// One fused gemv, split by the load-time row order: the packed
+    /// conv input (q|k|v - the batched conv weight's channel order)
+    /// and the raw gate span (consumed by finish_mixer after the
+    /// recurrence).
+    fn project_fused(
+        &self,
+        x: &candle_core::Tensor,
+    ) -> LibAlmostResult<(candle_core::Tensor, candle_core::Tensor)> {
+        let qkvg = self.qkvg_proj.forward(x)?;
+        let conv_width = 2 * self.key_width + self.value_width;
+        Ok((
+            qkvg.narrow(1, 0, conv_width)?.contiguous()?,
+            qkvg.narrow(1, conv_width, self.value_width)?.contiguous()?,
+        ))
     }
 
     /// Split a batched conv output back into contiguous q/k/v spans.
@@ -208,18 +233,16 @@ impl GdnLayer {
         Ok((q, k, v, g, beta))
     }
 
-    /// The gated output norm + o_proj tail shared by both mixer paths.
+    /// The gated output norm + o_proj tail shared by both mixer paths;
+    /// gate is the fused projection's raw g span.
     fn finish_mixer(
         &self,
         y: candle_core::Tensor,
-        x: &candle_core::Tensor,
+        gate: candle_core::Tensor,
         seq_len: usize,
     ) -> LibAlmostResult<candle_core::Tensor> {
-        let y = y.to_dtype(x.dtype())?;
-        let gate = self
-            .g_proj
-            .forward(x)?
-            .reshape((seq_len, self.num_heads, self.head_v_dim))?;
+        let y = y.to_dtype(gate.dtype())?;
+        let gate = gate.reshape((seq_len, self.num_heads, self.head_v_dim))?;
         let y = norms::rms_norm_gated(&y, &gate, &self.o_norm, gdn::O_NORM_EPS)?;
         Ok(self
             .o_proj
@@ -230,7 +253,8 @@ impl GdnLayer {
     /// instrument): zero-seeded per-token recurrence, no state kept.
     fn mixer_stateless(&self, x: &candle_core::Tensor) -> LibAlmostResult<candle_core::Tensor> {
         let (seq_len, _) = x.dims2()?;
-        let conv_out = gdn::causal_conv_silu(&self.projected(x)?, &self.conv_weight)?;
+        let (conv_in, gate) = self.project_fused(x)?;
+        let conv_out = gdn::causal_conv_silu(&conv_in, &self.conv_weight)?;
         let (q, k, v) = self.split_conv(&conv_out)?;
         let (q, k, v, g, beta) = self.heads_and_gates(q, k, v, x, seq_len)?;
         let decay = g.exp()?;
@@ -248,7 +272,7 @@ impl GdnLayer {
             rows.push(y_t);
         }
         let y = candle_core::Tensor::stack(&rows, 0)?;
-        self.finish_mixer(y, x, seq_len)
+        self.finish_mixer(y, gate, seq_len)
     }
 
     /// The GDN mixer, CARRIED form (the D3 engine path): conv tails
@@ -257,8 +281,8 @@ impl GdnLayer {
     /// ride the chunked rule - the upstream's own path split.
     fn mixer_carried(&mut self, x: &candle_core::Tensor) -> LibAlmostResult<candle_core::Tensor> {
         let (seq_len, _) = x.dims2()?;
-        let (conv_out, tail) =
-            gdn::conv_with_tail(&self.projected(x)?, &self.conv_weight, &self.conv_tail)?;
+        let (conv_in, gate) = self.project_fused(x)?;
+        let (conv_out, tail) = gdn::conv_with_tail(&conv_in, &self.conv_weight, &self.conv_tail)?;
         self.conv_tail = tail;
         let (q, k, v) = self.split_conv(&conv_out)?;
         let (q, k, v, g, beta) = self.heads_and_gates(q, k, v, x, seq_len)?;
@@ -278,7 +302,7 @@ impl GdnLayer {
             self.state = next_state;
             out
         };
-        self.finish_mixer(y, x, seq_len)
+        self.finish_mixer(y, gate, seq_len)
     }
 
     fn clear_cache(&mut self) -> LibAlmostResult<()> {
@@ -309,9 +333,10 @@ struct AttnKv {
 struct AttnLayer {
     post_attention_layernorm: candle_core::Tensor,
     post_feedforward_layernorm: candle_core::Tensor,
-    q_proj: candle_nn::Linear,
-    k_proj: candle_nn::Linear,
-    v_proj: candle_nn::Linear,
+    /// q/k/v projections row-fused at load ([3 * width, hidden]; row
+    /// order q | k | v); o stays separate (its input is the attention
+    /// output, not x).
+    qkv_proj: candle_nn::Linear,
     o_proj: candle_nn::Linear,
     q_norm: candle_core::Tensor,
     k_norm: candle_core::Tensor,
@@ -332,9 +357,17 @@ impl AttnLayer {
             post_feedforward_layernorm: vb
                 .pp("post_feedforward_layernorm")
                 .get(hidden, "weight")?,
-            q_proj: candle_nn::linear_no_bias(hidden, width, vb_attn.pp("q_proj"))?,
-            k_proj: candle_nn::linear_no_bias(hidden, width, vb_attn.pp("k_proj"))?,
-            v_proj: candle_nn::linear_no_bias(hidden, width, vb_attn.pp("v_proj"))?,
+            qkv_proj: candle_nn::Linear::new(
+                candle_core::Tensor::cat(
+                    &[
+                        &vb_attn.pp("q_proj").get((width, hidden), "weight")?,
+                        &vb_attn.pp("k_proj").get((width, hidden), "weight")?,
+                        &vb_attn.pp("v_proj").get((width, hidden), "weight")?,
+                    ],
+                    0,
+                )?,
+                None,
+            ),
             o_proj: candle_nn::linear_no_bias(width, hidden, vb_attn.pp("o_proj"))?,
             q_norm: vb_attn.pp("q_norm").get(width, "weight")?,
             k_norm: vb_attn.pp("k_norm").get(width, "weight")?,
@@ -423,16 +456,19 @@ impl AttnLayer {
         Ok((h + mlp_out)?)
     }
 
-    /// Projections with the full-projection-width q/k RMSNorm BEFORE
-    /// the head reshape; [heads, t, head_dim] matmul-ready.
+    /// One fused projection gemv split into q/k/v, with the
+    /// full-projection-width q/k RMSNorm BEFORE the head reshape;
+    /// [heads, t, head_dim] matmul-ready.
     fn qkv(
         &self,
         x: &candle_core::Tensor,
     ) -> LibAlmostResult<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
         let (seq_len, _) = x.dims2()?;
-        let q = norms::rms_norm(&self.q_proj.forward(x)?, &self.q_norm, self.rms_eps)?;
-        let k = norms::rms_norm(&self.k_proj.forward(x)?, &self.k_norm, self.rms_eps)?;
-        let v = self.v_proj.forward(x)?;
+        let width = self.num_heads * self.head_dim;
+        let qkv = self.qkv_proj.forward(x)?;
+        let q = norms::rms_norm(&qkv.narrow(1, 0, width)?, &self.q_norm, self.rms_eps)?;
+        let k = norms::rms_norm(&qkv.narrow(1, width, width)?, &self.k_norm, self.rms_eps)?;
+        let v = qkv.narrow(1, 2 * width, width)?.contiguous()?;
         let heads = |t: candle_core::Tensor| -> LibAlmostResult<candle_core::Tensor> {
             Ok(t.reshape((seq_len, self.num_heads, self.head_dim))?
                 .transpose(0, 1)?
