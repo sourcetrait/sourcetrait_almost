@@ -2,7 +2,9 @@ pub(crate) mod chat;
 pub(crate) mod checkpoint;
 pub mod consts;
 pub(crate) mod error;
+pub(crate) mod gdn;
 pub(crate) mod load;
+pub(crate) mod norms;
 pub(crate) mod tokenizer;
 
 #[allow(unused_imports)]
@@ -47,5 +49,6 @@ mod tests {
     mod chat;
     mod checkpoint;
     mod load;
+    mod norms;
     mod tokenizer;
 }
