@@ -596,13 +596,21 @@ impl AttnLayer {
         v: &candle_core::Tensor,
     ) -> LibAlmostResult<candle_core::Tensor> {
         let seq_len = q.dim(1)?;
+        // q packs (chunk-sized, cheap); k/v stay VIEWS - the flash
+        // kernels take strided rows (last dim contiguous), and a
+        // contiguous() here would copy the WHOLE carried span per
+        // chunk per layer (~2 GiB-class transients late in a 32K
+        // prefill, and the top copy share on the prefill path).
         let block = |t: &candle_core::Tensor| -> LibAlmostResult<candle_core::Tensor> {
             Ok(t.transpose(0, 1)?.unsqueeze(0)?.contiguous()?)
         };
+        let span = |t: &candle_core::Tensor| -> LibAlmostResult<candle_core::Tensor> {
+            Ok(t.transpose(0, 1)?.unsqueeze(0)?)
+        };
         let out = r::flash::flash_attn(
             &block(q)?,
-            &block(k)?,
-            &block(v)?,
+            &span(k)?,
+            &span(v)?,
             (self.head_dim as f32).powf(-0.5),
             true,
         )?;
@@ -829,6 +837,28 @@ impl OlmoHybrid {
         if let Some(stage) = &mut self.graph_stage {
             stage.armed = false;
         }
+        Ok(())
+    }
+
+    /// Known-length KV pre-reserve (generate calls this before its
+    /// prefill loop): one allocation at prompt + decode margin,
+    /// KV_RESERVE_STEP-rounded, instead of ~one regrow per reserve
+    /// step of prefill - each regrow holds old+new buffers during
+    /// its copy and frees an odd-sized block into the raw cudaMalloc
+    /// heap (the fragmentation that inflates the 32K peak). A decode
+    /// outrunning the margin regrows coarsely as before.
+    pub fn reserve_for_generation(&mut self, prompt_tokens: usize) -> LibAlmostResult<()> {
+        let device = self.device().clone();
+        let dtype = self.embed_tokens.dtype();
+        let capacity = (prompt_tokens + RESERVE_DECODE_MARGIN)
+            .div_ceil(KV_RESERVE_STEP)
+            * KV_RESERVE_STEP;
+        for layer in &mut self.layers {
+            if let Layer::Attn(attn) = layer {
+                attn.reserve_capacity(capacity, dtype, &device)?;
+            }
+        }
+        self.contain_parked_grows();
         Ok(())
     }
 

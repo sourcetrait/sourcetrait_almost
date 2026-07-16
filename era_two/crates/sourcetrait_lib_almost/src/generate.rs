@@ -153,6 +153,11 @@ impl OlmoHybrid {
         };
 
         let prefill_started = std::time::Instant::now();
+        // The known-length pre-reserve: the whole run's KV capacity
+        // in one allocation, ahead of the first chunk.
+        generation
+            .model
+            .reserve_for_generation(prompt_ids.len())?;
         let mut last_logits = None;
         let mut start = 0;
         while start < prompt_ids.len() {
