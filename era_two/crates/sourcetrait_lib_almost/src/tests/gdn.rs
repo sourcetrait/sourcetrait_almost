@@ -1,7 +1,16 @@
 //! Hand-pinned numeric locks over the GDN primitives (cpu f32):
-//! gating scalars, softplus guard, l2 norm, the stateless causal conv,
-//! and the recurrence step.
-use crate::gdn::{causal_conv_silu, gdn_gates, l2_norm, recurrent_step, softplus};
+//! gating scalars, softplus guard, l2 norm, the causal convs
+//! (stateless + carried tail), the recurrence step, and the chunked
+//! rule's equivalence to the sequential recurrence.
+use crate::gdn::{
+    causal_conv_silu,
+    chunk_rule,
+    conv_with_tail,
+    gdn_gates,
+    l2_norm,
+    recurrent_step,
+    softplus,
+};
 
 fn tensor(values: &[f32]) -> candle_core::Tensor {
     candle_core::Tensor::new(values, &candle_core::Device::Cpu).expect("tensor")
@@ -81,6 +90,142 @@ fn causal_conv_orients_last_weight_at_current_token() {
             .expect("weight");
     let out = causal_conv_silu(&x, &weight).expect("conv");
     assert_close(&values(&out), &[0.731_058_6, 11.999_926, 23.0], 1e-4);
+}
+
+#[test]
+fn conv_with_tail_zero_tail_matches_stateless() {
+    let x = shaped(&[1.0, 2.0, 3.0, 4.0, 5.0], (5, 1));
+    let weight =
+        candle_core::Tensor::from_vec(vec![4.0f32, 3.0, 2.0, 1.0], (1, 1, 4), &candle_core::Device::Cpu)
+            .expect("weight");
+    let tail = candle_core::Tensor::zeros((3, 1), candle_core::DType::F32, &candle_core::Device::Cpu)
+        .expect("tail");
+    let stateless = causal_conv_silu(&x, &weight).expect("stateless");
+    let (carried, new_tail) = conv_with_tail(&x, &weight, &tail).expect("carried");
+    assert_close(&values(&carried), &values(&stateless), 1e-7);
+    // The new tail holds the last kernel-1 RAW rows.
+    assert_close(&values(&new_tail), &[3.0, 4.0, 5.0], 1e-7);
+}
+
+#[test]
+fn conv_with_tail_chains_across_chunks() {
+    let x = shaped(&[1.0, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0], (7, 1));
+    let weight =
+        candle_core::Tensor::from_vec(vec![0.5f32, -1.0, 2.0, 1.5], (1, 1, 4), &candle_core::Device::Cpu)
+            .expect("weight");
+    let zero_tail =
+        candle_core::Tensor::zeros((3, 1), candle_core::DType::F32, &candle_core::Device::Cpu)
+            .expect("tail");
+    let (whole, _) = conv_with_tail(&x, &weight, &zero_tail).expect("whole");
+
+    let first = x.narrow(0, 0, 4).expect("first");
+    let second = x.narrow(0, 4, 3).expect("second");
+    let (out_1, tail_1) = conv_with_tail(&first, &weight, &zero_tail).expect("chunk 1");
+    let (out_2, _) = conv_with_tail(&second, &weight, &tail_1).expect("chunk 2");
+    let chained: Vec<f32> = values(&out_1).into_iter().chain(values(&out_2)).collect();
+    assert_close(&chained, &values(&whole), 1e-7);
+}
+
+fn splitmix_f32(seed: &mut u64, count: usize) -> Vec<f32> {
+    (0..count)
+        .map(|_| {
+            *seed = seed.wrapping_add(0x9E3779B97F4A7C15);
+            let mut z = *seed;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+            z ^= z >> 31;
+            ((z >> 40) as f32 / 8_388_608.0) - 1.0
+        })
+        .collect()
+}
+
+fn synth(seed: &mut u64, shape: (usize, usize, usize)) -> candle_core::Tensor {
+    let (a, b, c) = shape;
+    candle_core::Tensor::from_vec(splitmix_f32(seed, a * b * c), shape, &candle_core::Device::Cpu)
+        .expect("synth tensor")
+}
+
+fn nmse(actual: &candle_core::Tensor, reference: &candle_core::Tensor) -> f64 {
+    let a = values(actual);
+    let r = values(reference);
+    assert_eq!(a.len(), r.len());
+    let mut numerator = 0f64;
+    let mut denominator = 0f64;
+    for (x, y) in a.iter().zip(&r) {
+        let difference = (*x as f64) - (*y as f64);
+        numerator += difference * difference;
+        denominator += (*y as f64) * (*y as f64);
+    }
+    numerator / denominator
+}
+
+#[test]
+fn chunk_rule_matches_the_sequential_recurrence() {
+    // 150 tokens (two full 64-chunks + a ragged 22), 2 heads, dk 3,
+    // dv 4, a NONZERO initial state - the chunked rule, the same rule
+    // split 70+80 with carried state, and the per-token loop must
+    // agree to f32 rounding on outputs AND final states.
+    let mut seed = 0x0102_0304_0506_0708u64;
+    let t = 150;
+    let (heads, dk, dv) = (2, 3, 4);
+    let q = (l2_norm(&synth(&mut seed, (t, heads, dk))).expect("q norm")
+        * (dk as f64).powf(-0.5))
+    .expect("q scale");
+    let k = l2_norm(&synth(&mut seed, (t, heads, dk))).expect("k norm");
+    let v = synth(&mut seed, (t, heads, dv));
+    let g = (synth(&mut seed, (t, heads, 1)).abs().expect("abs") * -0.5)
+        .expect("g")
+        .squeeze(2)
+        .expect("g shape");
+    let beta = (synth(&mut seed, (t, heads, 1)).abs().expect("abs") * 1.5)
+        .expect("beta")
+        .squeeze(2)
+        .expect("beta shape");
+    let state_0 = synth(&mut seed, (heads, dk, dv))
+        .reshape((heads, dk, dv))
+        .expect("state");
+
+    // The sequential reference.
+    let decay = g.exp().expect("decay");
+    let mut state = state_0.clone();
+    let mut rows = Vec::with_capacity(t);
+    for position in 0..t {
+        let narrow = |x: &candle_core::Tensor| x.narrow(0, position, 1).unwrap().squeeze(0).unwrap();
+        let (next, y) = recurrent_step(
+            &state,
+            &narrow(&q),
+            &narrow(&k),
+            &narrow(&v),
+            &narrow(&decay),
+            &narrow(&beta),
+        )
+        .expect("step");
+        state = next;
+        rows.push(y);
+    }
+    let sequential_out = candle_core::Tensor::stack(&rows, 0).expect("stack");
+    let sequential_state = state;
+
+    // One chunked pass.
+    let (chunk_out, chunk_state) = chunk_rule(&q, &k, &v, &g, &beta, &state_0).expect("chunked");
+    assert!(nmse(&chunk_out, &sequential_out) <= 1e-10, "whole-pass out");
+    assert!(nmse(&chunk_state, &sequential_state) <= 1e-10, "whole-pass state");
+
+    // Split 70 + 80 with carried state.
+    let split = 70;
+    let head = |x: &candle_core::Tensor| x.narrow(0, 0, split).unwrap();
+    let tail = |x: &candle_core::Tensor| x.narrow(0, split, t - split).unwrap();
+    let (out_a, state_a) = chunk_rule(
+        &head(&q), &head(&k), &head(&v), &head(&g), &head(&beta), &state_0,
+    )
+    .expect("split a");
+    let (out_b, state_b) = chunk_rule(
+        &tail(&q), &tail(&k), &tail(&v), &tail(&g), &tail(&beta), &state_a,
+    )
+    .expect("split b");
+    let split_out = candle_core::Tensor::cat(&[&out_a, &out_b], 0).expect("cat");
+    assert!(nmse(&split_out, &sequential_out) <= 1e-10, "split out");
+    assert!(nmse(&state_b, &sequential_state) <= 1e-10, "split state");
 }
 
 #[test]
