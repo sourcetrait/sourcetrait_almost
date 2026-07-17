@@ -363,9 +363,9 @@ fn f32_field(tensors: &safetensors::SafeTensors, name: &str) -> Vec<f32> {
         .collect()
 }
 
-/// THE staged-path correctness gate, truth-anchored d4-style: every
-/// row after the first rides graph_decode_step (uncaptured staged
-/// ops) over the C2 incremental id trail. Bars from measurement:
+/// THE staged-path correctness gate, truth-anchored cuda-grade-style:
+/// every row after the first rides graph_decode_step (uncaptured
+/// staged ops) over the oracle incremental id trail. Bars from measurement:
 /// vs cpu-f32 truth nmse <= 2e-5 (measured 1.430e-5; the classic
 /// eager cross-grade class); vs the cuda-bf16-torch kin nmse <= 5e-5
 /// with argmax >= 105/106 (measured 1.699e-5, 106/106; the classic
@@ -373,9 +373,9 @@ fn f32_field(tensors: &safetensors::SafeTensors, name: &str) -> Vec<f32> {
 /// kin-vs-kin drift (state carry forks two valid bf16 paths); the
 /// ladder reports them, and THIS gate owns quality.
 #[test]
-#[ignore = "needs the DPO checkpoint + ALMOST_C2_DUMPS_DIR + a cuda card"]
+#[ignore = "needs the DPO checkpoint + ALMOST_ORACLE_DUMPS_DIR + a cuda card"]
 fn graph_gate_staged_truth_envelope() {
-    let dumps = env::var("ALMOST_C2_DUMPS_DIR").expect("ALMOST_C2_DUMPS_DIR");
+    let dumps = env::var("ALMOST_ORACLE_DUMPS_DIR").expect("ALMOST_ORACLE_DUMPS_DIR");
     let load = |relative: &str| -> (Vec<u32>, Vec<f32>) {
         let bytes =
             fs::read(Path::new(&dumps).join(relative)).expect("reference reads");

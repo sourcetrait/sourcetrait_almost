@@ -1,7 +1,8 @@
-//! The D6 generation-surface gates: the greedy trajectory replay
-//! against the C2 f32 generated ids (cpu f32, exact), and the needle
-//! retrieval grid - the lastmost 05 instrument re-expressed verbatim
-//! (LCG filler, calibration loop, stop-before-append greedy).
+//! The GenerationSurface (was D6) gates: the greedy trajectory replay
+//! against the oracle f32 generated ids (cpu f32, exact), the bench
+//! rows, and the needle retrieval grid - the lastmost 05 instrument
+//! re-expressed verbatim (LCG filler, calibration loop,
+//! stop-before-append greedy).
 use crate::*;
 
 fn u32_field(tensors: &safetensors::SafeTensors, name: &str) -> Vec<u32> {
@@ -18,14 +19,14 @@ fn dpo_dir() -> PathBuf {
 }
 
 #[test]
-#[ignore = "needs the DPO checkpoint + ALMOST_D2_REFERENCE"]
-fn d6_gate_greedy_trajectory_matches_c2_f32() {
-    // The C2 short dump's generated_ids are the original stack's
+#[ignore = "needs the DPO checkpoint + ALMOST_STATELESS_REFERENCE"]
+fn generation_gate_greedy_trajectory_matches_oracle_f32() {
+    // The oracle short dump's generated_ids are the original stack's
     // greedy continuation of the same 43-token chat prompt; at f32
-    // the trajectories must match id-for-id (the D3 gates already
-    // matched argmax on every reference row).
-    let reference_path = env::var("ALMOST_D2_REFERENCE").expect(
-        "ALMOST_D2_REFERENCE must point at short_cpu_f32_torch_eager_single.safetensors",
+    // the trajectories must match id-for-id (the StateCarry gates
+    // already matched argmax on every reference row).
+    let reference_path = env::var("ALMOST_STATELESS_REFERENCE").expect(
+        "ALMOST_STATELESS_REFERENCE must point at short_cpu_f32_torch_eager_single.safetensors",
     );
     let bytes = fs::read(&reference_path).expect("reference reads");
     let tensors = safetensors::SafeTensors::deserialize(&bytes).expect("reference parses");
@@ -54,7 +55,7 @@ fn d6_gate_greedy_trajectory_matches_c2_f32() {
     text.push_str(&report.rest);
 
     println!(
-        "d6 trajectory: prompt {} tokens, generated {} ({:?}), text {text:?}",
+        "generation trajectory: prompt {} tokens, generated {} ({:?}), text {text:?}",
         report.prompt_token_count, report.generated_token_count, report.finish_reason
     );
     assert_eq!(report.prompt_token_count, 43, "the pinned chat render");
@@ -125,11 +126,13 @@ fn encoded_len(tokenizer: &tokenizers::Tokenizer, text: &str) -> usize {
 #[test]
 #[cfg(feature = "cuda")]
 #[ignore = "perf rows, not a gate: the incumbent bench recipes (cuda + ALMOST_BENCH_PROMPTS_DIR)"]
-fn d6_bench_rows_cuda() {
-    // The C4 method: raw prompt files (the incumbent's exact seeds),
-    // greedy, 128 decode tokens FORCED (ignore_stops - their
-    // ignore_eos). Rows print; nothing asserts beyond completion -
-    // the D-track targets are vllm's 62 t/s short / 42.9 @32K.
+fn bench_rows_cuda() {
+    // The IncumbentBench method: raw prompt files (the incumbent's
+    // exact seeds), greedy, a FORCED decode length (ignore_stops -
+    // their ignore_eos; ALMOST_BENCH_DECODE overrides the standing
+    // 128-token window - the DipDiagnostic knob). Rows print; nothing
+    // asserts beyond completion - the CorrectnessCore targets are
+    // vllm's 62 t/s short / 42.9 @32K.
     let prompts_dir = env::var("ALMOST_BENCH_PROMPTS_DIR")
         .expect("ALMOST_BENCH_PROMPTS_DIR must point at the lastmost prompts dir");
     let dir = dpo_dir();
@@ -155,13 +158,16 @@ fn d6_bench_rows_cuda() {
         "mid_filler_2k.txt,long_filler_8k.txt,bench_filler_16k.txt,bench_filler_32k.txt"
             .to_string()
     });
+    let decode_window: usize = env::var("ALMOST_BENCH_DECODE")
+        .map(|value| value.parse().expect("decode window"))
+        .unwrap_or(128);
     for file in files.split(',').map(str::trim) {
         let prompt = fs::read_to_string(Path::new(&prompts_dir).join(file))
             .unwrap_or_else(|e| panic!("{file}: {e}"));
         let options = GenerateOptions {
             temperature: None,
             top_p: None,
-            sample_len: 128,
+            sample_len: decode_window,
             chat: false,
             ignore_stops: true,
             ..GenerateOptions::default()
@@ -177,17 +183,20 @@ fn d6_bench_rows_cuda() {
         let decode_rate =
             (report.generated_token_count.saturating_sub(1)) as f64 / report.decode_seconds;
         println!(
-            "d6 bench {file}: prompt {} tok, prefill {:.0} tok/s, decode {:.1} tok/s ({} tokens)",
+            "bench {file}: prompt {} tok, prefill {:.0} tok/s, decode {:.1} tok/s ({} tokens)",
             report.prompt_token_count, prefill_rate, decode_rate, report.generated_token_count
         );
-        assert_eq!(report.generated_token_count, 128, "forced decode length");
+        assert_eq!(
+            report.generated_token_count, decode_window,
+            "forced decode length"
+        );
     }
 }
 
 #[test]
 #[cfg(feature = "cuda")]
 #[ignore = "needs the DPO checkpoint + ALMOST_NEEDLE_SPEC + a cuda card"]
-fn d6_gate_needle_grid_cuda() {
+fn generation_gate_needle_grid_cuda() {
     let spec_path = env::var("ALMOST_NEEDLE_SPEC")
         .expect("ALMOST_NEEDLE_SPEC must point at the lastmost spec_v1.json");
     let spec: NeedleSpec =
@@ -263,7 +272,7 @@ fn d6_gate_needle_grid_cuda() {
             }
         }
         let total = spec.keys.len() * spec.depths.len();
-        println!("d6 needle {target}: {found_count}/{total}");
+        println!("generation needle {target}: {found_count}/{total}");
         assert_eq!(found_count, total, "misses at {target}: {misses:?}");
     }
 }

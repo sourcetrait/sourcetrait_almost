@@ -1,8 +1,9 @@
-//! The needle battery engine (the A-track instrument): spec-driven
-//! passkey grids over a live model, single and multi-distractor modes,
-//! per-cell results serializable for the ratchet artifacts.
+//! The needle battery engine (the QualityGatedCuts instrument):
+//! spec-driven passkey grids over a live model, single and
+//! multi-distractor modes, per-cell results serializable for the
+//! ratchet artifacts.
 //!
-//! The method is the lastmost C3 instrument as library code: LCG word
+//! The method is the lastmost needle instrument (C3) as library code: LCG word
 //! filler seeded per target length, a 4-round calibration loop that
 //! converges the chat-wrapped token count onto the target, greedy
 //! decode, substring match. Multi mode plants two distractor needles

@@ -1,5 +1,6 @@
-//! Needle battery: checkpoint-free construction units + the A-track
-//! artifact driver (per-cell JSON over single + multi grids).
+//! Needle battery: checkpoint-free construction units + the
+//! QualityGatedCuts artifact driver (per-cell JSON over single +
+//! multi grids).
 use crate::*;
 use crate::needle::{cell_plan, lcg_words, splice};
 
@@ -39,7 +40,7 @@ fn multi_plan_offsets_depths_and_cycles_keys() {
     }
 }
 
-/// The A-track battery: single + multi grids at the era-one ratchet
+/// The QualityGatedCuts battery: single + multi grids at the era-one ratchet
 /// lengths, per-cell JSON artifact. No asserts - this run PINS the
 /// baseline; rungs are judged per-cell against its artifact.
 /// Env: ALMOST_NEEDLE_SPEC (lastmost spec_v1.json), ALMOST_NEEDLE_OUT
@@ -48,7 +49,7 @@ fn multi_plan_offsets_depths_and_cycles_keys() {
 /// (a -s token: profile name or toml path; absent = embedded base).
 #[test]
 #[cfg(feature = "cuda")]
-#[ignore = "the A-track battery: needs the DPO checkpoint + a cuda card + ALMOST_NEEDLE_SPEC/_OUT"]
+#[ignore = "the QualityGatedCuts battery: needs the DPO checkpoint + a cuda card + ALMOST_NEEDLE_SPEC/_OUT"]
 fn needle_battery_artifact() {
     let spec_path = env::var("ALMOST_NEEDLE_SPEC").expect("ALMOST_NEEDLE_SPEC");
     let out_path = env::var("ALMOST_NEEDLE_OUT").expect("ALMOST_NEEDLE_OUT");

@@ -1,10 +1,11 @@
-//! The D-slice gates: in-process replays of the lastmost C2 cpu-f32
-//! references (all #[ignore] - they need the local DPO checkpoint and
-//! a reference env var), plus the chunked-vs-stateless equivalence.
+//! The CorrectnessCore slice gates: in-process replays of the
+//! lastmost oracle (C2) cpu-f32 references (all #[ignore] - they need
+//! the local DPO checkpoint and a reference env var), plus the
+//! chunked-vs-stateless equivalence.
 //!
-//! Env: ALMOST_D2_REFERENCE points at the short single-mode reference
-//! file (the D2 gate); ALMOST_C2_DUMPS_DIR points at the C2 dumps root
-//! (short/mid/long subdirs - the D3 gates). Bars: f32 cross-stack nmse
+//! Env: ALMOST_STATELESS_REFERENCE points at the short single-mode reference
+//! file (the StatelessGate); ALMOST_ORACLE_DUMPS_DIR points at the oracle
+//! dumps root (short/mid/long subdirs - the StateCarry gates). Bars: f32 cross-stack nmse
 //! <= 1e-9 with full argmax agreement (the oracle's own algorithmic
 //! pin is 1.2e-13); chunked-vs-stateless <= 1e-12.
 use crate::*;
@@ -123,10 +124,10 @@ fn chunked_rows(model: &mut OlmoHybrid, ids: &[u32], chunk: usize) -> Vec<f32> {
 }
 
 #[test]
-#[ignore = "needs the DPO checkpoint + ALMOST_D2_REFERENCE"]
-fn d2_gate_matches_c2_short_cpu_f32_single() {
-    let reference_path = env::var("ALMOST_D2_REFERENCE").expect(
-        "ALMOST_D2_REFERENCE must point at short_cpu_f32_torch_eager_single.safetensors",
+#[ignore = "needs the DPO checkpoint + ALMOST_STATELESS_REFERENCE"]
+fn stateless_gate_matches_oracle_short_cpu_f32_single() {
+    let reference_path = env::var("ALMOST_STATELESS_REFERENCE").expect(
+        "ALMOST_STATELESS_REFERENCE must point at short_cpu_f32_torch_eager_single.safetensors",
     );
     let (all_ids, reference) = load_reference(&reference_path);
     let rows = all_ids.len();
@@ -134,20 +135,20 @@ fn d2_gate_matches_c2_short_cpu_f32_single() {
     let ours = model.forward_all(&ids_tensor(&all_ids)).expect("forward_all");
     assert_eq!(ours.dims(), [rows, VOCAB]);
     let (nmse, argmax_hits) = score(&flat(ours), &reference);
-    println!("d2 gate: nmse {nmse:.3e}, argmax {argmax_hits}/{rows}");
+    println!("stateless gate: nmse {nmse:.3e}, argmax {argmax_hits}/{rows}");
     assert_eq!(argmax_hits, rows, "argmax agreement (nmse {nmse:.3e})");
     assert!(nmse <= 1e-9, "nmse {nmse:.3e} exceeds the 1e-9 bar");
 }
 
-fn c2_dumps_dir() -> String {
-    env::var("ALMOST_C2_DUMPS_DIR")
-        .expect("ALMOST_C2_DUMPS_DIR must point at the C2 dumps root (short/mid/long)")
+fn oracle_dumps_dir() -> String {
+    env::var("ALMOST_ORACLE_DUMPS_DIR")
+        .expect("ALMOST_ORACLE_DUMPS_DIR must point at the oracle dumps root (short/mid/long)")
 }
 
 #[test]
-#[ignore = "needs the DPO checkpoint + ALMOST_C2_DUMPS_DIR"]
-fn d3_gate_chunked_matches_stateless() {
-    let reference_path = Path::new(&c2_dumps_dir())
+#[ignore = "needs the DPO checkpoint + ALMOST_ORACLE_DUMPS_DIR"]
+fn state_carry_gate_chunked_matches_stateless() {
+    let reference_path = Path::new(&oracle_dumps_dir())
         .join("short/short_cpu_f32_torch_eager_single.safetensors");
     let (all_ids, _) = load_reference(reference_path.to_str().expect("utf-8 path"));
     let rows = all_ids.len();
@@ -158,16 +159,16 @@ fn d3_gate_chunked_matches_stateless() {
     for chunk in [128usize, 64, 33] {
         let ours = chunked_rows(&mut model, &all_ids, chunk);
         let (nmse, argmax_hits) = score(&ours, &stateless);
-        println!("d3 chunked-vs-stateless (chunk {chunk}): nmse {nmse:.3e}, argmax {argmax_hits}/{rows}");
+        println!("state carry chunked-vs-stateless (chunk {chunk}): nmse {nmse:.3e}, argmax {argmax_hits}/{rows}");
         assert_eq!(argmax_hits, rows, "argmax at chunk {chunk} (nmse {nmse:.3e})");
         assert!(nmse <= 1e-12, "nmse {nmse:.3e} exceeds 1e-12 at chunk {chunk}");
     }
 }
 
 #[test]
-#[ignore = "needs the DPO checkpoint + ALMOST_C2_DUMPS_DIR"]
-fn d3_gate_matches_c2_short_incremental() {
-    let reference_path = Path::new(&c2_dumps_dir())
+#[ignore = "needs the DPO checkpoint + ALMOST_ORACLE_DUMPS_DIR"]
+fn state_carry_gate_matches_oracle_short_incremental() {
+    let reference_path = Path::new(&oracle_dumps_dir())
         .join("short/short_cpu_f32_torch_eager_incr.safetensors");
     let (all_ids, reference) = load_reference(reference_path.to_str().expect("utf-8 path"));
     let rows = all_ids.len();
@@ -176,44 +177,44 @@ fn d3_gate_matches_c2_short_incremental() {
     // rule + conv tails + mask-free single-query attention).
     let ours = chunked_rows(&mut model, &all_ids, 1);
     let (nmse, argmax_hits) = score(&ours, &reference);
-    println!("d3 incremental gate: nmse {nmse:.3e}, argmax {argmax_hits}/{rows}");
+    println!("state carry incremental gate: nmse {nmse:.3e}, argmax {argmax_hits}/{rows}");
     assert_eq!(argmax_hits, rows, "argmax agreement (nmse {nmse:.3e})");
     assert!(nmse <= 1e-9, "nmse {nmse:.3e} exceeds the 1e-9 bar");
 }
 
 fn length_reference_gate(relative: &str, label: &str) {
-    let reference_path = Path::new(&c2_dumps_dir()).join(relative);
+    let reference_path = Path::new(&oracle_dumps_dir()).join(relative);
     let (all_ids, reference) = load_reference(reference_path.to_str().expect("utf-8 path"));
     let rows = all_ids.len();
     let mut model = build_model();
     let ours = chunked_rows(&mut model, &all_ids, 512);
     let (nmse, argmax_hits) = score(&ours, &reference);
-    println!("d3 {label} gate: nmse {nmse:.3e}, argmax {argmax_hits}/{rows}");
+    println!("state carry {label} gate: nmse {nmse:.3e}, argmax {argmax_hits}/{rows}");
     assert_eq!(argmax_hits, rows, "argmax agreement (nmse {nmse:.3e})");
     assert!(nmse <= 1e-9, "nmse {nmse:.3e} exceeds the 1e-9 bar");
 }
 
 #[test]
-#[ignore = "needs the DPO checkpoint + ALMOST_C2_DUMPS_DIR"]
-fn d3_gate_matches_c2_mid_single() {
+#[ignore = "needs the DPO checkpoint + ALMOST_ORACLE_DUMPS_DIR"]
+fn state_carry_gate_matches_oracle_mid_single() {
     length_reference_gate("mid/mid_cpu_f32_torch_eager_single.safetensors", "mid (2K)");
 }
 
 #[test]
-#[ignore = "needs the DPO checkpoint + ALMOST_C2_DUMPS_DIR; long runtime"]
-fn d3_gate_matches_c2_long_single() {
+#[ignore = "needs the DPO checkpoint + ALMOST_ORACLE_DUMPS_DIR; long runtime"]
+fn state_carry_gate_matches_oracle_long_single() {
     length_reference_gate("long/long_cpu_f32_torch_eager_single.safetensors", "long (8.5K)");
 }
 
-/// The D4 envelope bars: nmse <= 2e-5 and argmax >= 99.8% of rows
-/// (the lastmost C2 internal-spread envelope; their own bf16 rows run
+/// The CudaGrade envelope bars: nmse <= 2e-5 and argmax >= 99.8% of
+/// rows (the lastmost oracle internal-spread envelope; their bf16 rows run
 /// 1.2-1.7e-5 with 1-3 flips per dump).
 #[cfg(feature = "cuda")]
 fn envelope_gate(ours: &[f32], reference: &[f32], label: &str) {
     let rows = reference.len() / VOCAB;
     let (nmse, argmax_hits) = score(ours, reference);
     let argmax_bar = ((rows as f64) * 0.998).floor() as usize;
-    println!("d4 {label}: nmse {nmse:.3e}, argmax {argmax_hits}/{rows} (bar {argmax_bar})");
+    println!("cuda grade {label}: nmse {nmse:.3e}, argmax {argmax_hits}/{rows} (bar {argmax_bar})");
     assert!(
         argmax_hits >= argmax_bar,
         "argmax {argmax_hits}/{rows} under the 99.8% bar (nmse {nmse:.3e})"
@@ -231,8 +232,8 @@ fn cuda_bf16_model() -> OlmoHybrid {
 
 #[test]
 #[cfg(feature = "cuda")]
-#[ignore = "needs the DPO checkpoint + ALMOST_C2_DUMPS_DIR + a cuda card"]
-fn d4_gate_cuda_bf16_short_single() {
+#[ignore = "needs the DPO checkpoint + ALMOST_ORACLE_DUMPS_DIR + a cuda card"]
+fn cuda_grade_gate_short_single() {
     // SHORT-LENGTH BARS FROM MEASUREMENT (the era-one lesson, third
     // occurrence): at 106 rows cross-grade argmax is tie-dominated -
     // the ORIGINAL stack's own torch-cuda single reads 2.151e-5 nmse,
@@ -243,7 +244,7 @@ fn d4_gate_cuda_bf16_short_single() {
     // informational, and the same-grade kin comparison carries the
     // argmax bar at their measured floor (>= 104/106). Argmax bars
     // with real statistical power live in the mid/long gates.
-    let dumps = c2_dumps_dir();
+    let dumps = oracle_dumps_dir();
     let (all_ids, f32_reference) = load_reference(
         Path::new(&dumps)
             .join("short/short_cpu_f32_torch_eager_single.safetensors")
@@ -256,7 +257,7 @@ fn d4_gate_cuda_bf16_short_single() {
             .to_str()
             .expect("utf-8"),
     );
-    assert_eq!(all_ids, cuda_ids, "the C2 dumps share one id trail");
+    assert_eq!(all_ids, cuda_ids, "the oracle dumps share one id trail");
     let model = cuda_bf16_model();
     let ours = flat(
         model
@@ -267,7 +268,7 @@ fn d4_gate_cuda_bf16_short_single() {
 
     let (truth_nmse, truth_hits) = score(&ours, &f32_reference);
     println!(
-        "d4 short single vs cpu-f32 (cross-grade): nmse {truth_nmse:.3e}, \
+        "cuda grade short single vs cpu-f32 (cross-grade): nmse {truth_nmse:.3e}, \
          argmax {truth_hits}/{rows} (informational at this length; their torch control: 2.151e-5, 104/106)"
     );
     assert!(
@@ -276,7 +277,7 @@ fn d4_gate_cuda_bf16_short_single() {
     );
 
     let (kin_nmse, kin_hits) = score(&ours, &cuda_reference);
-    println!("d4 short single vs cuda-bf16-torch (kin): nmse {kin_nmse:.3e}, argmax {kin_hits}/{rows}");
+    println!("cuda grade short single vs cuda-bf16-torch (kin): nmse {kin_nmse:.3e}, argmax {kin_hits}/{rows}");
     assert!(
         kin_hits >= 104,
         "argmax {kin_hits}/{rows} under the measured same-grade floor (104/106)"
@@ -290,9 +291,9 @@ fn d4_gate_cuda_bf16_short_single() {
 
 #[test]
 #[cfg(feature = "cuda")]
-#[ignore = "needs the DPO checkpoint + ALMOST_C2_DUMPS_DIR + a cuda card"]
-fn d4_gate_cuda_bf16_short_incremental() {
-    let reference_path = Path::new(&c2_dumps_dir())
+#[ignore = "needs the DPO checkpoint + ALMOST_ORACLE_DUMPS_DIR + a cuda card"]
+fn cuda_grade_gate_short_incremental() {
+    let reference_path = Path::new(&oracle_dumps_dir())
         .join("short/short_cuda_bf16_torch_eager_incr.safetensors");
     let (all_ids, reference) = load_reference(reference_path.to_str().expect("utf-8"));
     let mut model = cuda_bf16_model();
@@ -302,7 +303,7 @@ fn d4_gate_cuda_bf16_short_incremental() {
 
 #[cfg(feature = "cuda")]
 fn cuda_length_gate(relative: &str, label: &str) {
-    let reference_path = Path::new(&c2_dumps_dir()).join(relative);
+    let reference_path = Path::new(&oracle_dumps_dir()).join(relative);
     let (all_ids, reference) = load_reference(reference_path.to_str().expect("utf-8"));
     let mut model = cuda_bf16_model();
     let ours = chunked_rows(&mut model, &all_ids, 512);
@@ -311,8 +312,8 @@ fn cuda_length_gate(relative: &str, label: &str) {
 
 #[test]
 #[cfg(feature = "cuda")]
-#[ignore = "needs the DPO checkpoint + ALMOST_C2_DUMPS_DIR + a cuda card"]
-fn d4_gate_cuda_bf16_mid_single() {
+#[ignore = "needs the DPO checkpoint + ALMOST_ORACLE_DUMPS_DIR + a cuda card"]
+fn cuda_grade_gate_mid_single() {
     cuda_length_gate(
         "mid/mid_cpu_f32_torch_eager_single.safetensors",
         "mid 2K vs cpu-f32 (cross-grade)",
@@ -321,8 +322,8 @@ fn d4_gate_cuda_bf16_mid_single() {
 
 #[test]
 #[cfg(feature = "cuda")]
-#[ignore = "needs the DPO checkpoint + ALMOST_C2_DUMPS_DIR + a cuda card"]
-fn d4_gate_cuda_bf16_long_single() {
+#[ignore = "needs the DPO checkpoint + ALMOST_ORACLE_DUMPS_DIR + a cuda card"]
+fn cuda_grade_gate_long_single() {
     cuda_length_gate(
         "long/long_cpu_f32_torch_eager_single.safetensors",
         "long 8.5K vs cpu-f32 (cross-grade)",
@@ -332,8 +333,8 @@ fn d4_gate_cuda_bf16_long_single() {
 #[test]
 #[cfg(feature = "cuda")]
 #[ignore = "diagnostic: short-dump pairwise spread (cuda + checkpoint + dumps)"]
-fn d4_diag_short_pairwise_spread() {
-    let dumps = c2_dumps_dir();
+fn cuda_grade_diag_short_pairwise_spread() {
+    let dumps = oracle_dumps_dir();
     let reference_path = |relative: &str| -> String {
         Path::new(&dumps)
             .join(relative)
@@ -355,7 +356,7 @@ fn d4_diag_short_pairwise_spread() {
     );
     let report = |label: &str, a: &[f32], b: &[f32]| {
         let (nmse, hits) = score(a, b);
-        println!("d4diag {label}: nmse {nmse:.3e}, argmax {hits}/106");
+        println!("cuda grade diag {label}: nmse {nmse:.3e}, argmax {hits}/106");
     };
     report("their-fla   vs f32 (control; recorded 1.24e-5, 105/106)", &fla_bf16, &f32_reference);
     report("their-torch vs f32 (the gate-1 control, untabulated)", &torch_bf16, &f32_reference);
@@ -373,7 +374,7 @@ fn d4_diag_short_pairwise_spread() {
         if ours_top != reference_top {
             let margin = reference_row[reference_top] - reference_row[ours_top];
             println!(
-                "d4diag flip row {row}: ref top {reference_top} vs ours {ours_top}, f32 margin {margin:.5}"
+                "cuda grade diag flip row {row}: ref top {reference_top} vs ours {ours_top}, f32 margin {margin:.5}"
             );
         }
     }
