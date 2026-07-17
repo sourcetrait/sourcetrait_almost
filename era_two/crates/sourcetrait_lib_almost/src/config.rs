@@ -459,6 +459,7 @@ pub struct LibSettingsToml {
     pub use_flash_attn: Option<bool>,
     pub graph: Option<bool>,
     pub graph_bucket_grain: Option<usize>,
+    pub fused_gdn: Option<bool>,
     pub generation: Option<GenerationToml>,
     pub eviction: Option<EvictionToml>,
 }
@@ -475,8 +476,11 @@ pub struct LibSettings {
     pub use_flash_attn: bool,
     pub graph: bool,
     pub graph_bucket_grain: usize,
+    /// The GdnChainFusion decode-step kernel (cuda decode only; the
+    /// cpu path always runs the classic candle chain).
+    pub fused_gdn: bool,
     pub generation: GenerateOptions,
-    /// A3 stage-2-only eviction; None = the exact configuration.
+    /// KvEviction stage-2-only; None = the exact configuration.
     pub eviction: Option<EvictionSettings>,
 }
 
@@ -512,6 +516,7 @@ impl TryFrom<LibSettingsToml> for LibSettings {
                 .graph_bucket_grain
                 .or(base.graph_bucket_grain)
                 .unwrap_or(2048),
+            fused_gdn: user.fused_gdn.or(base.fused_gdn).unwrap_or(true),
             generation: merged_generation(
                 user.generation.unwrap_or_default(),
                 base.generation.unwrap_or_default(),

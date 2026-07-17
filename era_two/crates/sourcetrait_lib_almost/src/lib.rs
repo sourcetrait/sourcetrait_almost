@@ -4,6 +4,8 @@ pub(crate) mod config;
 pub mod consts;
 pub(crate) mod error;
 pub(crate) mod evict;
+#[cfg(feature = "cuda")]
+pub(crate) mod fused;
 pub(crate) mod gdn;
 pub(crate) mod generate;
 #[cfg(feature = "cuda")]
@@ -106,6 +108,8 @@ mod tests {
     mod checkpoint;
     mod config;
     mod evict;
+    #[cfg(feature = "cuda")]
+    mod fused;
     mod gdn;
     mod generate;
     #[cfg(feature = "cuda")]

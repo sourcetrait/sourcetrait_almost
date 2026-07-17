@@ -89,6 +89,7 @@ fn embedded_defaults_carry_the_card_posture() {
     let settings = LibSettings::default();
     assert!(settings.use_flash_attn);
     assert!(!settings.graph);
+    assert!(settings.fused_gdn, "GdnChainFusion defaults on");
     assert_eq!(settings.generation.temperature, Some(0.6));
     assert_eq!(settings.generation.top_p, Some(0.95));
     assert_eq!(settings.generation.seed, 299_792_458);

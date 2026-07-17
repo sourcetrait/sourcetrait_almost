@@ -79,12 +79,20 @@ struct GdnLayer {
     value_width: usize,
     allow_neg_eigval: bool,
     rms_eps: f64,
+    /// GdnChainFusion armed: the decode step rides the fused kernel
+    /// on cuda (the cpu path is always the classic chain).
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    fused_gdn: bool,
     state: candle_core::Tensor,
     conv_tail: candle_core::Tensor,
 }
 
 impl GdnLayer {
-    fn new(config: &OlmoHybridConfig, vb: candle_nn::VarBuilder) -> LibAlmostResult<Self> {
+    fn new(
+        config: &OlmoHybridConfig,
+        fused_gdn: bool,
+        vb: candle_nn::VarBuilder,
+    ) -> LibAlmostResult<Self> {
         let hidden = config.hidden_size;
         let key_dim = config.key_dim();
         let value_dim = config.value_dim();
@@ -138,6 +146,7 @@ impl GdnLayer {
             value_width: value_dim,
             allow_neg_eigval: config.linear_allow_neg_eigval,
             rms_eps: config.rms_norm_eps,
+            fused_gdn,
         })
     }
 
@@ -292,22 +301,63 @@ impl GdnLayer {
         let (q, k, v) = self.split_conv(&conv_out)?;
         let (q, k, v, g, beta) = self.heads_and_gates(q, k, v, x, seq_len)?;
         let y = if seq_len == 1 {
-            let (next_state, y_t) = gdn::recurrent_step(
-                &self.state,
-                &q.squeeze(0)?,
-                &k.squeeze(0)?,
-                &v.squeeze(0)?,
-                &g.exp()?.squeeze(0)?,
-                &beta.squeeze(0)?,
-            )?;
-            self.state.slice_set(&next_state, 0, 0)?;
-            y_t.unsqueeze(0)?
+            self.carried_decode_step(&q, &k, &v, &g, &beta)?
         } else {
             let (out, next_state) = gdn::chunk_rule(&q, &k, &v, &g, &beta, &self.state)?;
             self.state.slice_set(&next_state, 0, 0)?;
             out
         };
         self.finish_mixer(y, gate, seq_len)
+    }
+
+    /// One carried decode step (t == 1): the fused kernel when armed
+    /// on cuda (the state updates in place INSIDE the launch), the
+    /// classic candle chain otherwise. Both return the [1, heads, dv]
+    /// f32 readout.
+    fn carried_decode_step(
+        &mut self,
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        g: &candle_core::Tensor,
+        beta: &candle_core::Tensor,
+    ) -> LibAlmostResult<candle_core::Tensor> {
+        #[cfg(feature = "cuda")]
+        if self.fused_gdn && q.device().is_cuda() {
+            let decay = g.exp()?.reshape((self.num_heads, 1))?;
+            let beta_column = beta.reshape((self.num_heads, 1))?;
+            // cat on a non-zero dim returns a transposed view (the
+            // era-one contiguity lesson); the kernel wants packed rows.
+            let packed = candle_core::Tensor::cat(
+                &[
+                    &q.squeeze(0)?,
+                    &k.squeeze(0)?,
+                    &v.squeeze(0)?,
+                    &decay,
+                    &beta_column,
+                ],
+                1,
+            )?
+            .contiguous()?;
+            let y = candle_core::Tensor::zeros(
+                (self.num_heads, self.head_v_dim),
+                candle_core::DType::F32,
+                q.device(),
+            )?;
+            self.state
+                .inplace_op3(&packed, &y, &fused::GdnFusedStep)?;
+            return Ok(y.unsqueeze(0)?);
+        }
+        let (next_state, y_t) = gdn::recurrent_step(
+            &self.state,
+            &q.squeeze(0)?,
+            &k.squeeze(0)?,
+            &v.squeeze(0)?,
+            &g.exp()?.squeeze(0)?,
+            &beta.squeeze(0)?,
+        )?;
+        self.state.slice_set(&next_state, 0, 0)?;
+        Ok(y_t.unsqueeze(0)?)
     }
 
     /// Zero the carried caches in place (address-stable; see
@@ -921,7 +971,9 @@ impl OlmoHybrid {
         for layer_idx in 0..config.num_hidden_layers {
             let vb_layer = vb_model.pp(format!("layers.{layer_idx}"));
             layers.push(match config.layer_kind(layer_idx) {
-                LayerKind::LinearAttention => Layer::Gdn(GdnLayer::new(config, vb_layer)?),
+                LayerKind::LinearAttention => {
+                    Layer::Gdn(GdnLayer::new(config, settings.fused_gdn, vb_layer)?)
+                }
                 LayerKind::FullAttention => Layer::Attn(AttnLayer::new(
                     config,
                     settings.use_flash_attn,
