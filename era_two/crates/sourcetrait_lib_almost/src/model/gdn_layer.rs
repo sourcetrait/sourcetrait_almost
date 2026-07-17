@@ -28,6 +28,12 @@ pub(crate) struct GdnLayer {
     /// armed.
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     conv_weight_rows: Option<candle_core::Tensor>,
+    /// PrepFusion static rows ([kernel, conv_width + 2 * heads] bf16):
+    /// the conv-weight tap rows with A_log | dt_bias riding the row-0
+    /// pad columns - the prep kernel's per-layer constant operand;
+    /// Some only when fused_prefill is armed.
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    prefill_static: Option<candle_core::Tensor>,
     a_log: candle_core::Tensor,
     dt_bias: candle_core::Tensor,
     o_norm: candle_core::Tensor,
@@ -82,6 +88,24 @@ impl GdnLayer {
         } else {
             None
         };
+        let a_log = vb_attn.get(heads, "A_log")?;
+        let dt_bias = vb_attn.get(heads, "dt_bias")?;
+        let prefill_static = if fused_prefill {
+            let weight_rows = conv_weight.squeeze(1)?.transpose(0, 1)?.contiguous()?;
+            let head_pad = candle_core::Tensor::cat(
+                &[&a_log.reshape((1, heads))?, &dt_bias.reshape((1, heads))?],
+                1,
+            )?;
+            let zero_pad = candle_core::Tensor::zeros(
+                (kernel - 1, 2 * heads),
+                weight_rows.dtype(),
+                &device,
+            )?;
+            let pad_column = candle_core::Tensor::cat(&[&head_pad, &zero_pad], 0)?;
+            Some(candle_core::Tensor::cat(&[&weight_rows, &pad_column], 1)?.contiguous()?)
+        } else {
+            None
+        };
         Ok(Self {
             state: candle_core::Tensor::zeros(
                 (heads, config.linear_key_head_dim, config.linear_value_head_dim),
@@ -108,8 +132,9 @@ impl GdnLayer {
             o_proj: candle_nn::linear_no_bias(value_dim, hidden, vb_attn.pp("o_proj"))?,
             conv_weight,
             conv_weight_rows,
-            a_log: vb_attn.get(heads, "A_log")?,
-            dt_bias: vb_attn.get(heads, "dt_bias")?,
+            a_log,
+            dt_bias,
+            prefill_static,
             o_norm: vb_attn.pp("o_norm").get(config.linear_value_head_dim, "weight")?,
             mlp: Mlp::new(hidden, config.intermediate_size, vb.pp("mlp"))?,
             num_heads: heads,
@@ -314,6 +339,15 @@ impl GdnLayer {
     /// would leave every cached graph reading dead memory.
     fn mixer_carried(&mut self, x: &candle_core::Tensor) -> LibAlmostResult<candle_core::Tensor> {
         let (seq_len, _) = x.dims2()?;
+        #[cfg(feature = "cuda")]
+        if seq_len > 1
+            && self.fused_prefill
+            && x.device().is_cuda()
+            && x.dtype() == candle_core::DType::BF16
+            && self.prefill_static.is_some()
+        {
+            return self.mixer_carried_fused_chunk(x, seq_len);
+        }
         let (conv_in, gate) = self.project_fused(x)?;
         let conv_out = self.conv_carried(&conv_in, seq_len)?;
         let (q, k, v) = self.split_conv(&conv_out)?;
@@ -326,9 +360,50 @@ impl GdnLayer {
         self.finish_mixer(y, gate, seq_len, self.fused_gdn)
     }
 
-    /// One carried multi-token chunk: the PrefillDispatch kernel path
-    /// when armed on cuda, the classic chunked rule otherwise. Both
-    /// advance the persisted state IN PLACE (address-stable).
+    /// The PrepFusion chunk branch: one prep launch (the carried
+    /// conv, l2 norms, and gates written bundle-direct) plus the rule
+    /// kernels and the two cublas gemms replace the classic prep
+    /// chain. The a/b gemvs stay cublas (the accumulation-order
+    /// rule); the carried caches still update IN PLACE via slice_set
+    /// (address-stable). The cpu path, the stateless parity form, and
+    /// decode never come here.
+    #[cfg(feature = "cuda")]
+    fn mixer_carried_fused_chunk(
+        &mut self,
+        x: &candle_core::Tensor,
+        seq_len: usize,
+    ) -> LibAlmostResult<candle_core::Tensor> {
+        let qkvg = self.qkvg_proj.forward(x)?;
+        let conv_width = 2 * self.key_width + self.value_width;
+        let conv_in = qkvg.narrow(1, 0, conv_width)?;
+        let gate = qkvg.narrow(1, conv_width, self.value_width)?.contiguous()?;
+        let a_rows = self.a_proj.forward(x)?;
+        let b_rows = self.b_proj.forward(x)?;
+        let static_rows = self
+            .prefill_static
+            .as_ref()
+            .expect("checked by the dispatch");
+        let (y, next_state, new_tail) = fused_prefill::prep_chunk_rule(
+            fused_prefill::PrepInputs {
+                conv_in: &conv_in,
+                a_rows: &a_rows,
+                b_rows: &b_rows,
+                static_rows,
+                conv_tail: &self.conv_tail,
+                state: &self.state,
+            },
+            (self.head_k_dim as f64).powf(-0.5),
+            self.allow_neg_eigval,
+        )?;
+        self.state.slice_set(&next_state, 0, 0)?;
+        self.conv_tail.slice_set(&new_tail, 0, 0)?;
+        self.finish_mixer(y, gate, seq_len, self.fused_gdn)
+    }
+
+    /// One carried multi-token chunk on the CLASSIC chain (the
+    /// PrefillDispatch kernel family dispatches earlier, in
+    /// mixer_carried; cpu and non-bf16 grades stay here). Advances
+    /// the persisted state IN PLACE (address-stable).
     fn carried_chunk(
         &mut self,
         q: &candle_core::Tensor,
@@ -337,13 +412,6 @@ impl GdnLayer {
         g: &candle_core::Tensor,
         beta: &candle_core::Tensor,
     ) -> LibAlmostResult<candle_core::Tensor> {
-        #[cfg(feature = "cuda")]
-        if self.fused_prefill && q.device().is_cuda() {
-            let (out, next_state) =
-                fused_prefill::chunk_rule_fused(q, k, v, g, beta, &self.state)?;
-            self.state.slice_set(&next_state, 0, 0)?;
-            return Ok(out);
-        }
         let (out, next_state) = gdn::chunk_rule(q, k, v, g, beta, &self.state)?;
         self.state.slice_set(&next_state, 0, 0)?;
         Ok(out)
