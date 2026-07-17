@@ -420,6 +420,8 @@ fn snapshot_gate_chained_drill_evict_graph_cuda() {
             decode_cap: CAP,
             recent: 128,
             sink: 4,
+            score_tail: evict::SCORE_TAIL,
+            score_slice: evict::SCORE_SLICE,
         }),
         ..LibSettings::default()
     };

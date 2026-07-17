@@ -239,8 +239,36 @@ fn eviction_arms_by_decode_cap_with_protection_defaults() {
         Some(EvictionSettings {
             decode_cap: 1024,
             recent: 256,
-            sink: 8
+            sink: 8,
+            score_tail: 64,
+            score_slice: 16,
         })
+    );
+}
+
+#[test]
+fn eviction_score_knobs_default_and_override() {
+    let shell: LibSettingsToml =
+        toml::from_str("[eviction]\ndecode_cap = 2048\n").expect("parses");
+    let settings: LibSettings = shell.try_into().expect("merges");
+    let eviction = settings.eviction.expect("armed");
+    assert_eq!(eviction.score_tail, 64, "the standing SCORE_TAIL default");
+    assert_eq!(eviction.score_slice, 16, "the standing SCORE_SLICE default");
+
+    let shell: LibSettingsToml = toml::from_str(
+        "[eviction]\ndecode_cap = 2048\nscore_tail = 16\nscore_slice = 32\n",
+    )
+    .expect("parses");
+    let settings: LibSettings = shell.try_into().expect("merges");
+    let eviction = settings.eviction.expect("armed");
+    assert_eq!(eviction.score_tail, 16);
+    assert_eq!(eviction.score_slice, 32);
+
+    let shell: LibSettingsToml =
+        toml::from_str("[eviction]\ndecode_cap = 2048\nscore_tail = 0\n").expect("parses");
+    assert!(
+        LibSettings::try_from(shell).is_err(),
+        "a zero observation window is rejected"
     );
 }
 

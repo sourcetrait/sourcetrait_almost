@@ -13,11 +13,13 @@
 use crate::*;
 
 /// Tail queries per prefill-chunk scoring pass (the observation
-/// window).
+/// window) - the DEFAULT; the live value rides
+/// EvictionSettings.score_tail (the RescoreTuning prototyping knob).
 pub(crate) const SCORE_TAIL: usize = 64;
 /// Query rows per scoring matmul (the peak-transient lever - a
 /// full-width f32 chain beside prefill KV breached era-one's peak
-/// contract).
+/// contract) - the DEFAULT; the live value rides
+/// EvictionSettings.score_slice.
 pub(crate) const SCORE_SLICE: usize = 16;
 /// Decode steps past the cap before an overflow re-compaction epoch.
 pub(crate) const OVERFLOW_SLACK: usize = 64;
@@ -87,7 +89,7 @@ pub(crate) fn gather_rows(
 
 /// The last-pass scores: mean attention mass each store row receives
 /// from `tail` query rows (the last rows of a prefill chunk, causally
-/// masked to their own positions), computed f32 in SCORE_SLICE row
+/// masked to their own positions), computed f32 in `slice_rows`-row
 /// slices. q_tail [heads, tail, dim] whose row j sits at absolute
 /// position len - tail + j; k_valid [heads, len, dim]. Returns
 /// [heads, len, 1] f32, slice_set-ready against a score buffer.
@@ -95,6 +97,7 @@ pub(crate) fn last_pass_scores(
     q_tail: &candle_core::Tensor,
     k_valid: &candle_core::Tensor,
     scale: f64,
+    slice_rows: usize,
 ) -> LibAlmostResult<candle_core::Tensor> {
     let (heads, tail, _) = q_tail.dims3()?;
     let len = k_valid.dim(1)?;
@@ -108,7 +111,7 @@ pub(crate) fn last_pass_scores(
     let mut total: Option<candle_core::Tensor> = None;
     let mut row = 0usize;
     while row < tail {
-        let rows = SCORE_SLICE.min(tail - row);
+        let rows = slice_rows.max(1).min(tail - row);
         let scores = ((q_tail.narrow(1, row, rows)?.matmul(&k_t)? * scale)?)
             .to_dtype(candle_core::DType::F32)?;
         // Causal tail mask, arithmetic form: rows at absolute position

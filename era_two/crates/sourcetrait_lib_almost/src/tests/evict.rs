@@ -4,7 +4,14 @@
 #[cfg_attr(not(feature = "cuda"), allow(unused_imports))]
 use crate::*;
 #[cfg_attr(not(feature = "cuda"), allow(unused_imports))]
-use crate::evict::{OVERFLOW_SLACK, gather_rows, keep_indices, last_pass_scores};
+use crate::evict::{
+    OVERFLOW_SLACK,
+    SCORE_SLICE,
+    SCORE_TAIL,
+    gather_rows,
+    keep_indices,
+    last_pass_scores,
+};
 
 #[test]
 fn keep_indices_is_identity_under_the_cap() {
@@ -77,7 +84,7 @@ fn last_pass_scores_masks_causally_and_averages_the_tail() {
         &candle_core::Device::Cpu,
     )
     .expect("k");
-    let scores = last_pass_scores(&q, &k, 1.0).expect("scores");
+    let scores = last_pass_scores(&q, &k, 1.0, SCORE_SLICE).expect("scores");
     assert_eq!(scores.dims(), [1, 4, 1]);
     let host = scores
         .flatten_all()
@@ -102,6 +109,8 @@ fn evict_settings(cap: usize) -> LibSettings {
             decode_cap: cap,
             recent: 128,
             sink: 4,
+            score_tail: SCORE_TAIL,
+            score_slice: SCORE_SLICE,
         }),
         ..LibSettings::default()
     }
@@ -153,6 +162,8 @@ fn evict_gate_epoch_exactness() {
         decode_cap: CAP,
         recent: 128,
         sink: 4,
+        score_tail: SCORE_TAIL,
+        score_slice: SCORE_SLICE,
     };
     let mut model = cuda_model(evict_settings(CAP));
     let prompt: Vec<u32> = (0..1200u32).map(|i| 1000 + i * 3).collect();

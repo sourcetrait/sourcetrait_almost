@@ -388,25 +388,35 @@ impl LibConfig {
 }
 
 /// The [eviction] table of a lib settings file: presence (with
-/// decode_cap) arms A3 stage-2-only attention-KV eviction; absent =
-/// the exact configuration, bit-identical to an eviction-free build.
+/// decode_cap) arms KvEviction stage-2-only attention-KV eviction;
+/// absent = the exact configuration, bit-identical to an
+/// eviction-free build.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvictionToml {
     pub decode_cap: Option<usize>,
     pub recent: Option<usize>,
     pub sink: Option<usize>,
+    pub score_tail: Option<usize>,
+    pub score_slice: Option<usize>,
 }
 
-/// Armed A3 stage-2-only eviction: one post-prefill compaction of
-/// every attention layer's KV to `decode_cap` rows per head (last-pass
-/// ranked, sink prefix + recent suffix protected), then overflow
-/// re-compactions as decode outgrows the cap.
+/// Armed KvEviction stage-2-only eviction: one post-prefill
+/// compaction of every attention layer's KV to `decode_cap` rows per
+/// head (last-pass ranked, sink prefix + recent suffix protected),
+/// then overflow re-compactions as decode outgrows the cap.
+/// score_tail is the per-prefill-chunk observation window (tail
+/// queries per re-score pass; the RescoreTuning prefill-cost lever)
+/// and score_slice the query rows per scoring matmul (the
+/// peak-transient lever) - both riding the settings surface as the
+/// prototyping home while tuning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvictionSettings {
     pub decode_cap: usize,
     pub recent: usize,
     pub sink: usize,
+    pub score_tail: usize,
+    pub score_slice: usize,
 }
 
 /// The era-one v1 protection defaults (recent 512, sink 4).
@@ -434,6 +444,14 @@ fn merged_eviction(
             .or(base.recent)
             .unwrap_or(EVICTION_RECENT_DEFAULT),
         sink: user.sink.or(base.sink).unwrap_or(EVICTION_SINK_DEFAULT),
+        score_tail: user
+            .score_tail
+            .or(base.score_tail)
+            .unwrap_or(evict::SCORE_TAIL),
+        score_slice: user
+            .score_slice
+            .or(base.score_slice)
+            .unwrap_or(evict::SCORE_SLICE),
     };
     if settings.decode_cap <= settings.recent + settings.sink {
         snafu::whatever!(
@@ -441,6 +459,13 @@ fn merged_eviction(
             settings.decode_cap,
             settings.recent,
             settings.sink
+        );
+    }
+    if settings.score_tail == 0 || settings.score_slice == 0 {
+        snafu::whatever!(
+            "eviction score_tail ({}) and score_slice ({}) must be at least 1",
+            settings.score_tail,
+            settings.score_slice
         );
     }
     Ok(Some(settings))

@@ -67,7 +67,7 @@ impl OlmoHybrid {
                 LayerKind::FullAttention => Layer::Attn(AttnLayer::new(
                     config,
                     settings.use_flash_attn,
-                    settings.eviction.is_some(),
+                    settings.eviction.as_ref(),
                     settings.fused_gdn,
                     vb_layer,
                 )?),

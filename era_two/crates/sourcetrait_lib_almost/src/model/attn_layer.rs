@@ -54,6 +54,12 @@ pub(crate) struct AttnLayer {
     parked_graphs: bool,
     /// KvEviction armed (settings.eviction present at construction).
     evict: bool,
+    /// The armed observation window (tail queries per prefill-chunk
+    /// re-score pass); the SCORE_TAIL default when unarmed.
+    score_tail: usize,
+    /// Query rows per scoring matmul (the peak-transient lever); the
+    /// SCORE_SLICE default when unarmed.
+    score_slice: usize,
     /// Last-pass scores beside the KV: [heads, capacity, 1] f32,
     /// reserved/parked in lockstep with the KV buffers (captured
     /// graphs bake its address too).
@@ -72,7 +78,7 @@ impl AttnLayer {
     pub(crate) fn new(
         config: &OlmoHybridConfig,
         use_flash_attn: bool,
-        evict: bool,
+        eviction: Option<&EvictionSettings>,
         fused_gdn: bool,
         vb: candle_nn::VarBuilder,
     ) -> LibAlmostResult<Self> {
@@ -107,7 +113,9 @@ impl AttnLayer {
             kv: None,
             buffers_captured: false,
             parked_graphs: false,
-            evict,
+            evict: eviction.is_some(),
+            score_tail: eviction.map_or(evict::SCORE_TAIL, |settings| settings.score_tail),
+            score_slice: eviction.map_or(evict::SCORE_SLICE, |settings| settings.score_slice),
             scores: None,
             score_zero: None,
             #[cfg(feature = "attn-profile")]
@@ -188,13 +196,13 @@ impl AttnLayer {
         let len = kv.len;
         let scale = (self.head_dim as f64).powf(-0.5);
         let tail = if added > 1 {
-            evict::SCORE_TAIL.min(added)
+            self.score_tail.min(added)
         } else {
             1
         };
         let q_tail = q.narrow(1, added - tail, tail)?;
         let scores_new =
-            evict::last_pass_scores(&q_tail, &kv.k.narrow(1, 0, len)?, scale)?;
+            evict::last_pass_scores(&q_tail, &kv.k.narrow(1, 0, len)?, scale, self.score_slice)?;
         let scores = self
             .scores
             .as_ref()
