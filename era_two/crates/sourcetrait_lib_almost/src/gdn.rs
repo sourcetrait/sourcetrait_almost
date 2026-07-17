@@ -142,7 +142,7 @@ pub(crate) fn recurrent_step(
 
 /// A [size, size] f32 0/1 mask keeping column <= row (with the
 /// diagonal) or column < row (strict).
-fn lower_triangle(
+pub(crate) fn lower_triangle(
     size: usize,
     strict: bool,
     device: &candle_core::Device,

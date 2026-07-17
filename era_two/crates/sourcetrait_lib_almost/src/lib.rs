@@ -6,6 +6,8 @@ pub(crate) mod error;
 pub(crate) mod evict;
 #[cfg(feature = "cuda")]
 pub(crate) mod fused;
+#[cfg(feature = "cuda")]
+pub(crate) mod fused_prefill;
 pub(crate) mod gdn;
 pub(crate) mod generate;
 #[cfg(feature = "cuda")]
@@ -129,6 +131,8 @@ mod tests {
     mod evict;
     #[cfg(feature = "cuda")]
     mod fused;
+    #[cfg(feature = "cuda")]
+    mod fused_prefill;
     mod gdn;
     mod generate;
     #[cfg(feature = "cuda")]

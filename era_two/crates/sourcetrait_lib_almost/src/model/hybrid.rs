@@ -61,9 +61,12 @@ impl OlmoHybrid {
         for layer_idx in 0..config.num_hidden_layers {
             let vb_layer = vb_model.pp(format!("layers.{layer_idx}"));
             layers.push(match config.layer_kind(layer_idx) {
-                LayerKind::LinearAttention => {
-                    Layer::Gdn(GdnLayer::new(config, settings.fused_gdn, vb_layer)?)
-                }
+                LayerKind::LinearAttention => Layer::Gdn(GdnLayer::new(
+                    config,
+                    settings.fused_gdn,
+                    settings.fused_prefill,
+                    vb_layer,
+                )?),
                 LayerKind::FullAttention => Layer::Attn(AttnLayer::new(
                     config,
                     settings.use_flash_attn,

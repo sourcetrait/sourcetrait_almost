@@ -43,6 +43,11 @@ pub(crate) struct GdnLayer {
     /// on cuda (the cpu path is always the classic chain).
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     fused_gdn: bool,
+    /// PrefillDispatch armed: multi-token chunks ride the fused
+    /// prefill kernels on cuda (the cpu path and the stateless
+    /// parity form always run the classic chain).
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    fused_prefill: bool,
     state: candle_core::Tensor,
     conv_tail: candle_core::Tensor,
 }
@@ -51,6 +56,7 @@ impl GdnLayer {
     pub(crate) fn new(
         config: &OlmoHybridConfig,
         fused_gdn: bool,
+        fused_prefill: bool,
         vb: candle_nn::VarBuilder,
     ) -> LibAlmostResult<Self> {
         let hidden = config.hidden_size;
@@ -114,6 +120,7 @@ impl GdnLayer {
             allow_neg_eigval: config.linear_allow_neg_eigval,
             rms_eps: config.rms_norm_eps,
             fused_gdn,
+            fused_prefill,
         })
     }
 
@@ -314,11 +321,32 @@ impl GdnLayer {
         let y = if seq_len == 1 {
             self.carried_decode_step(&q, &k, &v, &g, &beta)?
         } else {
-            let (out, next_state) = gdn::chunk_rule(&q, &k, &v, &g, &beta, &self.state)?;
-            self.state.slice_set(&next_state, 0, 0)?;
-            out
+            self.carried_chunk(&q, &k, &v, &g, &beta)?
         };
         self.finish_mixer(y, gate, seq_len, self.fused_gdn)
+    }
+
+    /// One carried multi-token chunk: the PrefillDispatch kernel path
+    /// when armed on cuda, the classic chunked rule otherwise. Both
+    /// advance the persisted state IN PLACE (address-stable).
+    fn carried_chunk(
+        &mut self,
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        g: &candle_core::Tensor,
+        beta: &candle_core::Tensor,
+    ) -> LibAlmostResult<candle_core::Tensor> {
+        #[cfg(feature = "cuda")]
+        if self.fused_prefill && q.device().is_cuda() {
+            let (out, next_state) =
+                fused_prefill::chunk_rule_fused(q, k, v, g, beta, &self.state)?;
+            self.state.slice_set(&next_state, 0, 0)?;
+            return Ok(out);
+        }
+        let (out, next_state) = gdn::chunk_rule(q, k, v, g, beta, &self.state)?;
+        self.state.slice_set(&next_state, 0, 0)?;
+        Ok(out)
     }
 
     /// One carried decode step (t == 1): the fused kernel when armed

@@ -495,6 +495,7 @@ pub struct LibSettingsToml {
     pub graph: Option<bool>,
     pub graph_bucket_grain: Option<usize>,
     pub fused_gdn: Option<bool>,
+    pub fused_prefill: Option<bool>,
     pub generation: Option<GenerationToml>,
     pub eviction: Option<EvictionToml>,
 }
@@ -514,6 +515,10 @@ pub struct LibSettings {
     /// The GdnChainFusion decode-step kernel (cuda decode only; the
     /// cpu path always runs the classic candle chain).
     pub fused_gdn: bool,
+    /// The PrefillDispatch chunk kernels (cuda multi-token prefill
+    /// chunks only; the cpu path and the stateless parity form always
+    /// run the classic candle chain).
+    pub fused_prefill: bool,
     pub generation: GenerateOptions,
     /// KvEviction stage-2-only; None = the exact configuration.
     pub eviction: Option<EvictionSettings>,
@@ -552,6 +557,10 @@ impl TryFrom<LibSettingsToml> for LibSettings {
                 .or(base.graph_bucket_grain)
                 .unwrap_or(2048),
             fused_gdn: user.fused_gdn.or(base.fused_gdn).unwrap_or(true),
+            fused_prefill: user
+                .fused_prefill
+                .or(base.fused_prefill)
+                .unwrap_or(true),
             generation: merged_generation(
                 user.generation.unwrap_or_default(),
                 base.generation.unwrap_or_default(),
