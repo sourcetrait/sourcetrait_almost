@@ -464,9 +464,10 @@ fn graph_gate_staged_truth_envelope() {
 }
 
 /// The capacity epoch: a decode outrunning the armed width disarms,
-/// retires capture, and finishes on the classic path. The armed
-/// capacity floors at the prefill's KV_RESERVE_STEP grain (1024), so
-/// the crossing needs a 1024+ context.
+/// retires capture, and finishes on the classic path. Under the
+/// ReserveGrainTrim exact reserve the armed capacity is the arm-time
+/// bucket ceiling over prompt + margin, so the crossing fires within
+/// a few hundred decoded tokens at any context length.
 #[test]
 #[ignore = "needs the DPO checkpoint + a cuda card; ~40 s"]
 fn graph_gate_capacity_epoch() {

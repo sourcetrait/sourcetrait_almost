@@ -271,14 +271,22 @@ impl AttnLayer {
         Ok(())
     }
 
-    /// Ensure the KV buffers hold `added` more rows: allocate at the
-    /// next KV_RESERVE_STEP multiple and copy the live prefix once.
+    /// Ensure the KV buffers hold `added` more rows: within the
+    /// standing capacity this is a no-op - an exact ReserveGrainTrim
+    /// pre-reserve is not a grain multiple, so rounding BEFORE the
+    /// capacity check would demand a spurious regrow at the last
+    /// grain boundary under it (mid-final-prefill-chunk, at the
+    /// KV-maxed moment). A genuine grow allocates at the next
+    /// KV_RESERVE_STEP multiple and copies the live prefix once.
     fn reserve(
         &mut self,
         added: usize,
         template: &candle_core::Tensor,
     ) -> LibAlmostResult<()> {
         let needed = self.kv.as_ref().map_or(added, |kv| kv.len + added);
+        if self.kv_capacity() >= needed.max(1) && (!self.evict || self.scores.is_some()) {
+            return Ok(());
+        }
         let capacity = needed.div_ceil(KV_RESERVE_STEP) * KV_RESERVE_STEP;
         self.reserve_capacity(capacity, template.dtype(), template.device())
     }

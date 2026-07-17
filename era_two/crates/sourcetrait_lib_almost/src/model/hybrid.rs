@@ -237,18 +237,18 @@ impl OlmoHybrid {
     }
 
     /// Known-length KV pre-reserve (generate calls this before its
-    /// prefill loop): one allocation at prompt + decode margin,
-    /// KV_RESERVE_STEP-rounded, instead of ~one regrow per reserve
-    /// step of prefill - each regrow holds old+new buffers during
-    /// its copy and frees an odd-sized block into the raw cudaMalloc
-    /// heap (the fragmentation that inflates the 32K peak). A decode
-    /// outrunning the margin regrows coarsely as before.
+    /// prefill loop): one allocation at EXACTLY prompt + decode
+    /// margin, instead of ~one regrow per reserve step of prefill -
+    /// each regrow holds old+new buffers during its copy and frees an
+    /// odd-sized block into the raw cudaMalloc heap (the
+    /// fragmentation that inflates the 32K peak). ReserveGrainTrim:
+    /// with no regrows to amortize, the KV_RESERVE_STEP rounding was
+    /// pure padding (~170-235 MiB at 32K). A decode outrunning the
+    /// margin regrows coarsely as before.
     pub fn reserve_for_generation(&mut self, prompt_tokens: usize) -> LibAlmostResult<()> {
         let device = self.device().clone();
         let dtype = self.embed_tokens.dtype();
-        let capacity = (prompt_tokens + RESERVE_DECODE_MARGIN)
-            .div_ceil(KV_RESERVE_STEP)
-            * KV_RESERVE_STEP;
+        let capacity = prompt_tokens + RESERVE_DECODE_MARGIN;
         for layer in &mut self.layers {
             if let Layer::Attn(attn) = layer {
                 attn.reserve_capacity(capacity, dtype, &device)?;
@@ -420,9 +420,9 @@ impl OlmoHybrid {
         // Overflow epochs bound decode length at cap + slack, so this
         // capacity never regrows classic; a graph arm may pre-grow it
         // once more (pre-capture, a cap-sized copy - trivial).
-        let capacity = (evict.decode_cap + evict::OVERFLOW_SLACK + RESERVE_DECODE_MARGIN)
-            .div_ceil(KV_RESERVE_STEP)
-            * KV_RESERVE_STEP;
+        // ReserveGrainTrim: exact - the grain rounding was pure
+        // padding here too.
+        let capacity = evict.decode_cap + evict::OVERFLOW_SLACK + RESERVE_DECODE_MARGIN;
         let mut sets = keep_sets.into_iter();
         for layer in &mut self.layers {
             if let Layer::Attn(attn) = layer {

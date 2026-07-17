@@ -39,10 +39,7 @@ pub(crate) use std::{
 
 pub(crate) use candle_nn::Module;
 
-pub(crate) use crate::model::attn_layer::{
-    AttnLayer,
-    KV_RESERVE_STEP,
-};
+pub(crate) use crate::model::attn_layer::AttnLayer;
 pub(crate) use crate::model::gdn_layer::GdnLayer;
 pub(crate) use crate::model::mask::{
     causal_mask,
