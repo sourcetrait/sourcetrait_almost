@@ -14,8 +14,11 @@ use crate::*;
 
 /// Tail queries per prefill-chunk scoring pass (the observation
 /// window) - the DEFAULT; the live value rides
-/// EvictionSettings.score_tail (the RescoreTuning prototyping knob).
-pub(crate) const SCORE_TAIL: usize = 64;
+/// EvictionSettings.score_tail (the RescoreTuning knob). 16 is the
+/// adopted value: per-cell identical to the ratchet reference on the
+/// full dual grid at a third of the re-score cost (the 64 carry from
+/// era one is retired; revert via the settings field).
+pub(crate) const SCORE_TAIL: usize = 16;
 /// Query rows per scoring matmul (the peak-transient lever - a
 /// full-width f32 chain beside prefill KV breached era-one's peak
 /// contract) - the DEFAULT; the live value rides
