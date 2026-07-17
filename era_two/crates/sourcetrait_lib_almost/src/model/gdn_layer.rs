@@ -403,6 +403,42 @@ impl GdnLayer {
         Ok(conv_out)
     }
 
+    /// The carried caches as snapshot handles (cheap clones sharing
+    /// storage; the writer serializes them immediately): (state f32
+    /// [heads, dk, dv], conv tail f32 [kernel-1, channels]).
+    pub(crate) fn cache_snapshot(&self) -> (candle_core::Tensor, candle_core::Tensor) {
+        (self.state.clone(), self.conv_tail.clone())
+    }
+
+    /// Overwrite the carried caches from restored tensors, in place
+    /// (address-stable; see mixer_carried). Shapes and the f32
+    /// discipline are validated here - the layer owns its geometry.
+    pub(crate) fn restore_cache(
+        &mut self,
+        state: &candle_core::Tensor,
+        conv_tail: &candle_core::Tensor,
+    ) -> LibAlmostResult<()> {
+        snafu::ensure_whatever!(
+            state.dims() == self.state.dims()
+                && state.dtype() == candle_core::DType::F32,
+            "gdn state restore wants f32 {:?}, got {:?} {:?}",
+            self.state.dims(),
+            state.dtype(),
+            state.dims()
+        );
+        snafu::ensure_whatever!(
+            conv_tail.dims() == self.conv_tail.dims()
+                && conv_tail.dtype() == candle_core::DType::F32,
+            "conv tail restore wants f32 {:?}, got {:?} {:?}",
+            self.conv_tail.dims(),
+            conv_tail.dtype(),
+            conv_tail.dims()
+        );
+        self.state.slice_set(state, 0, 0)?;
+        self.conv_tail.slice_set(conv_tail, 0, 0)?;
+        Ok(())
+    }
+
     /// Zero the carried caches in place (address-stable; see
     /// mixer_carried).
     pub(crate) fn clear_cache(&mut self) -> LibAlmostResult<()> {

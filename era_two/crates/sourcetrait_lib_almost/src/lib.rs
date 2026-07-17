@@ -22,6 +22,7 @@ pub(crate) mod needle;
 pub(crate) mod norms;
 #[cfg(feature = "attn-profile")]
 pub(crate) mod profile;
+pub(crate) mod snapshot;
 pub(crate) mod tokenizer;
 
 #[allow(unused_imports)]
@@ -114,6 +115,10 @@ pub use crate::profile::{
     HeadMasses,
     LayerProfile,
 };
+pub use crate::snapshot::{
+    RestoredContext,
+    snapshot_path,
+};
 pub use crate::tokenizer::{
     load_tokenizer,
     verify_token_map,
@@ -137,5 +142,6 @@ mod tests {
     mod norms;
     #[cfg(feature = "attn-profile")]
     mod profile;
+    mod snapshot;
     mod tokenizer;
 }

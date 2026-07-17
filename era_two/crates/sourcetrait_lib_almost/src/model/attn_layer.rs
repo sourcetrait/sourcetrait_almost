@@ -514,6 +514,41 @@ impl AttnLayer {
         Ok(self.o_proj.forward(&out)?)
     }
 
+    /// Restore the carried KV from snapshot rows [heads, len,
+    /// head_dim]: reserve (park-aware - a restore-forced regrow on a
+    /// captured model parks) and write in place; the live length
+    /// becomes len. Stale rows beyond it stay hidden (reads narrow to
+    /// the live length). Returns len.
+    pub(crate) fn restore_kv(
+        &mut self,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+    ) -> LibAlmostResult<usize> {
+        let (heads, len, head_dim) = k.dims3()?;
+        snafu::ensure_whatever!(
+            heads == self.num_heads && head_dim == self.head_dim,
+            "kv restore wants [{}, len, {}], got {:?}",
+            self.num_heads,
+            self.head_dim,
+            k.dims()
+        );
+        snafu::ensure_whatever!(
+            v.dims() == k.dims() && v.dtype() == k.dtype(),
+            "kv restore k/v disagree: {:?} {:?} vs {:?} {:?}",
+            k.dims(),
+            k.dtype(),
+            v.dims(),
+            v.dtype()
+        );
+        let capacity = len.div_ceil(KV_RESERVE_STEP) * KV_RESERVE_STEP;
+        self.reserve_capacity(capacity, k.dtype(), k.device())?;
+        let kv = self.kv.as_mut().expect("reserved");
+        kv.k.slice_set(k, 1, 0)?;
+        kv.v.slice_set(v, 1, 0)?;
+        kv.len = len;
+        Ok(len)
+    }
+
     /// Length resets; reserved capacity stays (the era-one semantic).
     pub(crate) fn clear_cache(&mut self) {
         if let Some(kv) = &mut self.kv {

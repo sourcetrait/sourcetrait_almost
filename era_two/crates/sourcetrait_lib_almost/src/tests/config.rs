@@ -63,6 +63,26 @@ fn models_dir_defaults_to_the_data_home_and_overrides_by_file() {
 }
 
 #[test]
+fn snapshots_dir_defaults_to_the_cache_home_and_overrides_by_file() {
+    let config = LibConfig::default();
+    assert!(
+        config.snapshots_dir.ends_with("sourcetrait/almost/snapshots"),
+        "embedded default: {:?}",
+        config.snapshots_dir
+    );
+    assert!(config.snapshots_dir.is_absolute(), "expanded at load");
+    let shell: LibConfigToml =
+        toml::from_str("snapshots_dir = \"/mnt/snaps\"\n").expect("parses");
+    let config: LibConfig = shell.try_into().expect("merges");
+    assert_eq!(config.snapshots_dir, PathBuf::from("/mnt/snaps"));
+    let shell: LibConfigToml =
+        toml::from_str("snapshots_dir = \"~/snaps\"\n").expect("parses");
+    let config: LibConfig = shell.try_into().expect("expands");
+    assert!(!config.snapshots_dir.to_string_lossy().contains('~'));
+    assert!(config.snapshots_dir.ends_with("snaps"));
+}
+
+#[test]
 fn path_strings_expand_leading_tilde_and_env_vars() {
     let shell: LibConfigToml =
         toml::from_str("models_dir = \"~/models\"\n").expect("parses");

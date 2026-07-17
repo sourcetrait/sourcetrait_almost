@@ -222,6 +222,113 @@ impl OlmoHybrid {
         self.context_len
     }
 
+    /// PrefixSnapshots: persist every carried cache (GDN state + conv
+    /// tails, attention KV narrowed to the live length) plus the
+    /// consumed-id trail as ONE safetensors file at the resolved
+    /// token; returns the written path. Settings-agnostic - state is
+    /// state (an eviction-compacted store saves as-is; the last-pass
+    /// scores are never persisted). The trail must cover context_len
+    /// (equal in the exact configuration, longer after compaction).
+    pub fn snapshot_caches(
+        &self,
+        snapshots_dir: &Path,
+        token: &str,
+        model_id: &str,
+        context_ids: &[u32],
+    ) -> LibAlmostResult<PathBuf> {
+        snafu::ensure_whatever!(
+            self.context_len > 0,
+            "nothing to snapshot: the carried context is empty"
+        );
+        let path = snapshot_path(snapshots_dir, token)?;
+        let mut tensors = Vec::with_capacity(self.layers.len() * 2 + 1);
+        for (index, layer) in self.layers.iter().enumerate() {
+            match layer {
+                Layer::Gdn(gdn) => {
+                    let (state, conv_tail) = gdn.cache_snapshot();
+                    tensors.push((format!("gdn_state_{index}"), state));
+                    tensors.push((format!("conv_tail_{index}"), conv_tail));
+                }
+                Layer::Attn(attn) => {
+                    let Some(kv) = &attn.kv else {
+                        snafu::whatever!(
+                            "snapshot reached unallocated KV buffers (layer {index})"
+                        );
+                    };
+                    snafu::ensure_whatever!(
+                        kv.len == self.context_len,
+                        "attention KV length {} does not match the context length {} (layer {index})",
+                        kv.len,
+                        self.context_len
+                    );
+                    tensors.push((
+                        format!("attn_k_{index}"),
+                        kv.k.narrow(1, 0, kv.len)?.contiguous()?,
+                    ));
+                    tensors.push((
+                        format!("attn_v_{index}"),
+                        kv.v.narrow(1, 0, kv.len)?.contiguous()?,
+                    ));
+                }
+            }
+        }
+        snapshot::write_snapshot(&path, tensors, model_id, self.context_len, context_ids)?;
+        Ok(path)
+    }
+
+    /// PrefixSnapshots: load a saved context into the carried caches
+    /// at the resolved token. Format validation (version, model id,
+    /// trail) rides the read; layer geometry and the model dtype
+    /// validate here; writes land in place (GDN) or through the
+    /// park-aware reserve (attention KV). An armed graph stage
+    /// disarms (a restore is a clear-class epoch; the next arm
+    /// revalidates).
+    pub fn restore_caches(
+        &mut self,
+        snapshots_dir: &Path,
+        token: &str,
+        expected_model_id: &str,
+    ) -> LibAlmostResult<RestoredContext> {
+        let path = snapshot_path(snapshots_dir, token)?;
+        let device = self.device().clone();
+        let dtype = self.embed_tokens.dtype();
+        let file = snapshot::read_snapshot(&path, expected_model_id, &device)?;
+        for (index, layer) in self.layers.iter_mut().enumerate() {
+            match layer {
+                Layer::Gdn(gdn) => {
+                    let state = file.tensor(&format!("gdn_state_{index}"))?;
+                    let conv_tail = file.tensor(&format!("conv_tail_{index}"))?;
+                    gdn.restore_cache(state, conv_tail)?;
+                }
+                Layer::Attn(attn) => {
+                    let k = file.tensor(&format!("attn_k_{index}"))?;
+                    let v = file.tensor(&format!("attn_v_{index}"))?;
+                    snafu::ensure_whatever!(
+                        k.dtype() == dtype,
+                        "snapshot KV dtype {:?} does not match the model dtype {dtype:?} (layer {index})",
+                        k.dtype()
+                    );
+                    let len = attn.restore_kv(k, v)?;
+                    snafu::ensure_whatever!(
+                        len == file.context_len,
+                        "snapshot KV length {len} does not match its context length {} (layer {index})",
+                        file.context_len
+                    );
+                }
+            }
+        }
+        self.context_len = file.context_len;
+        #[cfg(feature = "cuda")]
+        if let Some(stage) = &mut self.graph_stage {
+            stage.armed = false;
+        }
+        self.contain_parked_grows();
+        Ok(RestoredContext {
+            context_len: file.context_len,
+            context_ids: file.context_ids,
+        })
+    }
+
     /// KvEviction keep-sets from the live last-pass scores, one per
     /// attention layer (host-side ranking; per-head sets, all
     /// decode_cap long).

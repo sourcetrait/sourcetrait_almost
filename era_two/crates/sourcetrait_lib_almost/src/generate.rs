@@ -85,6 +85,12 @@ pub struct GenerationReport {
     pub decode_seconds: f64,
     /// Detokenizer tail not yet emitted through the steps.
     pub rest: String,
+    /// The consumed-id trail: prompt ids + consumed decode ids =
+    /// exactly the cache contents (what a snapshot save wants). A
+    /// stop-token end is transcript-complete (the stop is sampled,
+    /// never consumed); a sample_len end leaves the final emitted
+    /// token out of the KV.
+    pub context_ids: Vec<u32>,
 }
 
 /// The pull-based generation iterator, borrowing the model (whose
@@ -96,6 +102,9 @@ pub struct Generation<'a> {
     stop_ids: Vec<u32>,
     ignore_stops: bool,
     generated_ids: Vec<u32>,
+    /// The consumed-id trail (prompt + consumed decode ids); grows in
+    /// lockstep with the caches.
+    context_ids: Vec<u32>,
     emitted_bytes: usize,
     pending_id: Option<u32>,
     sample_len: usize,
@@ -140,6 +149,7 @@ impl OlmoHybrid {
             stop_ids: resolve_stop_ids(tokenizer),
             ignore_stops: options.ignore_stops,
             generated_ids: Vec::new(),
+            context_ids: prompt_ids.clone(),
             emitted_bytes: 0,
             pending_id: None,
             sample_len: options.sample_len,
@@ -172,8 +182,8 @@ impl OlmoHybrid {
             start += len;
         }
         let last_logits = last_logits.expect("non-empty prompt");
-        // A3: the one-shot post-prefill compaction precedes graph
-        // arming, so graphs capture against the compacted store.
+        // KvEviction: the one-shot post-prefill compaction precedes
+        // graph arming, so graphs capture against the compacted store.
         if let Some(evict) = generation.model.settings().eviction.clone() {
             generation.model.evict_post_prefill(&evict)?;
         }
@@ -238,9 +248,9 @@ impl Generation<'_> {
             self.finish_reason = Some(FinishReason::SampleLen);
             return Ok(Some(GenerationStep { token_id, chunk }));
         }
-        // A3 overflow epoch: decode outgrew the cap by the slack -
-        // re-compact between steps (uncaptured host work; an armed
-        // graph keeps replaying at the unchanged bucket).
+        // KvEviction overflow epoch: decode outgrew the cap by the
+        // slack - re-compact between steps (uncaptured host work; an
+        // armed graph keeps replaying at the unchanged bucket).
         if let Some(evict) = self.model.settings().eviction.clone()
             && self.model.context_len() >= evict.decode_cap + evict::OVERFLOW_SLACK
         {
@@ -262,6 +272,9 @@ impl Generation<'_> {
                 candle_core::Tensor::from_vec(vec![token_id], 1, self.model.device())?;
             self.model.forward_chunk(&step_ids)?
         };
+        // The token is consumed into the caches now - the trail
+        // advances in lockstep.
+        self.context_ids.push(token_id);
         self.pending_id = Some(self.sample(&logits)?);
         Ok(Some(GenerationStep { token_id, chunk }))
     }
@@ -286,6 +299,7 @@ impl Generation<'_> {
             prefill_seconds: self.prefill_seconds,
             decode_seconds,
             rest,
+            context_ids: self.context_ids,
         }
     }
 }

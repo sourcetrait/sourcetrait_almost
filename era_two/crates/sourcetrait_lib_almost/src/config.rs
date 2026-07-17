@@ -46,7 +46,7 @@ fn xdg_or_env(name: &str) -> LibAlmostResult<String> {
 /// Expand a path STRING's leading `~` (HOME) or `$VAR` segment so
 /// config files carry portable strings; other paths pass through
 /// literally.
-fn expand_path(raw: &str) -> LibAlmostResult<PathBuf> {
+pub(crate) fn expand_path(raw: &str) -> LibAlmostResult<PathBuf> {
     if let Some(rest) = raw.strip_prefix("~") {
         let Ok(home) = env::var("HOME") else {
             snafu::whatever!("HOME is not set for ~ expansion");
@@ -74,8 +74,9 @@ fn suite_config_root() -> LibAlmostResult<PathBuf> {
 }
 
 /// A -c/-s token is a profile NAME when it is a pure snake; anything
-/// else is a filesystem path.
-fn is_profile_name(token: &Path) -> bool {
+/// else is a filesystem path (snapshot tokens share the same snake
+/// rule).
+pub(crate) fn is_profile_name(token: &Path) -> bool {
     let Some(text) = token.to_str() else {
         return false;
     };
@@ -270,24 +271,29 @@ impl SettingsProfile {
 }
 
 /// The lib component's config file shape (TOML format layer).
-/// models_dir is a STRING so files stay portable - a leading `~` or
-/// `$VAR` expands at load (the XDG family with spec fallbacks).
+/// models_dir/snapshots_dir are STRINGS so files stay portable - a
+/// leading `~` or `$VAR` expands at load (the XDG family with spec
+/// fallbacks).
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LibConfigToml {
     pub model: Option<String>,
     pub models_dir: Option<String>,
+    pub snapshots_dir: Option<String>,
 }
 
 /// The lib component's GENERAL OPERATION - the stable choices: the
 /// checkpoint as an author-qualified coordinate (`author/name`,
-/// joined beneath models_dir) and where models live (models_dir
-/// defaults to the XDG data-home models root). Nuance and tweaks
-/// (flash, graphs, the generation posture) are LibSettings.
+/// joined beneath models_dir), where models live (models_dir defaults
+/// to the XDG data-home models root), and where snapshots live
+/// (snapshots_dir defaults to the XDG cache-home snapshots root -
+/// snapshots are regenerable). Nuance and tweaks (flash, graphs, the
+/// generation posture) are LibSettings.
 #[derive(Debug, Clone)]
 pub struct LibConfig {
     pub model: String,
     pub models_dir: PathBuf,
+    pub snapshots_dir: PathBuf,
 }
 
 impl TryFrom<LibConfigToml> for LibConfig {
@@ -298,12 +304,16 @@ impl TryFrom<LibConfigToml> for LibConfig {
         let Some(models_dir_raw) = user.models_dir.or(base.models_dir) else {
             snafu::whatever!("the embedded defaults carry no models_dir");
         };
+        let Some(snapshots_dir_raw) = user.snapshots_dir.or(base.snapshots_dir) else {
+            snafu::whatever!("the embedded defaults carry no snapshots_dir");
+        };
         let Some(model) = user.model.or(base.model) else {
             snafu::whatever!("the embedded defaults carry no model coordinate");
         };
         Ok(Self {
             model,
             models_dir: expand_path(&models_dir_raw)?,
+            snapshots_dir: expand_path(&snapshots_dir_raw)?,
         })
     }
 }
