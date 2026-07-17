@@ -297,3 +297,232 @@ fn snapshot_gate_roundtrip_cuda_bf16() {
         candle_core::DType::BF16,
     );
 }
+
+/// The ContinueSurface exactness gate, cpu f32 greedy: a chained
+/// save/fresh-restore/generate_from continuation produces BYTE-EQUAL
+/// ids to one monolithic raw prefill of the identical transcript,
+/// tokenization seam included (the chat specials are hard BPE
+/// boundaries - era-one proven, re-gated fresh here).
+#[test]
+#[ignore = "needs the DPO checkpoint; ~3-4 min cpu"]
+fn snapshot_gate_chained_vs_monolithic_cpu_f32() {
+    const TURN_BUDGET: usize = 24;
+    let root = temp_root("chained_mono");
+    let dir = model_dir(consts::DPO_MODEL_NAME).expect("dpo dir");
+    let config = load_config(&dir).expect("config");
+    let tokenizer = load_tokenizer(&dir).expect("tokenizer");
+    let device = candle_core::Device::Cpu;
+    let weights = mmap_weights(&dir, candle_core::DType::F32, &device).expect("mmap");
+    let mut model = OlmoHybrid::new(&config, LibSettings::default(), weights).expect("model");
+
+    // Turn 1 (chat): run to the natural stop so the saved context is
+    // transcript-complete.
+    let options = GenerateOptions::greedy(TURN_BUDGET);
+    let mut generation = model
+        .generate(&tokenizer, "What is the capital of France?", &options)
+        .expect("turn 1");
+    let mut turn1_text = String::new();
+    for step in generation.by_ref() {
+        turn1_text.push_str(&step.expect("step").chunk);
+    }
+    let report1 = generation.finish();
+    turn1_text.push_str(&report1.rest);
+    assert_eq!(
+        report1.finish_reason,
+        Some(FinishReason::StopToken),
+        "the chained gate wants a transcript-complete turn"
+    );
+    model
+        .snapshot_caches(&root, "turn1", "gate-model", &report1.context_ids)
+        .expect("save");
+    drop(model);
+
+    // Turn 2, chained: restore on a fresh model, continue as a chat
+    // turn.
+    let turn2 = "And of Italy?";
+    let weights = mmap_weights(&dir, candle_core::DType::F32, &device).expect("mmap");
+    let mut chained = OlmoHybrid::new(&config, LibSettings::default(), weights).expect("model");
+    let restored = chained
+        .restore_caches(&root, "turn1", "gate-model")
+        .expect("restore");
+    let mut generation = chained
+        .generate_from(&tokenizer, &restored, turn2, &options)
+        .expect("turn 2 chained");
+    let mut chained_ids = Vec::new();
+    for step in generation.by_ref() {
+        chained_ids.push(step.expect("step").token_id);
+    }
+    let report2 = generation.finish();
+    assert!(
+        report2.context_ids.starts_with(&restored.context_ids),
+        "the chained trail extends the restored trail"
+    );
+    drop(chained);
+
+    // The monolithic leg: ONE raw prefill of the identical transcript
+    // (turn-1 render + turn-1 text + the continuation render).
+    let transcript = format!(
+        "{}{}{}",
+        chat_wrap("What is the capital of France?"),
+        turn1_text,
+        chat_continue(turn2),
+    );
+    let weights = mmap_weights(&dir, candle_core::DType::F32, &device).expect("mmap");
+    let mut mono = OlmoHybrid::new(&config, LibSettings::default(), weights).expect("model");
+    let raw = GenerateOptions {
+        chat: false,
+        ..options
+    };
+    let mut generation = mono
+        .generate(&tokenizer, &transcript, &raw)
+        .expect("monolithic");
+    let mut mono_ids = Vec::new();
+    for step in generation.by_ref() {
+        mono_ids.push(step.expect("step").token_id);
+    }
+    let mono_report = generation.finish();
+
+    assert_eq!(
+        chained_ids, mono_ids,
+        "chained-vs-monolithic must be byte-equal at f32 (chained text: {:?})",
+        report2.rest
+    );
+    // The id seam: the monolithic transcript re-encodes to exactly
+    // the chained trail prefix (the hard-BPE-boundary property).
+    assert_eq!(
+        mono_report.context_ids[..restored.context_ids.len()],
+        restored.context_ids[..],
+        "the transcript re-encoding matches the chained trail"
+    );
+    fs::remove_dir_all(&root).expect("cleanup");
+}
+
+/// The gpu chained drill under evict + graph: save an
+/// eviction-compacted context, restore on a fresh model, continue
+/// across overflow epochs (store cap held), then save/restore again
+/// and continue with a LONG suffix - the reserve regrow on captured
+/// buffers parks them, capture retires, and the run completes on the
+/// staged-uncaptured path. Prints the save/restore timing row.
+#[test]
+#[cfg(feature = "cuda")]
+#[ignore = "needs the DPO checkpoint + a cuda card; ~2 min"]
+fn snapshot_gate_chained_drill_evict_graph_cuda() {
+    const CAP: usize = 512;
+    let root = temp_root("chained_drill");
+    let dir = model_dir(consts::DPO_MODEL_NAME).expect("dpo dir");
+    let config = load_config(&dir).expect("config");
+    let tokenizer = load_tokenizer(&dir).expect("tokenizer");
+    let device = candle_core::Device::new_cuda(0).expect("cuda");
+    let settings = LibSettings {
+        graph: true,
+        graph_bucket_grain: 128,
+        eviction: Some(EvictionSettings {
+            decode_cap: CAP,
+            recent: 128,
+            sink: 4,
+        }),
+        ..LibSettings::default()
+    };
+    let options = GenerateOptions {
+        temperature: None,
+        top_p: None,
+        sample_len: 48,
+        chat: false,
+        ignore_stops: true,
+        ..GenerateOptions::default()
+    };
+
+    // Turn 1: a compacting prompt (> cap), forced decode, save.
+    let weights = mmap_weights(&dir, candle_core::DType::BF16, &device).expect("mmap");
+    let mut model = OlmoHybrid::new(&config, settings.clone(), weights).expect("model");
+    let prompt = "the cat sat on the mat ".repeat(160);
+    let mut generation = model.generate(&tokenizer, &prompt, &options).expect("turn 1");
+    for step in generation.by_ref() {
+        step.expect("step");
+    }
+    let report1 = generation.finish();
+    assert!(report1.prompt_token_count > CAP, "compacting prompt");
+    let timer = std::time::Instant::now();
+    model
+        .snapshot_caches(&root, "drill", "gate-model", &report1.context_ids)
+        .expect("save");
+    let save_seconds = timer.elapsed().as_secs_f64();
+    assert!(
+        model.context_len() < CAP + evict::OVERFLOW_SLACK + 1,
+        "cap held at save"
+    );
+    assert!(
+        report1.context_ids.len() > model.context_len(),
+        "the trail outruns the compacted store"
+    );
+    drop(model);
+    // A captured-against model dropped mid-process leaves a recorded
+    // driver error behind (the captured-buffer free law; its parked
+    // buffers leak, bounded) - DRAIN it before the next load or the
+    // fresh build's first fallible call delivers
+    // CUDA_ERROR_INVALID_VALUE.
+    let _ = device.synchronize();
+
+    // Turn 2: restore on a fresh evict+graph model, continue across
+    // overflow epochs.
+    let weights = mmap_weights(&dir, candle_core::DType::BF16, &device).expect("mmap");
+    let mut fresh = OlmoHybrid::new(&config, settings, weights).expect("fresh model");
+    let timer = std::time::Instant::now();
+    let restored = fresh
+        .restore_caches(&root, "drill", "gate-model")
+        .expect("restore");
+    let restore_seconds = timer.elapsed().as_secs_f64();
+    println!(
+        "snapshot timing row: save {save_seconds:.2}s, restore {restore_seconds:.2}s \
+         ({} store rows, {} trail ids)",
+        restored.context_len,
+        restored.context_ids.len()
+    );
+    let continue_options = GenerateOptions {
+        sample_len: 200,
+        ..options
+    };
+    let mut generation = fresh
+        .generate_from(&tokenizer, &restored, " the dog sat on the log ", &continue_options)
+        .expect("turn 2");
+    for step in generation.by_ref() {
+        step.expect("step");
+    }
+    let report2 = generation.finish();
+    assert_eq!(report2.generated_token_count, 200, "forced decode length");
+    assert!(
+        fresh.context_len() < CAP + evict::OVERFLOW_SLACK + 1,
+        "cap held across the epochs"
+    );
+    assert!(
+        report2.context_ids.len() > restored.context_ids.len(),
+        "the trail kept growing"
+    );
+
+    // Turn 3: save/restore on the SAME (captured) model, then a LONG
+    // suffix forces a capacity regrow - park containment retires
+    // capture and the run completes staged-uncaptured.
+    fresh
+        .snapshot_caches(&root, "drill2", "gate-model", &report2.context_ids)
+        .expect("second save");
+    let restored2 = fresh
+        .restore_caches(&root, "drill2", "gate-model")
+        .expect("restore onto the captured model");
+    let long_suffix = "the fox ran over the hill and ".repeat(120);
+    let mut generation = fresh
+        .generate_from(&tokenizer, &restored2, &long_suffix, &continue_options)
+        .expect("turn 3");
+    for step in generation.by_ref() {
+        step.expect("step");
+    }
+    let report3 = generation.finish();
+    assert_eq!(
+        report3.generated_token_count, 200,
+        "the post-park run completes"
+    );
+    assert!(
+        fresh.context_len() < CAP + evict::OVERFLOW_SLACK + 1,
+        "cap held after the park"
+    );
+    fs::remove_dir_all(&root).expect("cleanup");
+}

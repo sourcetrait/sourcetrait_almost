@@ -130,6 +130,53 @@ impl OlmoHybrid {
         } else {
             prompt.to_string()
         };
+        self.start_generation(tokenizer, &rendered, Vec::new(), options)
+    }
+
+    /// PrefixSnapshots ContinueSurface: continue a RESTORED context.
+    /// The suffix renders as the next chat turn (chat_continue: close
+    /// the open assistant turn, user turn, assistant opener) unless
+    /// options.chat is false (verbatim suffix - the parity/battery
+    /// rig). It prefills chunked AT THE RESTORED OFFSET, then the
+    /// normal post-prefill sequence runs (KvEviction compaction when
+    /// restored + suffix exceeds the cap - the whole-store re-score
+    /// rebuilt the scores during the suffix prefill - and the graph
+    /// arm). The same Generation iterator comes back; its trail is
+    /// seeded restored.context_ids + suffix.
+    pub fn generate_from<'a>(
+        &'a mut self,
+        tokenizer: &'a tokenizers::Tokenizer,
+        restored: &RestoredContext,
+        suffix: &str,
+        options: &GenerateOptions,
+    ) -> LibAlmostResult<Generation<'a>> {
+        snafu::ensure_whatever!(
+            self.context_len() == restored.context_len && restored.context_len > 0,
+            "the live cache ({}) does not hold the restored context ({})",
+            self.context_len(),
+            restored.context_len
+        );
+        let rendered = if options.chat {
+            chat_continue(suffix)
+        } else {
+            suffix.to_string()
+        };
+        self.start_generation(tokenizer, &rendered, restored.context_ids.clone(), options)
+    }
+
+    /// The shared generation core: encode `rendered`, prefill it
+    /// chunked at the CURRENT offset (zero for a fresh generate, the
+    /// restored length for a continuation), run the post-prefill
+    /// sequence, and sample the first token. `carried_trail` seeds
+    /// the consumed-id trail (the restored trail for continuations,
+    /// empty for fresh).
+    fn start_generation<'a>(
+        &'a mut self,
+        tokenizer: &'a tokenizers::Tokenizer,
+        rendered: &str,
+        carried_trail: Vec<u32>,
+        options: &GenerateOptions,
+    ) -> LibAlmostResult<Generation<'a>> {
         let encoding = match tokenizer.encode(rendered, false) {
             Ok(encoding) => encoding,
             Err(e) => snafu::whatever!("prompt encode failed: {e}"),
@@ -144,12 +191,14 @@ impl OlmoHybrid {
             (Some(temperature), Some(p)) => r::sampling::Sampling::TopP { p, temperature },
             (Some(temperature), None) => r::sampling::Sampling::All { temperature },
         };
+        let mut context_ids = carried_trail;
+        context_ids.extend_from_slice(&prompt_ids);
         let mut generation = Generation {
             processor: r::sampling::LogitsProcessor::from_sampling(options.seed, sampling),
             stop_ids: resolve_stop_ids(tokenizer),
             ignore_stops: options.ignore_stops,
             generated_ids: Vec::new(),
-            context_ids: prompt_ids.clone(),
+            context_ids,
             emitted_bytes: 0,
             pending_id: None,
             sample_len: options.sample_len,
@@ -164,10 +213,12 @@ impl OlmoHybrid {
 
         let prefill_started = std::time::Instant::now();
         // The known-length pre-reserve: the whole run's KV capacity
-        // in one allocation, ahead of the first chunk.
+        // in one allocation, ahead of the first chunk (the carried
+        // context included on a continuation).
+        let context_before = generation.model.context_len();
         generation
             .model
-            .reserve_for_generation(prompt_ids.len())?;
+            .reserve_for_generation(context_before + prompt_ids.len())?;
         let mut last_logits = None;
         let mut start = 0;
         while start < prompt_ids.len() {
@@ -190,7 +241,8 @@ impl OlmoHybrid {
         // Arm the staged graph decode after prefill (settings.graph;
         // cuda builds only - Model::new already rejected the rest).
         if generation.model.settings().graph {
-            let expected_total = generation.prompt_token_count + generation.sample_len;
+            let expected_total =
+                context_before + generation.prompt_token_count + generation.sample_len;
             generation.model.arm_graph_decode(expected_total)?;
         }
         generation.pending_id = Some(generation.sample(&last_logits)?);
