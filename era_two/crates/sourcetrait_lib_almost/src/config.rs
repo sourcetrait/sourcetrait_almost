@@ -377,6 +377,65 @@ impl LibConfig {
     }
 }
 
+/// The [eviction] table of a lib settings file: presence (with
+/// decode_cap) arms A3 stage-2-only attention-KV eviction; absent =
+/// the exact configuration, bit-identical to an eviction-free build.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvictionToml {
+    pub decode_cap: Option<usize>,
+    pub recent: Option<usize>,
+    pub sink: Option<usize>,
+}
+
+/// Armed A3 stage-2-only eviction: one post-prefill compaction of
+/// every attention layer's KV to `decode_cap` rows per head (last-pass
+/// ranked, sink prefix + recent suffix protected), then overflow
+/// re-compactions as decode outgrows the cap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvictionSettings {
+    pub decode_cap: usize,
+    pub recent: usize,
+    pub sink: usize,
+}
+
+/// The era-one v1 protection defaults (recent 512, sink 4).
+const EVICTION_RECENT_DEFAULT: usize = 512;
+const EVICTION_SINK_DEFAULT: usize = 4;
+
+/// Merge + validate the [eviction] table: a table without decode_cap
+/// is an error (stage-2-only surface - the cap IS the arm), and the
+/// cap must clear the protected rows.
+fn merged_eviction(
+    user: Option<EvictionToml>,
+    base: Option<EvictionToml>,
+) -> LibAlmostResult<Option<EvictionSettings>> {
+    let (user, base) = match (user, base) {
+        (None, None) => return Ok(None),
+        (user, base) => (user.unwrap_or_default(), base.unwrap_or_default()),
+    };
+    let Some(decode_cap) = user.decode_cap.or(base.decode_cap) else {
+        snafu::whatever!("[eviction] needs decode_cap (stage-2-only: the cap is the arm)");
+    };
+    let settings = EvictionSettings {
+        decode_cap,
+        recent: user
+            .recent
+            .or(base.recent)
+            .unwrap_or(EVICTION_RECENT_DEFAULT),
+        sink: user.sink.or(base.sink).unwrap_or(EVICTION_SINK_DEFAULT),
+    };
+    if settings.decode_cap <= settings.recent + settings.sink {
+        snafu::whatever!(
+            "eviction decode_cap {} must exceed recent {} + sink {}",
+            settings.decode_cap,
+            settings.recent,
+            settings.sink
+        );
+    }
+    Ok(Some(settings))
+}
+
 /// The [generation] table of a lib settings file; every field
 /// optional (absent fields fall through the embedded base to the
 /// code defaults). greedy = true forces argmax by zeroing
@@ -401,6 +460,7 @@ pub struct LibSettingsToml {
     pub graph: Option<bool>,
     pub graph_bucket_grain: Option<usize>,
     pub generation: Option<GenerationToml>,
+    pub eviction: Option<EvictionToml>,
 }
 
 /// The lib component's NUANCE - the execution and posture tweaks.
@@ -416,6 +476,8 @@ pub struct LibSettings {
     pub graph: bool,
     pub graph_bucket_grain: usize,
     pub generation: GenerateOptions,
+    /// A3 stage-2-only eviction; None = the exact configuration.
+    pub eviction: Option<EvictionSettings>,
 }
 
 /// Overlay chain per field: the user file, then the embedded base,
@@ -454,6 +516,7 @@ impl TryFrom<LibSettingsToml> for LibSettings {
                 user.generation.unwrap_or_default(),
                 base.generation.unwrap_or_default(),
             ),
+            eviction: merged_eviction(user.eviction, base.eviction)?,
         })
     }
 }

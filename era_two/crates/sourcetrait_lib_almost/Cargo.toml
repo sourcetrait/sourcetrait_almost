@@ -11,6 +11,7 @@ categories = []
 keywords = ["sourcetrait", "almost", "lib"]
 
 [features]
+attn-profile = []
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "dep:cudarc", "dep:half"]
 flash-attn = ["cuda", "dep:candle-flash-attn"]
 

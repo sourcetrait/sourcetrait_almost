@@ -3,13 +3,17 @@ pub(crate) mod checkpoint;
 pub(crate) mod config;
 pub mod consts;
 pub(crate) mod error;
+pub(crate) mod evict;
 pub(crate) mod gdn;
 pub(crate) mod generate;
 #[cfg(feature = "cuda")]
 pub(crate) mod graph;
 pub(crate) mod load;
 pub(crate) mod model;
+pub(crate) mod needle;
 pub(crate) mod norms;
+#[cfg(feature = "attn-profile")]
+pub(crate) mod profile;
 pub(crate) mod tokenizer;
 
 #[allow(unused_imports)]
@@ -53,6 +57,8 @@ pub use crate::checkpoint::{
 };
 pub use crate::config::{
     ConfigProfile,
+    EvictionSettings,
+    EvictionToml,
     GenerationToml,
     LibConfig,
     LibConfigToml,
@@ -77,6 +83,18 @@ pub use crate::generate::{
     GenerationStep,
 };
 pub use crate::model::OlmoHybrid;
+pub use crate::needle::{
+    NeedleCellResult,
+    NeedleKey,
+    NeedleMode,
+    NeedleSpec,
+    run_needle_cells,
+};
+#[cfg(feature = "attn-profile")]
+pub use crate::profile::{
+    HeadMasses,
+    LayerProfile,
+};
 pub use crate::tokenizer::{
     load_tokenizer,
     verify_token_map,
@@ -87,12 +105,16 @@ mod tests {
     mod chat;
     mod checkpoint;
     mod config;
+    mod evict;
     mod gdn;
     mod generate;
     #[cfg(feature = "cuda")]
     mod graph;
     mod load;
     mod model;
+    mod needle;
     mod norms;
+    #[cfg(feature = "attn-profile")]
+    mod profile;
     mod tokenizer;
 }

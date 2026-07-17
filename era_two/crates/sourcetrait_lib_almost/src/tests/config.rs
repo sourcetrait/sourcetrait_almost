@@ -200,6 +200,51 @@ fn named_profiles_load_their_component_file() {
 }
 
 #[test]
+fn eviction_arms_by_decode_cap_with_protection_defaults() {
+    let shell: LibSettingsToml =
+        toml::from_str("[eviction]\ndecode_cap = 2048\n").expect("parses");
+    let settings: LibSettings = shell.try_into().expect("merges");
+    let eviction = settings.eviction.expect("armed");
+    assert_eq!(eviction.decode_cap, 2048);
+    assert_eq!(eviction.recent, 512, "the era-one v1 default");
+    assert_eq!(eviction.sink, 4, "the era-one v1 default");
+
+    let shell: LibSettingsToml =
+        toml::from_str("[eviction]\ndecode_cap = 1024\nrecent = 256\nsink = 8\n")
+            .expect("parses");
+    let settings: LibSettings = shell.try_into().expect("merges");
+    assert_eq!(
+        settings.eviction,
+        Some(EvictionSettings {
+            decode_cap: 1024,
+            recent: 256,
+            sink: 8
+        })
+    );
+}
+
+#[test]
+fn eviction_rejects_capless_tables_and_swallowed_caps() {
+    let shell: LibSettingsToml = toml::from_str("[eviction]\nrecent = 256\n").expect("parses");
+    assert!(LibSettings::try_from(shell).is_err(), "no decode_cap");
+    let shell: LibSettingsToml =
+        toml::from_str("[eviction]\ndecode_cap = 512\nrecent = 512\n").expect("parses");
+    assert!(
+        LibSettings::try_from(shell).is_err(),
+        "cap must exceed recent + sink"
+    );
+    assert!(
+        toml::from_str::<LibSettingsToml>("[eviction]\ndecodecap = 1\n").is_err(),
+        "unknown eviction keys are rejected"
+    );
+}
+
+#[test]
+fn embedded_defaults_stay_eviction_free() {
+    assert!(LibSettings::default().eviction.is_none());
+}
+
+#[test]
 fn path_tokens_load_the_exact_file_and_error_when_absent() {
     let root = temp_root("path_tokens");
     let file = root.join("one_off.toml");

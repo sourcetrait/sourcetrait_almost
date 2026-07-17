@@ -136,12 +136,15 @@ fn d6_bench_rows_cuda() {
     let config = load_config(&dir).expect("config");
     let device = candle_core::Device::new_cuda(0).expect("cuda");
     let weights = mmap_weights(&dir, candle_core::DType::BF16, &device).expect("mmap");
-    let settings = match env::var("ALMOST_BENCH_GRAPH").as_deref() {
-        Ok("1") => LibSettings {
-            graph: true,
-            ..LibSettings::default()
+    let settings = match env::var("ALMOST_BENCH_SETTINGS") {
+        Ok(token) => LibSettings::load(Some(&token)).expect("bench settings token"),
+        Err(_) => match env::var("ALMOST_BENCH_GRAPH").as_deref() {
+            Ok("1") => LibSettings {
+                graph: true,
+                ..LibSettings::default()
+            },
+            _ => LibSettings::default(),
         },
-        _ => LibSettings::default(),
     };
     let mut model = OlmoHybrid::new(&config, settings, weights).expect("model");
     let tokenizer = load_tokenizer(&dir).expect("tokenizer");

@@ -365,12 +365,26 @@ struct AttnLayer {
     /// Latched by a reserve that parked captured buffers; the model
     /// collects it and retires capture for its lifetime.
     parked_graphs: bool,
+    /// A3 eviction armed (settings.eviction present at construction).
+    evict: bool,
+    /// Last-pass scores beside the KV: [heads, capacity, 1] f32,
+    /// reserved/parked in lockstep with the KV buffers (captured
+    /// graphs bake its address too).
+    scores: Option<candle_core::Tensor>,
+    /// Persistent (heads, 1, 1) f32 zero row - the self-slot score
+    /// reset's source, address-stable for captured graphs.
+    score_zero: Option<candle_core::Tensor>,
+    /// A2 observation accumulator; Some only while a profile battery
+    /// is armed (interior mutability: attention runs under &self).
+    #[cfg(feature = "attn-profile")]
+    profile: std::cell::RefCell<Option<profile::ProfileAccum>>,
 }
 
 impl AttnLayer {
     fn new(
         config: &OlmoHybridConfig,
         use_flash_attn: bool,
+        evict: bool,
         vb: candle_nn::VarBuilder,
     ) -> LibAlmostResult<Self> {
         let hidden = config.hidden_size;
@@ -403,6 +417,11 @@ impl AttnLayer {
             kv: None,
             buffers_captured: false,
             parked_graphs: false,
+            evict,
+            scores: None,
+            score_zero: None,
+            #[cfg(feature = "attn-profile")]
+            profile: std::cell::RefCell::new(None),
         })
     }
 
@@ -456,7 +475,98 @@ impl AttnLayer {
         let k_all = kv.k.narrow(1, 0, len)?;
         let v_all = kv.v.narrow(1, 0, len)?;
         let attended = self.attend(&q, &k_all, &v_all, mask)?;
+        if self.evict {
+            self.score_pass(&q, added)?;
+        }
         self.close_halves(x, attended)
+    }
+
+    /// The armed last-pass scoring after a carried forward: prefill
+    /// chunks re-score the whole store from their tail queries (by the
+    /// final chunk that is the question window); a decode row
+    /// overwrites with its own attention masses and zeroes its own
+    /// slot (recent protection covers the fresh token - a large
+    /// self-attention score must not outlive the recent window).
+    fn score_pass(&mut self, q: &candle_core::Tensor, added: usize) -> LibAlmostResult<()> {
+        let Some(kv) = &self.kv else {
+            return Ok(());
+        };
+        let len = kv.len;
+        let scale = (self.head_dim as f64).powf(-0.5);
+        let tail = if added > 1 {
+            evict::SCORE_TAIL.min(added)
+        } else {
+            1
+        };
+        let q_tail = q.narrow(1, added - tail, tail)?;
+        let scores_new =
+            evict::last_pass_scores(&q_tail, &kv.k.narrow(1, 0, len)?, scale)?;
+        let scores = self
+            .scores
+            .as_ref()
+            .expect("armed layers carry score buffers");
+        scores.slice_set(&scores_new, 1, 0)?;
+        if added == 1 {
+            let zero = self
+                .score_zero
+                .as_ref()
+                .expect("armed layers carry the zero row");
+            scores.slice_set(zero, 1, len - 1)?;
+        }
+        Ok(())
+    }
+
+    /// Compact the store to the per-head keep-sets (order-preserving;
+    /// all sets one length). `shrink_to` re-homes the survivors into
+    /// fresh capacity-sized buffers (the post-prefill residency win) -
+    /// only legal while nothing captured the buffers; otherwise (and
+    /// at overflow epochs) the gather packs IN PLACE, keeping every
+    /// baked address alive.
+    fn compact(
+        &mut self,
+        keep: &[Vec<u32>],
+        shrink_to: Option<usize>,
+    ) -> LibAlmostResult<()> {
+        let Some(kv) = &self.kv else {
+            return Ok(());
+        };
+        let len = kv.len;
+        let cap = keep.first().map_or(0, Vec::len);
+        let gathered_k = evict::gather_rows(&kv.k, len, keep)?;
+        let gathered_v = evict::gather_rows(&kv.v, len, keep)?;
+        let scores = self
+            .scores
+            .as_ref()
+            .expect("armed layers carry score buffers");
+        let gathered_scores = evict::gather_rows(scores, len, keep)?;
+        match shrink_to {
+            Some(capacity) if !self.buffers_captured => {
+                let new_k = candle_core::Tensor::zeros(
+                    (self.num_heads, capacity, self.head_dim),
+                    gathered_k.dtype(),
+                    gathered_k.device(),
+                )?;
+                let new_v = new_k.zeros_like()?;
+                let new_scores = candle_core::Tensor::zeros(
+                    (self.num_heads, capacity, 1),
+                    candle_core::DType::F32,
+                    gathered_k.device(),
+                )?;
+                new_k.slice_set(&gathered_k, 1, 0)?;
+                new_v.slice_set(&gathered_v, 1, 0)?;
+                new_scores.slice_set(&gathered_scores, 1, 0)?;
+                self.kv = Some(AttnKv { k: new_k, v: new_v, len: cap });
+                self.scores = Some(new_scores);
+            }
+            _ => {
+                let kv = self.kv.as_mut().expect("checked above");
+                kv.k.slice_set(&gathered_k, 1, 0)?;
+                kv.v.slice_set(&gathered_v, 1, 0)?;
+                scores.slice_set(&gathered_scores, 1, 0)?;
+                kv.len = cap;
+            }
+        }
+        Ok(())
     }
 
     /// Ensure the KV buffers hold `added` more rows: allocate at the
@@ -473,35 +583,62 @@ impl AttnLayer {
 
     /// Ensure the KV buffers hold at least `capacity` rows (the graph
     /// arm's pre-grow; also the append path's grow core). Replaced
-    /// buffers that a captured graph baked are PARKED, never freed.
+    /// buffers that a captured graph baked are PARKED, never freed -
+    /// the armed score buffer rides the same lifecycle (captured
+    /// graphs bake its address too).
     fn reserve_capacity(
         &mut self,
         capacity: usize,
         dtype: candle_core::DType,
         device: &candle_core::Device,
     ) -> LibAlmostResult<()> {
-        if self.kv_capacity() >= capacity.max(1) {
+        if self.kv_capacity() >= capacity.max(1) && (!self.evict || self.scores.is_some()) {
             return Ok(());
         }
         let (heads, head_dim) = (self.num_heads, self.head_dim);
+        let capacity = capacity.max(self.kv_capacity()).max(1);
         let new_k = candle_core::Tensor::zeros((heads, capacity, head_dim), dtype, device)?;
         let new_v = new_k.zeros_like()?;
+        let new_scores = if self.evict {
+            Some(candle_core::Tensor::zeros(
+                (heads, capacity, 1),
+                candle_core::DType::F32,
+                device,
+            )?)
+        } else {
+            None
+        };
         let len = self.kv.as_ref().map_or(0, |kv| kv.len);
         if let Some(kv) = &self.kv
             && kv.len > 0
         {
             new_k.slice_set(&kv.k.narrow(1, 0, kv.len)?.contiguous()?, 1, 0)?;
             new_v.slice_set(&kv.v.narrow(1, 0, kv.len)?.contiguous()?, 1, 0)?;
+            if let (Some(new_scores), Some(old_scores)) = (&new_scores, &self.scores) {
+                new_scores.slice_set(&old_scores.narrow(1, 0, kv.len)?.contiguous()?, 1, 0)?;
+            }
         }
+        let old_scores = self.scores.take();
         if let Some(old) = self.kv.take()
             && self.buffers_captured
         {
             std::mem::forget(old.k);
             std::mem::forget(old.v);
+            if let Some(old_scores) = old_scores {
+                std::mem::forget(old_scores);
+            }
             self.buffers_captured = false;
             self.parked_graphs = true;
         }
         self.kv = Some(AttnKv { k: new_k, v: new_v, len });
+        self.scores = new_scores;
+        if self.evict && self.score_zero.is_none() {
+            self.score_zero = Some(candle_core::Tensor::zeros(
+                (heads, 1, 1),
+                candle_core::DType::F32,
+                device,
+            )?);
+        }
         Ok(())
     }
 
@@ -557,6 +694,12 @@ impl AttnLayer {
         v: &candle_core::Tensor,
         mask: Option<&candle_core::Tensor>,
     ) -> LibAlmostResult<candle_core::Tensor> {
+        // An armed profile forces the sliced eager path regardless of
+        // flash settings - the observation needs materialized weights.
+        #[cfg(feature = "attn-profile")]
+        if self.profile.borrow().is_some() {
+            return self.attend_profiled(q, k, v, mask);
+        }
         #[cfg(feature = "flash-attn")]
         if self.use_flash_attn
             && q.dim(1)? > 1
@@ -578,6 +721,47 @@ impl AttnLayer {
             .to_dtype(dtype)?;
         let out = probs
             .matmul(v)?
+            .transpose(0, 1)?
+            .contiguous()?
+            .reshape((seq_len, self.num_heads * self.head_dim))?;
+        Ok(self.o_proj.forward(&out)?)
+    }
+
+    /// The profile-armed attention: eager math in PROFILE_ROW_SLICE
+    /// row slices (value-identical - softmax and the weighted sum are
+    /// row-independent) so the f32 softmax transient stays bounded at
+    /// 32K, folding each slice's masses into the armed accumulator.
+    #[cfg(feature = "attn-profile")]
+    fn attend_profiled(
+        &self,
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        mask: Option<&candle_core::Tensor>,
+    ) -> LibAlmostResult<candle_core::Tensor> {
+        let seq_len = q.dim(1)?;
+        let width = k.dim(1)?;
+        let past = width - seq_len;
+        let dtype = q.dtype();
+        let scale = (self.head_dim as f64).powf(-0.5);
+        let k_t = k.transpose(1, 2)?.contiguous()?;
+        let mut outs = Vec::new();
+        let mut row = 0usize;
+        while row < seq_len {
+            let rows = profile::PROFILE_ROW_SLICE.min(seq_len - row);
+            let mut scores = (q.narrow(1, row, rows)?.matmul(&k_t)? * scale)?;
+            if let Some(mask) = mask {
+                scores = scores.broadcast_add(&mask.narrow(0, row, rows)?.unsqueeze(0)?)?;
+            }
+            let probs =
+                candle_nn::ops::softmax_last_dim(&scores.to_dtype(candle_core::DType::F32)?)?;
+            if let Some(accum) = self.profile.borrow_mut().as_mut() {
+                accum.accumulate(&probs, past + row, seq_len == 1)?;
+            }
+            outs.push(probs.to_dtype(dtype)?.matmul(v)?);
+            row += rows;
+        }
+        let out = candle_core::Tensor::cat(&outs, 1)?
             .transpose(0, 1)?
             .contiguous()?
             .reshape((seq_len, self.num_heads * self.head_dim))?;
@@ -650,8 +834,32 @@ impl AttnLayer {
         let dtype = q.dtype();
         let scores = (q.matmul(&keys.transpose(1, 2)?)? * (self.head_dim as f64).powf(-0.5))?;
         let scores = scores.broadcast_add(&stage.kv_mask)?;
-        let probs = candle_nn::ops::softmax_last_dim(&scores.to_dtype(candle_core::DType::F32)?)?
-            .to_dtype(dtype)?;
+        let probs_f32 =
+            candle_nn::ops::softmax_last_dim(&scores.to_dtype(candle_core::DType::F32)?)?;
+        if self.evict {
+            // The in-graph last-pass write: the row's masses over the
+            // static bucket (pad columns write ~0 to slots beyond the
+            // live length - overwritten when those slots fill), then
+            // the staged self-slot zero (recent protection covers the
+            // fresh token). Bucket-static shapes; the score buffer +
+            // zero row are address-stable, so capture bakes them
+            // safely.
+            let score_buffer = self
+                .scores
+                .as_ref()
+                .expect("armed layers carry score buffers");
+            score_buffer.slice_set(&probs_f32.transpose(1, 2)?.contiguous()?, 1, 0)?;
+            let zero = self
+                .score_zero
+                .as_ref()
+                .expect("armed layers carry the zero row");
+            score_buffer.inplace_op3(
+                zero,
+                &stage.kv_slot,
+                &graph::SlotWrite { dtype: candle_core::DType::F32 },
+            )?;
+        }
+        let probs = probs_f32.to_dtype(dtype)?;
         let out = probs
             .matmul(&values)?
             .transpose(0, 1)?
@@ -714,9 +922,12 @@ impl OlmoHybrid {
             let vb_layer = vb_model.pp(format!("layers.{layer_idx}"));
             layers.push(match config.layer_kind(layer_idx) {
                 LayerKind::LinearAttention => Layer::Gdn(GdnLayer::new(config, vb_layer)?),
-                LayerKind::FullAttention => {
-                    Layer::Attn(AttnLayer::new(config, settings.use_flash_attn, vb_layer)?)
-                }
+                LayerKind::FullAttention => Layer::Attn(AttnLayer::new(
+                    config,
+                    settings.use_flash_attn,
+                    settings.eviction.is_some(),
+                    vb_layer,
+                )?),
             });
         }
         Ok(Self {
@@ -865,6 +1076,121 @@ impl OlmoHybrid {
     /// Tokens currently held in the carried caches.
     pub fn context_len(&self) -> usize {
         self.context_len
+    }
+
+    /// A3 keep-sets from the live last-pass scores, one per attention
+    /// layer (host-side ranking; per-head sets, all decode_cap long).
+    fn evict_keep_sets(
+        &self,
+        evict: &EvictionSettings,
+    ) -> LibAlmostResult<Vec<Vec<Vec<u32>>>> {
+        let mut sets = Vec::new();
+        for layer in &self.layers {
+            if let Layer::Attn(attn) = layer {
+                let Some(kv) = &attn.kv else {
+                    snafu::whatever!("eviction reached unallocated KV buffers");
+                };
+                let scores = attn
+                    .scores
+                    .as_ref()
+                    .expect("armed layers carry score buffers")
+                    .narrow(1, 0, kv.len)?
+                    .squeeze(2)?
+                    .to_vec2::<f32>()?;
+                sets.push(
+                    scores
+                        .iter()
+                        .map(|row| {
+                            evict::keep_indices(row, evict.decode_cap, evict.recent, evict.sink)
+                        })
+                        .collect(),
+                );
+            }
+        }
+        Ok(sets)
+    }
+
+    /// A3: the one-shot post-prefill compaction (generate calls this
+    /// between prefill and graph arming): rank by the FINAL scoring
+    /// pass (the question window), compact every attention layer to
+    /// the cap, and - buffers never yet captured - SHRINK them to the
+    /// decode-bounded capacity, cashing the KV-residency win. GDN
+    /// layers are untouched (constant state).
+    pub(crate) fn evict_post_prefill(
+        &mut self,
+        evict: &EvictionSettings,
+    ) -> LibAlmostResult<()> {
+        if self.context_len <= evict.decode_cap {
+            return Ok(());
+        }
+        let keep_sets = self.evict_keep_sets(evict)?;
+        // Overflow epochs bound decode length at cap + slack, so this
+        // capacity never regrows classic; a graph arm may pre-grow it
+        // once more (pre-capture, a cap-sized copy - trivial).
+        let capacity = (evict.decode_cap + evict::OVERFLOW_SLACK + RESERVE_DECODE_MARGIN)
+            .div_ceil(KV_RESERVE_STEP)
+            * KV_RESERVE_STEP;
+        let mut sets = keep_sets.into_iter();
+        for layer in &mut self.layers {
+            if let Layer::Attn(attn) = layer {
+                let keep = sets.next().expect("one keep-set per attention layer");
+                attn.compact(&keep, Some(capacity))?;
+            }
+        }
+        self.context_len = evict.decode_cap;
+        Ok(())
+    }
+
+    /// A decode-overflow re-compaction epoch (uncaptured host work
+    /// between steps): pack the store back to the cap IN PLACE (every
+    /// baked address stays alive) and re-point an armed graph stage's
+    /// mask at the shrunk length (stale columns re-hide; the bucket
+    /// is unchanged, so the same captured graph replays on).
+    pub(crate) fn evict_overflow(&mut self, evict: &EvictionSettings) -> LibAlmostResult<()> {
+        let keep_sets = self.evict_keep_sets(evict)?;
+        let mut sets = keep_sets.into_iter();
+        for layer in &mut self.layers {
+            if let Layer::Attn(attn) = layer {
+                let keep = sets.next().expect("one keep-set per attention layer");
+                attn.compact(&keep, None)?;
+            }
+        }
+        self.context_len = evict.decode_cap;
+        #[cfg(feature = "cuda")]
+        if let Some(stage) = &mut self.graph_stage
+            && stage.armed
+        {
+            stage.rearm(self.context_len)?;
+        }
+        Ok(())
+    }
+
+    /// Arm the A2 observation pass on every attention layer; `window`
+    /// is the recency width the middle-mass metric excludes. Armed
+    /// attention runs the sliced eager path (flash never dispatches).
+    #[cfg(feature = "attn-profile")]
+    pub fn arm_attn_profile(&mut self, window: usize) {
+        for layer in &mut self.layers {
+            if let Layer::Attn(attn) = layer {
+                attn.profile
+                    .replace(Some(profile::ProfileAccum::new(attn.num_heads, window)));
+            }
+        }
+    }
+
+    /// Collect + disarm the observation pass; reports carry absolute
+    /// layer indices.
+    #[cfg(feature = "attn-profile")]
+    pub fn take_attn_profile(&mut self) -> Vec<profile::LayerProfile> {
+        let mut reports = Vec::new();
+        for (layer_index, layer) in self.layers.iter_mut().enumerate() {
+            if let Layer::Attn(attn) = layer
+                && let Some(accum) = attn.profile.replace(None)
+            {
+                reports.push(accum.report(layer_index));
+            }
+        }
+        reports
     }
 
     /// The device the model's tensors live on.

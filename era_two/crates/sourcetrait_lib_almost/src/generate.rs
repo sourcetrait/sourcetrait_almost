@@ -172,6 +172,11 @@ impl OlmoHybrid {
             start += len;
         }
         let last_logits = last_logits.expect("non-empty prompt");
+        // A3: the one-shot post-prefill compaction precedes graph
+        // arming, so graphs capture against the compacted store.
+        if let Some(evict) = generation.model.settings().eviction.clone() {
+            generation.model.evict_post_prefill(&evict)?;
+        }
         // Arm the staged graph decode after prefill (settings.graph;
         // cuda builds only - Model::new already rejected the rest).
         if generation.model.settings().graph {
@@ -232,6 +237,14 @@ impl Generation<'_> {
         if self.generated_ids.len() >= self.sample_len {
             self.finish_reason = Some(FinishReason::SampleLen);
             return Ok(Some(GenerationStep { token_id, chunk }));
+        }
+        // A3 overflow epoch: decode outgrew the cap by the slack -
+        // re-compact between steps (uncaptured host work; an armed
+        // graph keeps replaying at the unchanged bucket).
+        if let Some(evict) = self.model.settings().eviction.clone()
+            && self.model.context_len() >= evict.decode_cap + evict::OVERFLOW_SLACK
+        {
+            self.model.evict_overflow(&evict)?;
         }
         let logits = if self.model.graph_armed() {
             // A decode outrunning the armed capacity falls to the
