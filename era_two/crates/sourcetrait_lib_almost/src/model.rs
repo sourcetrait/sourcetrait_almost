@@ -182,22 +182,31 @@ impl GdnLayer {
 
     fn forward(&self, x: &candle_core::Tensor) -> LibAlmostResult<candle_core::Tensor> {
         let mixed = self.mixer_stateless(&norms::rms_norm(x, &self.input_layernorm, self.rms_eps)?)?;
-        self.close_halves(x, mixed)
+        self.close_halves(x, mixed, false)
     }
 
     fn forward_chunk(&mut self, x: &candle_core::Tensor) -> LibAlmostResult<candle_core::Tensor> {
-        let mixed = self.mixer_carried(&norms::rms_norm(x, &self.input_layernorm, self.rms_eps)?)?;
-        self.close_halves(x, mixed)
+        let fused = self.fused_gdn;
+        let mixed = self.mixer_carried(&norms::rms_norm_auto(
+            x,
+            &self.input_layernorm,
+            self.rms_eps,
+            fused,
+        )?)?;
+        self.close_halves(x, mixed, fused)
     }
 
-    /// The pre-norm block's residual adds shared by both paths.
+    /// The pre-norm block's residual adds shared by both paths;
+    /// `fused` arms the decode norm kernel (carried callers only).
     fn close_halves(
         &self,
         x: &candle_core::Tensor,
         mixed: candle_core::Tensor,
+        fused: bool,
     ) -> LibAlmostResult<candle_core::Tensor> {
         let h = (x + mixed)?;
-        let mlp_in = norms::rms_norm(&h, &self.post_attention_layernorm, self.rms_eps)?;
+        let mlp_in =
+            norms::rms_norm_auto(&h, &self.post_attention_layernorm, self.rms_eps, fused)?;
         let mlp_out = self.mlp.forward(&mlp_in)?;
         Ok((h + mlp_out)?)
     }
@@ -243,13 +252,48 @@ impl GdnLayer {
     }
 
     /// The gated output norm + o_proj tail shared by both mixer paths;
-    /// gate is the fused projection's raw g span.
+    /// gate is the fused projection's raw g span. A carried decode row
+    /// with fusion armed rides the single-launch gated kernel over the
+    /// RAW f32 y (the classic path's y -> bf16 round-trip before the
+    /// variance disappears; envelope-class).
     fn finish_mixer(
         &self,
         y: candle_core::Tensor,
         gate: candle_core::Tensor,
         seq_len: usize,
+        fused: bool,
     ) -> LibAlmostResult<candle_core::Tensor> {
+        #[cfg(feature = "cuda")]
+        if fused
+            && seq_len == 1
+            && y.device().is_cuda()
+            && y.dtype() == candle_core::DType::F32
+            && gate.dtype() == candle_core::DType::BF16
+        {
+            let y_rows = y.reshape((self.num_heads, self.head_v_dim))?;
+            let gate_rows = gate
+                .reshape((self.num_heads, self.head_v_dim))?
+                .to_dtype(candle_core::DType::F32)?;
+            let packed =
+                candle_core::Tensor::cat(&[&y_rows, &gate_rows], 1)?.contiguous()?;
+            let out = candle_core::Tensor::zeros(
+                (self.num_heads, self.head_v_dim),
+                candle_core::DType::BF16,
+                y.device(),
+            )?;
+            out.inplace_op3(
+                &packed,
+                &self.o_norm,
+                &fused::RmsNormGatedFused {
+                    eps: gdn::O_NORM_EPS as f32,
+                },
+            )?;
+            return Ok(self
+                .o_proj
+                .forward(&out.reshape((1, self.num_heads * self.head_v_dim))?)?);
+        }
+        #[cfg(not(feature = "cuda"))]
+        let _ = fused;
         let y = y.to_dtype(gate.dtype())?;
         let gate = gate.reshape((seq_len, self.num_heads, self.head_v_dim))?;
         let y = norms::rms_norm_gated(&y, &gate, &self.o_norm, gdn::O_NORM_EPS)?;
@@ -281,7 +325,7 @@ impl GdnLayer {
             rows.push(y_t);
         }
         let y = candle_core::Tensor::stack(&rows, 0)?;
-        self.finish_mixer(y, gate, seq_len)
+        self.finish_mixer(y, gate, seq_len, false)
     }
 
     /// The GDN mixer, CARRIED form (the D3 engine path): conv tails
@@ -307,7 +351,7 @@ impl GdnLayer {
             self.state.slice_set(&next_state, 0, 0)?;
             out
         };
-        self.finish_mixer(y, gate, seq_len)
+        self.finish_mixer(y, gate, seq_len, self.fused_gdn)
     }
 
     /// One carried decode step (t == 1): the fused kernel when armed
@@ -406,6 +450,10 @@ struct AttnLayer {
     /// flash-attn feature (dead by construction on cuda-only builds).
     #[cfg_attr(not(feature = "flash-attn"), allow(dead_code))]
     use_flash_attn: bool,
+    /// GdnChainFusion armed: decode norms ride the fused kernel on
+    /// cuda (the stateless path always runs the classic chain).
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    fused_gdn: bool,
     kv: Option<AttnKv>,
     /// The KV buffers are baked into a captured decode graph: their
     /// eventual replacement must PARK them (mem::forget), never free
@@ -435,6 +483,7 @@ impl AttnLayer {
         config: &OlmoHybridConfig,
         use_flash_attn: bool,
         evict: bool,
+        fused_gdn: bool,
         vb: candle_nn::VarBuilder,
     ) -> LibAlmostResult<Self> {
         let hidden = config.hidden_size;
@@ -464,6 +513,7 @@ impl AttnLayer {
             head_dim: config.head_dim(),
             rms_eps: config.rms_norm_eps,
             use_flash_attn,
+            fused_gdn,
             kv: None,
             buffers_captured: false,
             parked_graphs: false,
@@ -504,9 +554,9 @@ impl AttnLayer {
         x: &candle_core::Tensor,
         mask: &candle_core::Tensor,
     ) -> LibAlmostResult<candle_core::Tensor> {
-        let (q, k, v) = self.qkv(x)?;
+        let (q, k, v) = self.qkv(x, false)?;
         let attended = self.attend(&q, &k, &v, Some(mask))?;
-        self.close_halves(x, attended)
+        self.close_halves(x, attended, false)
     }
 
     fn forward_chunk(
@@ -514,7 +564,7 @@ impl AttnLayer {
         x: &candle_core::Tensor,
         mask: Option<&candle_core::Tensor>,
     ) -> LibAlmostResult<candle_core::Tensor> {
-        let (q, k_new, v_new) = self.qkv(x)?;
+        let (q, k_new, v_new) = self.qkv(x, self.fused_gdn)?;
         let added = k_new.dim(1)?;
         self.reserve(added, &k_new)?;
         let kv = self.kv.as_mut().expect("reserved");
@@ -528,7 +578,7 @@ impl AttnLayer {
         if self.evict {
             self.score_pass(&q, added)?;
         }
-        self.close_halves(x, attended)
+        self.close_halves(x, attended, self.fused_gdn)
     }
 
     /// The armed last-pass scoring after a carried forward: prefill
@@ -692,34 +742,50 @@ impl AttnLayer {
         Ok(())
     }
 
-    /// The post-norm block's residual adds shared by both paths.
+    /// The post-norm block's residual adds shared by both paths;
+    /// `fused` arms the decode norm kernel (carried callers only).
     fn close_halves(
         &self,
         x: &candle_core::Tensor,
         attended: candle_core::Tensor,
+        fused: bool,
     ) -> LibAlmostResult<candle_core::Tensor> {
-        let attn_out = norms::rms_norm(&attended, &self.post_attention_layernorm, self.rms_eps)?;
+        let attn_out = norms::rms_norm_auto(
+            &attended,
+            &self.post_attention_layernorm,
+            self.rms_eps,
+            fused,
+        )?;
         let h = (x + attn_out)?;
-        let mlp_out = norms::rms_norm(
+        let mlp_out = norms::rms_norm_auto(
             &self.mlp.forward(&h)?,
             &self.post_feedforward_layernorm,
             self.rms_eps,
+            fused,
         )?;
         Ok((h + mlp_out)?)
     }
 
     /// One fused projection gemv split into q/k/v, with the
     /// full-projection-width q/k RMSNorm BEFORE the head reshape;
-    /// [heads, t, head_dim] matmul-ready.
+    /// [heads, t, head_dim] matmul-ready. `fused` arms the decode
+    /// norm kernel (carried callers only).
     fn qkv(
         &self,
         x: &candle_core::Tensor,
+        fused: bool,
     ) -> LibAlmostResult<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
         let (seq_len, _) = x.dims2()?;
         let width = self.num_heads * self.head_dim;
         let qkv = self.qkv_proj.forward(x)?;
-        let q = norms::rms_norm(&qkv.narrow(1, 0, width)?, &self.q_norm, self.rms_eps)?;
-        let k = norms::rms_norm(&qkv.narrow(1, width, width)?, &self.k_norm, self.rms_eps)?;
+        let q =
+            norms::rms_norm_auto(&qkv.narrow(1, 0, width)?, &self.q_norm, self.rms_eps, fused)?;
+        let k = norms::rms_norm_auto(
+            &qkv.narrow(1, width, width)?,
+            &self.k_norm,
+            self.rms_eps,
+            fused,
+        )?;
         let v = qkv.narrow(1, 2 * width, width)?.contiguous()?;
         let heads = |t: candle_core::Tensor| -> LibAlmostResult<candle_core::Tensor> {
             Ok(t.reshape((seq_len, self.num_heads, self.head_dim))?
@@ -872,7 +938,7 @@ impl AttnLayer {
         x: &candle_core::Tensor,
         stage: &graph::DecodeStage,
     ) -> LibAlmostResult<candle_core::Tensor> {
-        let (q, k_new, v_new) = self.qkv(x)?;
+        let (q, k_new, v_new) = self.qkv(x, self.fused_gdn)?;
         let Some(kv) = &self.kv else {
             snafu::whatever!("graph decode reached unallocated KV buffers");
         };
@@ -916,7 +982,7 @@ impl AttnLayer {
             .contiguous()?
             .reshape((1, self.num_heads * self.head_dim))?;
         let attended = self.o_proj.forward(&out)?;
-        self.close_halves(x, attended)
+        self.close_halves(x, attended, self.fused_gdn)
     }
 }
 
@@ -978,6 +1044,7 @@ impl OlmoHybrid {
                     config,
                     settings.use_flash_attn,
                     settings.eviction.is_some(),
+                    settings.fused_gdn,
                     vb_layer,
                 )?),
             });
@@ -1053,7 +1120,8 @@ impl OlmoHybrid {
         }
         self.context_len += seq_len;
         self.contain_parked_grows();
-        let hidden = norms::rms_norm(&hidden, &self.norm, self.rms_eps)?;
+        let hidden =
+            norms::rms_norm_auto(&hidden, &self.norm, self.rms_eps, self.settings.fused_gdn)?;
         Ok(self.lm_head.forward(&hidden)?)
     }
 
@@ -1556,7 +1624,8 @@ impl OlmoHybrid {
                 Layer::Attn(layer) => layer.forward_graph(&hidden, stage)?,
             };
         }
-        let hidden = norms::rms_norm(&hidden, &self.norm, self.rms_eps)?;
+        let hidden =
+            norms::rms_norm_auto(&hidden, &self.norm, self.rms_eps, self.settings.fused_gdn)?;
         let logits = self
             .lm_head
             .forward(&hidden)?

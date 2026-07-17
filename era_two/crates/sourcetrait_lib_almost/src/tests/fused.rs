@@ -1,7 +1,9 @@
-//! GdnChainFusion locks: the fused decode step against the classic
-//! candle chain on the real geometry (cuda; checkpoint-free).
-use crate::fused::GdnFusedStep;
+//! GdnChainFusion locks: the fused decode step and the fused norms
+//! against the classic candle chains on the real geometry (cuda;
+//! checkpoint-free).
+use crate::fused::{GdnFusedStep, RmsNormFused, RmsNormGatedFused};
 use crate::gdn::recurrent_step;
+use crate::norms::{rms_norm, rms_norm_gated};
 
 fn splitmix_f32(seed: &mut u64, count: usize) -> Vec<f32> {
     (0..count)
@@ -126,4 +128,78 @@ fn fused_step_matches_the_classic_chain() {
         worst_step_state <= 1e-9,
         "state spread {worst_step_state:.3e} beyond the f32 reassociation class"
     );
+}
+
+/// The fused plain norm against norms::rms_norm on bf16 cuda at the
+/// model width. The fused form rounds ONCE at the store where the
+/// classic chain rounds normed before the weight mul - a bf16
+/// quantization-class spread, not bit equality.
+#[test]
+#[ignore = "needs a cuda card"]
+fn fused_rms_norm_matches_the_classic_chain() {
+    let device = candle_core::Device::new_cuda(0).expect("cuda");
+    let mut seed = 0x0BAD_5EED_0123_4567u64;
+    let x = synth(&mut seed, (3, 3840), &device)
+        .to_dtype(candle_core::DType::BF16)
+        .expect("x bf16");
+    let weight = synth(&mut seed, (1, 3840), &device)
+        .squeeze(0)
+        .expect("weight shape")
+        .to_dtype(candle_core::DType::BF16)
+        .expect("weight bf16");
+    let classic = rms_norm(&x, &weight, 1e-6).expect("classic");
+    let fused = candle_core::Tensor::zeros((3, 3840), candle_core::DType::BF16, &device)
+        .expect("out");
+    fused
+        .inplace_op3(&x, &weight, &RmsNormFused { eps: 1e-6 })
+        .expect("fused norm");
+    let spread = relative_spread(
+        &fused.to_dtype(candle_core::DType::F32).expect("f32"),
+        &classic.to_dtype(candle_core::DType::F32).expect("f32"),
+    );
+    println!("fused rms_norm vs classic: nmse {spread:.3e}");
+    assert!(spread <= 5e-5, "spread {spread:.3e} beyond the bf16 rounding class");
+}
+
+/// The fused gated norm against the classic finish_mixer semantics
+/// (y cast to bf16 first there; the fused form consumes raw f32 y).
+#[test]
+#[ignore = "needs a cuda card"]
+fn fused_rms_norm_gated_matches_the_classic_chain() {
+    let device = candle_core::Device::new_cuda(0).expect("cuda");
+    let mut seed = 0xFEED_FACE_0000_0001u64;
+    let y = synth(&mut seed, (30, 192), &device);
+    let gate = synth(&mut seed, (30, 192), &device)
+        .to_dtype(candle_core::DType::BF16)
+        .expect("gate bf16");
+    let weight = synth(&mut seed, (1, 192), &device)
+        .squeeze(0)
+        .expect("weight shape")
+        .to_dtype(candle_core::DType::BF16)
+        .expect("weight bf16");
+    let classic = rms_norm_gated(
+        &y.to_dtype(candle_core::DType::BF16).expect("y bf16"),
+        &gate,
+        &weight,
+        1e-5,
+    )
+    .expect("classic");
+    let packed = candle_core::Tensor::cat(
+        &[&y, &gate.to_dtype(candle_core::DType::F32).expect("gate f32")],
+        1,
+    )
+    .expect("pack")
+    .contiguous()
+    .expect("packed rows");
+    let fused = candle_core::Tensor::zeros((30, 192), candle_core::DType::BF16, &device)
+        .expect("out");
+    fused
+        .inplace_op3(&packed, &weight, &RmsNormGatedFused { eps: 1e-5 })
+        .expect("fused gated norm");
+    let spread = relative_spread(
+        &fused.to_dtype(candle_core::DType::F32).expect("f32"),
+        &classic.to_dtype(candle_core::DType::F32).expect("f32"),
+    );
+    println!("fused rms_norm_gated vs classic: nmse {spread:.3e}");
+    assert!(spread <= 5e-5, "spread {spread:.3e} beyond the bf16 rounding class");
 }

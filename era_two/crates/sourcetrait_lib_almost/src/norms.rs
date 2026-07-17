@@ -20,6 +20,35 @@ pub(crate) fn rms_norm(
     Ok(weight.broadcast_mul(&normed.to_dtype(dtype)?)?)
 }
 
+/// rms_norm with the GdnChainFusion decode dispatch: the fused
+/// single-launch kernel on a one-row bf16 cuda input when the caller
+/// is a CARRIED path with fusion armed; the classic chain otherwise.
+/// Stateless/parity callers pass fused = false by construction.
+pub(crate) fn rms_norm_auto(
+    x: &candle_core::Tensor,
+    weight: &candle_core::Tensor,
+    eps: f64,
+    fused: bool,
+) -> LibAlmostResult<candle_core::Tensor> {
+    #[cfg(feature = "cuda")]
+    if fused
+        && x.dims().first() == Some(&1)
+        && x.device().is_cuda()
+        && x.dtype() == candle_core::DType::BF16
+    {
+        let out = candle_core::Tensor::zeros(
+            x.dims(),
+            candle_core::DType::BF16,
+            x.device(),
+        )?;
+        out.inplace_op3(x, weight, &fused::RmsNormFused { eps: eps as f32 })?;
+        return Ok(out);
+    }
+    #[cfg(not(feature = "cuda"))]
+    let _ = fused;
+    rms_norm(x, weight, eps)
+}
+
 /// Gated RMSNorm over the GDN value-head dim: norm-before-gate, weight
 /// in input dtype, gate = silu(gate) in f32, result back in input
 /// dtype. Eps here is 1e-5 (the fla FusedRMSNormGated default), NOT
