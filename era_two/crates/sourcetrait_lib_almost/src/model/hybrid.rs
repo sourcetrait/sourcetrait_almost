@@ -115,12 +115,11 @@ impl OlmoHybrid {
         Ok(self.lm_head.forward(&hidden)?)
     }
 
-    /// One CARRIED forward over the next chunk of the context: [t] u32
-    /// in, [t, vocab] all-position logits out; every layer's cache
-    /// (GDN state + conv tails, attention KV) advances by t. Decode is
-    /// t == 1 (mask-free); prefill chunks any t. Chunk boundaries are
-    /// logit-exact to f32 rounding against the stateless path.
-    pub fn forward_chunk(
+    /// The carried advance every chunk form shares: embed, the layer
+    /// loop (offset causal mask for multi-token chunks; decode t == 1
+    /// is mask-free), context-length advance, park collection. Returns
+    /// the post-layer hidden [t, hidden] BEFORE the final norm.
+    fn advance_chunk(
         &mut self,
         input_ids: &candle_core::Tensor,
     ) -> LibAlmostResult<candle_core::Tensor> {
@@ -144,9 +143,51 @@ impl OlmoHybrid {
         }
         self.context_len += seq_len;
         self.contain_parked_grows();
+        Ok(hidden)
+    }
+
+    /// One CARRIED forward over the next chunk of the context: [t] u32
+    /// in, [t, vocab] all-position logits out; every layer's cache
+    /// (GDN state + conv tails, attention KV) advances by t. Decode is
+    /// t == 1 (mask-free); prefill chunks any t. Chunk boundaries are
+    /// logit-exact to f32 rounding against the stateless path.
+    pub fn forward_chunk(
+        &mut self,
+        input_ids: &candle_core::Tensor,
+    ) -> LibAlmostResult<candle_core::Tensor> {
+        let hidden = self.advance_chunk(input_ids)?;
         let hidden =
             norms::rms_norm_auto(&hidden, &self.norm, self.rms_eps, self.settings.fused_gdn)?;
         Ok(self.lm_head.forward(&hidden)?)
+    }
+
+    /// PrefillLogitsSkip: the final-prefill-chunk form - advance, then
+    /// norm + head over the LAST row alone -> [1, vocab]. Per-row math
+    /// (RMSNorm and the head are row-independent), so the row is
+    /// value-identical to forward_chunk's last row at f32; bf16 kernel
+    /// shapes differ (1-row vs t-row gemm) - kin-class deltas ride the
+    /// gates.
+    pub(crate) fn forward_chunk_last(
+        &mut self,
+        input_ids: &candle_core::Tensor,
+    ) -> LibAlmostResult<candle_core::Tensor> {
+        let hidden = self.advance_chunk(input_ids)?;
+        let rows = hidden.dim(0)?;
+        let last = hidden.narrow(0, rows - 1, 1)?;
+        let last =
+            norms::rms_norm_auto(&last, &self.norm, self.rms_eps, self.settings.fused_gdn)?;
+        Ok(self.lm_head.forward(&last)?)
+    }
+
+    /// PrefillLogitsSkip: the intermediate-prefill-chunk form - the
+    /// caches advance, no logits are computed (no norm, no head) -
+    /// where the skipped head traffic lives.
+    pub(crate) fn forward_chunk_carry(
+        &mut self,
+        input_ids: &candle_core::Tensor,
+    ) -> LibAlmostResult<()> {
+        self.advance_chunk(input_ids)?;
+        Ok(())
     }
 
     /// Collect the layers' park latches: a grow replaced

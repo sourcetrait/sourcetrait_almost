@@ -395,6 +395,125 @@ fn cuda_grade_diag_short_pairwise_spread() {
     }
 }
 
+/// The final chunk's last logits row via the all-rows forward_chunk
+/// (the PrefillLogitsSkip reference leg), host f32.
+fn last_row_via_forward_chunk(model: &mut OlmoHybrid, ids: &[u32], chunk: usize) -> Vec<f32> {
+    model.clear_cache().expect("clear");
+    let device = model.device().clone();
+    let mut last = None;
+    let mut start = 0;
+    while start < ids.len() {
+        let len = chunk.min(ids.len() - start);
+        let logits = model
+            .forward_chunk(&ids_tensor_on(&ids[start..start + len], &device))
+            .expect("forward_chunk");
+        last = Some(logits.narrow(0, len - 1, 1).expect("last row"));
+        start += len;
+    }
+    flat(last.expect("non-empty ids"))
+}
+
+/// The same row via the PrefillLogitsSkip pair (carry chunks + a
+/// last-row final chunk), host f32.
+fn last_row_via_skip(model: &mut OlmoHybrid, ids: &[u32], chunk: usize) -> Vec<f32> {
+    model.clear_cache().expect("clear");
+    let device = model.device().clone();
+    let mut last = None;
+    let mut start = 0;
+    while start < ids.len() {
+        let len = chunk.min(ids.len() - start);
+        let tensor = ids_tensor_on(&ids[start..start + len], &device);
+        if start + len == ids.len() {
+            last = Some(
+                model
+                    .forward_chunk_last(&tensor)
+                    .expect("forward_chunk_last"),
+            );
+        } else {
+            model
+                .forward_chunk_carry(&tensor)
+                .expect("forward_chunk_carry");
+        }
+        start += len;
+    }
+    flat(last.expect("non-empty ids"))
+}
+
+/// PrefillLogitsSkip: the carry + last-row prefill against
+/// forward_chunk's narrowed last row over the oracle short ids -
+/// per-row math (RMSNorm and the head are row-independent), asserted
+/// bitwise at cpu f32 across aligned and ragged chunk sizes.
+#[test]
+#[ignore = "needs the DPO checkpoint + ALMOST_ORACLE_DUMPS_DIR"]
+fn prefill_logits_skip_matches_last_row_cpu_f32() {
+    let reference_path = Path::new(&oracle_dumps_dir())
+        .join("short/short_cpu_f32_torch_eager_single.safetensors");
+    let (all_ids, _) = load_reference(reference_path.to_str().expect("utf-8 path"));
+    let mut model = build_model();
+    for chunk in [33usize, 64, 128] {
+        let reference = last_row_via_forward_chunk(&mut model, &all_ids, chunk);
+        let skipped = last_row_via_skip(&mut model, &all_ids, chunk);
+        let bitwise = reference == skipped;
+        let mut numerator = 0f64;
+        let mut denominator = 0f64;
+        let mut max_abs = 0f32;
+        for (a, b) in skipped.iter().zip(&reference) {
+            let difference = (*a as f64) - (*b as f64);
+            numerator += difference * difference;
+            denominator += (*b as f64) * (*b as f64);
+            max_abs = max_abs.max((a - b).abs());
+        }
+        let nmse = numerator / denominator;
+        println!(
+            "prefill-logits-skip chunk {chunk}: bitwise {bitwise}, nmse {nmse:.3e}, max abs {max_abs:.3e}"
+        );
+        assert_eq!(
+            argmax(&skipped),
+            argmax(&reference),
+            "chunk {chunk}: the sampled row's argmax must hold"
+        );
+        // The m=1 head gemm re-tiles vs the m=t gemm, so the row is
+        // f32-reassociation-equal, not bitwise (measured 3.06-3.09e-14
+        // nmse, max abs ~1.9e-5, at chunks 33/64/128); the bar rides
+        // the chunked-vs-stateless class.
+        assert!(
+            nmse <= 1e-12,
+            "chunk {chunk}: nmse {nmse:.3e} exceeds the 1e-12 reassociation-class bar"
+        );
+    }
+}
+
+/// PrefillLogitsSkip on cuda bf16, REPORT-ONLY: the last row rides a
+/// 1-row norm + head where the reference rode a t-row gemm (and the
+/// fused decode norm becomes eligible at 1 row) - record the spread
+/// (expected 0.0-or-kin-class).
+#[test]
+#[cfg(feature = "cuda")]
+#[ignore = "diagnostic: needs the DPO checkpoint + ALMOST_ORACLE_DUMPS_DIR + a cuda card"]
+fn prefill_logits_skip_diag_cuda_bf16() {
+    let reference_path = Path::new(&oracle_dumps_dir())
+        .join("short/short_cpu_f32_torch_eager_single.safetensors");
+    let (all_ids, _) = load_reference(reference_path.to_str().expect("utf-8 path"));
+    let mut model = cuda_bf16_model();
+    for chunk in [64usize, 512] {
+        let reference = last_row_via_forward_chunk(&mut model, &all_ids, chunk);
+        let skipped = last_row_via_skip(&mut model, &all_ids, chunk);
+        let equal = reference == skipped;
+        let mut numerator = 0f64;
+        let mut denominator = 0f64;
+        for (a, b) in skipped.iter().zip(&reference) {
+            let difference = (*a as f64) - (*b as f64);
+            numerator += difference * difference;
+            denominator += (*b as f64) * (*b as f64);
+        }
+        let same_argmax = argmax(&skipped) == argmax(&reference);
+        println!(
+            "prefill-logits-skip diag chunk {chunk}: bitwise {equal}, nmse {:.3e}, argmax match {same_argmax}",
+            numerator / denominator
+        );
+    }
+}
+
 #[test]
 #[ignore = "diagnostic probe: phase timings (needs the checkpoint only)"]
 fn probe_phase_timings() {

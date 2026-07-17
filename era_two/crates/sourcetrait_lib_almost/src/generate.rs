@@ -228,8 +228,14 @@ impl OlmoHybrid {
                 len,
                 generation.model.device(),
             )?;
-            let logits = generation.model.forward_chunk(&chunk)?;
-            last_logits = Some(logits.narrow(0, len - 1, 1)?);
+            // PrefillLogitsSkip: intermediate chunks advance the
+            // caches without computing logits; only the final chunk
+            // pays the norm + head, over its last row alone.
+            if start + len == prompt_ids.len() {
+                last_logits = Some(generation.model.forward_chunk_last(&chunk)?);
+            } else {
+                generation.model.forward_chunk_carry(&chunk)?;
+            }
             start += len;
         }
         let last_logits = last_logits.expect("non-empty prompt");
