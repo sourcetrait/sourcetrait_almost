@@ -68,6 +68,11 @@ struct GdnLayer {
     /// ([2*key + value, 1, kernel]) - one batched conv pass per
     /// forward instead of three; per-channel math is bit-identical.
     conv_weight: candle_core::Tensor,
+    /// The same weights prestored row-major ([kernel, channels]) for
+    /// the fused decode tap's packed layout; Some only when fusion is
+    /// armed.
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    conv_weight_rows: Option<candle_core::Tensor>,
     a_log: candle_core::Tensor,
     dt_bias: candle_core::Tensor,
     o_norm: candle_core::Tensor,
@@ -103,6 +108,19 @@ impl GdnLayer {
             candle_core::Tensor::zeros(shape, candle_core::DType::F32, &device)
         };
         let vb_attn = vb.pp("linear_attn");
+        let conv_weight = candle_core::Tensor::cat(
+            &[
+                &vb_attn.pp("q_conv1d").get((key_dim, 1, kernel), "weight")?,
+                &vb_attn.pp("k_conv1d").get((key_dim, 1, kernel), "weight")?,
+                &vb_attn.pp("v_conv1d").get((value_dim, 1, kernel), "weight")?,
+            ],
+            0,
+        )?;
+        let conv_weight_rows = if fused_gdn {
+            Some(conv_weight.squeeze(1)?.transpose(0, 1)?.contiguous()?)
+        } else {
+            None
+        };
         Ok(Self {
             state: candle_core::Tensor::zeros(
                 (heads, config.linear_key_head_dim, config.linear_value_head_dim),
@@ -127,14 +145,8 @@ impl GdnLayer {
             a_proj: candle_nn::linear_no_bias(hidden, heads, vb_attn.pp("a_proj"))?,
             b_proj: candle_nn::linear_no_bias(hidden, heads, vb_attn.pp("b_proj"))?,
             o_proj: candle_nn::linear_no_bias(value_dim, hidden, vb_attn.pp("o_proj"))?,
-            conv_weight: candle_core::Tensor::cat(
-                &[
-                    &vb_attn.pp("q_conv1d").get((key_dim, 1, kernel), "weight")?,
-                    &vb_attn.pp("k_conv1d").get((key_dim, 1, kernel), "weight")?,
-                    &vb_attn.pp("v_conv1d").get((value_dim, 1, kernel), "weight")?,
-                ],
-                0,
-            )?,
+            conv_weight,
+            conv_weight_rows,
             a_log: vb_attn.get(heads, "A_log")?,
             dt_bias: vb_attn.get(heads, "dt_bias")?,
             o_norm: vb_attn.pp("o_norm").get(config.linear_value_head_dim, "weight")?,
@@ -340,8 +352,7 @@ impl GdnLayer {
     fn mixer_carried(&mut self, x: &candle_core::Tensor) -> LibAlmostResult<candle_core::Tensor> {
         let (seq_len, _) = x.dims2()?;
         let (conv_in, gate) = self.project_fused(x)?;
-        let (conv_out, tail) = gdn::conv_with_tail(&conv_in, &self.conv_weight, &self.conv_tail)?;
-        self.conv_tail.slice_set(&tail, 0, 0)?;
+        let conv_out = self.conv_carried(&conv_in, seq_len)?;
         let (q, k, v) = self.split_conv(&conv_out)?;
         let (q, k, v, g, beta) = self.heads_and_gates(q, k, v, x, seq_len)?;
         let y = if seq_len == 1 {
@@ -402,6 +413,38 @@ impl GdnLayer {
         )?;
         self.state.slice_set(&next_state, 0, 0)?;
         Ok(y_t.unsqueeze(0)?)
+    }
+
+    /// The carried conv over one chunk: the fused single-launch tap
+    /// on a cuda decode row (the tail rotates in place INSIDE the
+    /// kernel - no slice_set), the classic chain otherwise.
+    fn conv_carried(
+        &mut self,
+        conv_in: &candle_core::Tensor,
+        seq_len: usize,
+    ) -> LibAlmostResult<candle_core::Tensor> {
+        #[cfg(feature = "cuda")]
+        if seq_len == 1
+            && self.fused_gdn
+            && conv_in.device().is_cuda()
+            && conv_in.dtype() == candle_core::DType::BF16
+            && let Some(rows) = &self.conv_weight_rows
+        {
+            let packed = candle_core::Tensor::cat(&[conv_in, rows], 0)?;
+            let out = candle_core::Tensor::zeros(
+                (1, 2 * self.key_width + self.value_width),
+                candle_core::DType::BF16,
+                conv_in.device(),
+            )?;
+            out.inplace_op3(&self.conv_tail, &packed, &fused::ConvStepFused)?;
+            return Ok(out);
+        }
+        #[cfg(not(feature = "cuda"))]
+        let _ = seq_len;
+        let (conv_out, tail) =
+            gdn::conv_with_tail(conv_in, &self.conv_weight, &self.conv_tail)?;
+        self.conv_tail.slice_set(&tail, 0, 0)?;
+        Ok(conv_out)
     }
 
     /// Zero the carried caches in place (address-stable; see

@@ -97,6 +97,34 @@ extern "C" __global__ void rms_norm_fused_bf16(
     }
 }
 
+// The k=4 causal-conv decode tap + silu + in-place tail shift, one
+// thread per channel: history is the f32 tail's three rows plus the
+// packed current row; taps and accumulation run f32 (the classic
+// chain rounds the tail through bf16 before multiplying -
+// envelope-class); the tail rotates in place inside the launch.
+extern "C" __global__ void conv_step_fused_bf16(
+    unsigned short* out,
+    float* tail,
+    const unsigned short* packed,
+    unsigned int channels
+) {
+    unsigned int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= channels) { return; }
+    float h0 = tail[c];
+    float h1 = tail[(unsigned long long)channels + c];
+    float h2 = tail[2ull * channels + c];
+    float h3 = bf16_to_f32(packed[c]);
+    float w0 = bf16_to_f32(packed[(unsigned long long)channels + c]);
+    float w1 = bf16_to_f32(packed[2ull * channels + c]);
+    float w2 = bf16_to_f32(packed[3ull * channels + c]);
+    float w3 = bf16_to_f32(packed[4ull * channels + c]);
+    float acc = h0 * w0 + h1 * w1 + h2 * w2 + h3 * w3;
+    out[c] = f32_to_bf16(acc / (1.f + expf(-acc)));
+    tail[c] = h1;
+    tail[(unsigned long long)channels + c] = h2;
+    tail[2ull * channels + c] = h3;
+}
+
 // The gated form over per-head rows: y (f32) and gate (f32,
 // pre-upcast) ride one packed [heads, 2 * dv] tensor; norm over dv,
 // weight [dv], gate = silu(gate) in f32, one rounding to bf16.
@@ -350,6 +378,96 @@ impl candle_core::InplaceOp3 for RmsNormFused {
             .arg(&columns);
         if let Err(error) = unsafe { builder.launch(config) } {
             candle_core::bail!("rms_norm_fused launch failed: {error}");
+        }
+        Ok(())
+    }
+}
+
+/// `out.inplace_op3(&tail, &packed, &ConvStepFused)`: out (1, C)
+/// bf16; tail (3, C) f32 - READ AND ROTATED IN PLACE inside the
+/// launch (the second operand is mutated; candle tensors mutate
+/// through shared storage by design, and the tail buffer's address
+/// stability is the graph-capture contract anyway); packed (5, C)
+/// bf16 rows x | w0 | w1 | w2 | w3 (the conv weight prestored
+/// row-major per layer, the x row catted per step).
+pub(crate) struct ConvStepFused;
+
+impl candle_core::InplaceOp3 for ConvStepFused {
+    fn name(&self) -> &'static str {
+        "almost_conv_step_fused"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _s1: &mut candle_core::CpuStorage,
+        _l1: &candle_core::Layout,
+        _s2: &candle_core::CpuStorage,
+        _l2: &candle_core::Layout,
+        _s3: &candle_core::CpuStorage,
+        _l3: &candle_core::Layout,
+    ) -> candle_core::Result<()> {
+        candle_core::bail!("conv_step_fused is a cuda decode building block")
+    }
+
+    fn cuda_fwd(
+        &self,
+        out: &mut candle_core::CudaStorage,
+        out_layout: &candle_core::Layout,
+        tail: &candle_core::CudaStorage,
+        tail_layout: &candle_core::Layout,
+        packed: &candle_core::CudaStorage,
+        packed_layout: &candle_core::Layout,
+    ) -> candle_core::Result<()> {
+        use cudarc::driver::{DevicePtr, PushKernelArg};
+
+        let (rows, channels) = out_layout.shape().dims2()?;
+        if rows != 1
+            || tail_layout.shape().dims2()? != (3, channels)
+            || packed_layout.shape().dims2()? != (5, channels)
+        {
+            candle_core::bail!(
+                "conv_step_fused wants out (1, C), tail (3, C), packed (5, C)"
+            );
+        }
+        if !out_layout.is_contiguous()
+            || !tail_layout.is_contiguous()
+            || !packed_layout.is_contiguous()
+        {
+            candle_core::bail!("conv_step_fused wants contiguous operands");
+        }
+
+        let device = out.device.clone();
+        let stream = device.cuda_stream();
+        let function = match kernel(&device, "conv_step_fused_bf16") {
+            Ok(function) => function,
+            Err(error) => candle_core::bail!("{error}"),
+        };
+        let out_slice = out
+            .as_cuda_slice::<half::bf16>()?
+            .slice(out_layout.start_offset()..);
+        let (out_ptr, _out_guard) = out_slice.device_ptr(&stream);
+        let tail_slice = tail.as_cuda_slice::<f32>()?.slice(tail_layout.start_offset()..);
+        let (tail_ptr, _tail_guard) = tail_slice.device_ptr(&stream);
+        let packed_slice = packed
+            .as_cuda_slice::<half::bf16>()?
+            .slice(packed_layout.start_offset()..);
+        let (packed_ptr, _packed_guard) = packed_slice.device_ptr(&stream);
+
+        let channels = channels as u32;
+        let block = 256u32;
+        let config = cudarc::driver::LaunchConfig {
+            grid_dim: (channels.div_ceil(block), 1, 1),
+            block_dim: (block, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut builder = stream.launch_builder(&function);
+        builder
+            .arg(&out_ptr)
+            .arg(&tail_ptr)
+            .arg(&packed_ptr)
+            .arg(&channels);
+        if let Err(error) = unsafe { builder.launch(config) } {
+            candle_core::bail!("conv_step_fused launch failed: {error}");
         }
         Ok(())
     }

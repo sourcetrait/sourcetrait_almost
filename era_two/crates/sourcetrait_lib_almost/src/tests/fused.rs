@@ -1,8 +1,8 @@
 //! GdnChainFusion locks: the fused decode step and the fused norms
 //! against the classic candle chains on the real geometry (cuda;
 //! checkpoint-free).
-use crate::fused::{GdnFusedStep, RmsNormFused, RmsNormGatedFused};
-use crate::gdn::recurrent_step;
+use crate::fused::{ConvStepFused, GdnFusedStep, RmsNormFused, RmsNormGatedFused};
+use crate::gdn::{conv_with_tail, recurrent_step};
 use crate::norms::{rms_norm, rms_norm_gated};
 
 fn splitmix_f32(seed: &mut u64, count: usize) -> Vec<f32> {
@@ -128,6 +128,63 @@ fn fused_step_matches_the_classic_chain() {
         worst_step_state <= 1e-9,
         "state spread {worst_step_state:.3e} beyond the f32 reassociation class"
     );
+}
+
+/// The fused conv decode tap against the classic conv_with_tail
+/// chain over carried steps at the model width. The fused form keeps
+/// the tail in raw f32 where the classic chain rounds it through
+/// bf16 per step - a bf16 quantization-class spread.
+#[test]
+#[ignore = "needs a cuda card"]
+fn fused_conv_step_matches_the_classic_chain() {
+    const STEPS: usize = 6;
+    let channels = 11520usize;
+    let device = candle_core::Device::new_cuda(0).expect("cuda");
+    let mut seed = 0xC0FF_EE00_DEAD_BEEFu64;
+    let weight_rows = synth(&mut seed, (4, channels), &device)
+        .to_dtype(candle_core::DType::BF16)
+        .expect("weight rows");
+    // The classic layout: [channels, 1, kernel].
+    let weight = weight_rows
+        .transpose(0, 1)
+        .expect("transpose")
+        .reshape((channels, 1, 4))
+        .expect("weight")
+        .contiguous()
+        .expect("packed weight");
+    let classic_tail =
+        candle_core::Tensor::zeros((3, channels), candle_core::DType::F32, &device)
+            .expect("classic tail");
+    let fused_tail = classic_tail.copy().expect("fused tail");
+
+    let mut worst_out = 0f64;
+    for _ in 0..STEPS {
+        let x = synth(&mut seed, (1, channels), &device)
+            .to_dtype(candle_core::DType::BF16)
+            .expect("x bf16");
+        let (classic_out, new_tail) =
+            conv_with_tail(&x, &weight, &classic_tail).expect("classic conv");
+        classic_tail.slice_set(&new_tail, 0, 0).expect("classic carry");
+
+        let packed = candle_core::Tensor::cat(&[&x, &weight_rows], 0).expect("pack");
+        let fused_out =
+            candle_core::Tensor::zeros((1, channels), candle_core::DType::BF16, &device)
+                .expect("out");
+        fused_out
+            .inplace_op3(&fused_tail, &packed, &ConvStepFused)
+            .expect("fused conv step");
+        worst_out = worst_out.max(relative_spread(
+            &fused_out.to_dtype(candle_core::DType::F32).expect("f32"),
+            &classic_out.to_dtype(candle_core::DType::F32).expect("f32"),
+        ));
+    }
+    let tail_spread = relative_spread(&fused_tail, &classic_tail);
+    println!(
+        "fused conv vs classic over {STEPS} carried steps: worst out nmse {worst_out:.3e}, \
+         final tail nmse {tail_spread:.3e}"
+    );
+    assert!(worst_out <= 5e-5, "out spread {worst_out:.3e} beyond the bf16 class");
+    assert!(tail_spread <= 5e-5, "tail spread {tail_spread:.3e} beyond the bf16 class");
 }
 
 /// The fused plain norm against norms::rms_norm on bf16 cuda at the
