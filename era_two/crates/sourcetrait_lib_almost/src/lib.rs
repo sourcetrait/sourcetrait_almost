@@ -11,7 +11,13 @@ pub(crate) mod generate;
 #[cfg(feature = "cuda")]
 pub(crate) mod graph;
 pub(crate) mod load;
-pub(crate) mod model;
+pub(crate) mod model {
+    pub(crate) mod attn_layer;
+    pub(crate) mod gdn_layer;
+    pub(crate) mod hybrid;
+    pub(crate) mod mask;
+    pub(crate) mod mlp;
+}
 pub(crate) mod needle;
 pub(crate) mod norms;
 #[cfg(feature = "attn-profile")]
@@ -31,6 +37,17 @@ pub(crate) use std::{
 };
 
 pub(crate) use candle_nn::Module;
+
+pub(crate) use crate::model::attn_layer::{
+    AttnLayer,
+    KV_RESERVE_STEP,
+};
+pub(crate) use crate::model::gdn_layer::GdnLayer;
+pub(crate) use crate::model::mask::{
+    causal_mask,
+    offset_causal_mask,
+};
+pub(crate) use crate::model::mlp::Mlp;
 
 pub(crate) mod r {
     #[cfg(feature = "flash-attn")]
@@ -84,7 +101,7 @@ pub use crate::generate::{
     GenerationReport,
     GenerationStep,
 };
-pub use crate::model::OlmoHybrid;
+pub use crate::model::hybrid::OlmoHybrid;
 pub use crate::needle::{
     NeedleCellResult,
     NeedleKey,
