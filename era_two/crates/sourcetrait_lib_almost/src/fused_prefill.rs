@@ -80,6 +80,136 @@ extern "C" __global__ void tri_solve_f32(
         out_row[c] = value;
     }
 }
+
+// StateAdvance v2: the inter-chunk serial recurrence with the chunk
+// outputs fused (fla fwd_h + fwd_o folded; no HBM state scratch).
+// OCCUPANCY SPLIT: grid (heads, 4 stripes) = 120 blocks, 48 threads
+// each - one thread per v-column of its stripe; the shared staging
+// (k tile, gates, decayed attn tile) is duplicated per stripe and
+// the per-column math is IDENTICAL to the single-block form, so the
+// split is value-transparent. Compile-time tiles (SA_DK/SA_DV) keep
+// the state column in registers - runtime-bound register arrays
+// spill to local memory and serialize every MAC (the measured v1
+// failure).
+#define SA_DK 96u
+#define SA_DV 192u
+#define SA_COLS 48u
+#define SA_ROW (3u * SA_DK + SA_DV + 1u)
+
+extern "C" __global__ void state_advance_f32(
+    float* state,
+    const float* bundle,
+    float* out,
+    unsigned int chunks
+) {
+    extern __shared__ float shared[];
+    float* sk = shared;                        // [64, SA_DK] raw k
+    float* sattn = shared + 64u * SA_DK;       // [64, 64] decayed local attn
+    float* sg = sattn + 64u * 64u;             // [64] cumulative gates
+    float* seg = sg + 64u;                     // [64] exp(g)
+    float* ses = seg + 64u;                    // [64] exp(g_last - g)
+    unsigned long long h = blockIdx.x;
+    unsigned int stripe = blockIdx.y;
+    unsigned int tid = threadIdx.x;
+    unsigned int j = stripe * SA_COLS + tid;   // this thread's v-column
+    const unsigned long long chunk_stride = 64ull * SA_ROW;
+    const float* bundle_h = bundle + h * (unsigned long long)chunks * chunk_stride;
+    float* out_h = out + h * (unsigned long long)chunks * 64ull * SA_DV;
+    float* state_h = state + h * (unsigned long long)SA_DK * SA_DV;
+
+    float s_reg[SA_DK];
+    float vnew[64];
+    #pragma unroll
+    for (unsigned int i = 0; i < SA_DK; ++i) {
+        s_reg[i] = state_h[(unsigned long long)i * SA_DV + j];
+    }
+
+    for (unsigned int chunk = 0; chunk < chunks; ++chunk) {
+        const float* rows = bundle_h + chunk * chunk_stride;
+        __syncthreads();
+        // Stage k + gates (strided over the stripe's threads).
+        for (unsigned int idx = tid; idx < 64u * SA_DK; idx += SA_COLS) {
+            unsigned int r = idx / SA_DK;
+            unsigned int i = idx - r * SA_DK;
+            sk[r * SA_DK + i] = rows[r * SA_ROW + SA_DK + i];
+        }
+        for (unsigned int r = tid; r < 64u; r += SA_COLS) {
+            sg[r] = rows[r * SA_ROW + 3u * SA_DK + SA_DV];
+        }
+        __syncthreads();
+        for (unsigned int r = tid; r < 64u; r += SA_COLS) {
+            seg[r] = expf(sg[r]);
+            ses[r] = expf(sg[63] - sg[r]);
+        }
+        __syncthreads();
+        // The decayed local attention tile: (q[r] . k[c]) *
+        // exp(g[r] - g[c]) on and below the diagonal, zero above.
+        for (unsigned int idx = tid; idx < 64u * 64u; idx += SA_COLS) {
+            unsigned int r = idx / 64u;
+            unsigned int c = idx - r * 64u;
+            float value = 0.f;
+            if (c <= r) {
+                const float* q_row = rows + r * SA_ROW;
+                float dot = 0.f;
+                #pragma unroll
+                for (unsigned int i = 0; i < SA_DK; ++i) {
+                    dot += q_row[i] * sk[c * SA_DK + i];
+                }
+                value = dot * expf(sg[r] - sg[c]);
+            }
+            sattn[idx] = value;
+        }
+        __syncthreads();
+        // v_new = u - w @ S over the carried column.
+        for (unsigned int r = 0; r < 64u; ++r) {
+            const float* row = rows + r * SA_ROW;
+            const float* w_row = row + 2u * SA_DK;
+            float acc = 0.f;
+            #pragma unroll
+            for (unsigned int i = 0; i < SA_DK; ++i) {
+                acc += w_row[i] * s_reg[i];
+            }
+            vnew[r] = row[3u * SA_DK + j] - acc;
+        }
+        // out rows: exp(g_r) * (q[r] . S) + attn_local @ v_new.
+        for (unsigned int r = 0; r < 64u; ++r) {
+            const float* q_row = rows + r * SA_ROW;
+            float inter = 0.f;
+            #pragma unroll
+            for (unsigned int i = 0; i < SA_DK; ++i) {
+                inter += q_row[i] * s_reg[i];
+            }
+            float acc = inter * seg[r];
+            const float* attn_row = sattn + r * 64u;
+            for (unsigned int c = 0; c <= r; ++c) {
+                acc += attn_row[c] * vnew[c];
+            }
+            out_h[(chunk * 64ull + r) * SA_DV + j] = acc;
+        }
+        // S = S * exp(g_last) + (k * exp(g_last - g))^T @ v_new -
+        // r-major so each vnew row is read ONCE (a runtime-indexed
+        // register array lives in local memory; the i-major form paid
+        // 96 local reads per row and dominated the kernel).
+        // Reassociation-class vs the i-major sum; the lock re-pins.
+        float e_last = expf(sg[63]);
+        #pragma unroll
+        for (unsigned int i = 0; i < SA_DK; ++i) {
+            s_reg[i] *= e_last;
+        }
+        for (unsigned int r = 0; r < 64u; ++r) {
+            float scaled = ses[r] * vnew[r];
+            const float* k_row = sk + r * SA_DK;
+            #pragma unroll
+            for (unsigned int i = 0; i < SA_DK; ++i) {
+                s_reg[i] += k_row[i] * scaled;
+            }
+        }
+    }
+    #pragma unroll
+    for (unsigned int i = 0; i < SA_DK; ++i) {
+        state_h[(unsigned long long)i * SA_DV + j] = s_reg[i];
+    }
+}
 "#;
 
 /// Lazily nvrtc-compiled module, one per process (single-device box).
@@ -200,12 +330,121 @@ impl candle_core::InplaceOp3 for TriSolve {
     }
 }
 
-/// The chunked gated-delta rule with the TriSolve kernel in place of
-/// the classic mask-build + kkt + row-serial inversion: the same
-/// contract as gdn::chunk_rule (pre-l2normed q/k, q pre-scaled, all
-/// f32, initial-state carry; pad rows inert) - the per-chunk state
-/// advance stays the classic candle loop until the StateAdvance
-/// slice lands.
+/// `state.inplace_op3(&bundle, &out, &StateAdvance)`: state
+/// (heads, dk, dv) f32 - the carried state, advanced IN PLACE across
+/// every chunk (the kernel loops chunks serially inside); bundle
+/// (heads, chunks, 64, 3*dk + dv + 1) f32 rows q | k | w | u | g;
+/// out (heads, chunks, 64, dv) f32 - WRITTEN by the kernel (the
+/// mixer outputs; candle tensors mutate through shared storage by
+/// design). All contiguous, all addressed at their layout offsets.
+/// Geometry-locked to dk 96 / dv 192 (compile-time tiles keep the
+/// state column in registers); the grid splits each head's
+/// v-columns across four 48-column stripes for occupancy (120
+/// blocks; the shared staging is duplicated per stripe, the
+/// per-column math is identical). The bundle pack STAYS this round:
+/// the serial kernel needs q/k/w/u/g + state + out, InplaceOp3 caps
+/// at three operands, and candle matmuls cannot land in slices -
+/// measured pack cost ~2% of prefill wall.
+pub(crate) struct StateAdvance;
+
+impl candle_core::InplaceOp3 for StateAdvance {
+    fn name(&self) -> &'static str {
+        "almost_state_advance"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _s1: &mut candle_core::CpuStorage,
+        _l1: &candle_core::Layout,
+        _s2: &candle_core::CpuStorage,
+        _l2: &candle_core::Layout,
+        _s3: &candle_core::CpuStorage,
+        _l3: &candle_core::Layout,
+    ) -> candle_core::Result<()> {
+        candle_core::bail!("state_advance is a cuda prefill building block")
+    }
+
+    fn cuda_fwd(
+        &self,
+        state: &mut candle_core::CudaStorage,
+        state_layout: &candle_core::Layout,
+        bundle: &candle_core::CudaStorage,
+        bundle_layout: &candle_core::Layout,
+        out: &candle_core::CudaStorage,
+        out_layout: &candle_core::Layout,
+    ) -> candle_core::Result<()> {
+        use cudarc::driver::{DevicePtr, PushKernelArg};
+
+        let (heads, dk, dv) = state_layout.shape().dims3()?;
+        let (b_heads, chunks, b_chunk, row_width) = bundle_layout.shape().dims4()?;
+        let out_dims = out_layout.shape().dims4()?;
+        if b_heads != heads
+            || b_chunk != 64
+            || row_width != 3 * dk + dv + 1
+            || out_dims != (heads, chunks, 64, dv)
+        {
+            candle_core::bail!(
+                "state_advance wants state (h, dk, dv), bundle (h, n, 64, 3dk+dv+1), \
+                 out (h, n, 64, dv); got {:?}, {:?}, {out_dims:?}",
+                (heads, dk, dv),
+                (b_heads, chunks, b_chunk, row_width)
+            );
+        }
+        if dk != 96 || dv != 192 {
+            candle_core::bail!(
+                "state_advance is geometry-locked to dk == 96 and dv == 192 (got {dk}, {dv})"
+            );
+        }
+        if !state_layout.is_contiguous()
+            || !bundle_layout.is_contiguous()
+            || !out_layout.is_contiguous()
+        {
+            candle_core::bail!("state_advance wants contiguous operands");
+        }
+
+        let device = state.device.clone();
+        let stream = device.cuda_stream();
+        let function = match kernel(&device, "state_advance_f32") {
+            Ok(function) => function,
+            Err(error) => candle_core::bail!("{error}"),
+        };
+        let state_slice = state
+            .as_cuda_slice::<f32>()?
+            .slice(state_layout.start_offset()..);
+        let (state_ptr, _state_guard) = state_slice.device_ptr(&stream);
+        let bundle_slice = bundle
+            .as_cuda_slice::<f32>()?
+            .slice(bundle_layout.start_offset()..);
+        let (bundle_ptr, _bundle_guard) = bundle_slice.device_ptr(&stream);
+        let out_slice = out.as_cuda_slice::<f32>()?.slice(out_layout.start_offset()..);
+        let (out_ptr, _out_guard) = out_slice.device_ptr(&stream);
+
+        let chunks = chunks as u32;
+        let shared_bytes: u32 = (64 * 96 + 64 * 64 + 3 * 64) * 4;
+        let config = cudarc::driver::LaunchConfig {
+            grid_dim: (heads as u32, 4, 1),
+            block_dim: (48, 1, 1),
+            shared_mem_bytes: shared_bytes,
+        };
+        let mut builder = stream.launch_builder(&function);
+        builder
+            .arg(&state_ptr)
+            .arg(&bundle_ptr)
+            .arg(&out_ptr)
+            .arg(&chunks);
+        if let Err(error) = unsafe { builder.launch(config) } {
+            candle_core::bail!("state_advance launch failed: {error}");
+        }
+        Ok(())
+    }
+}
+
+/// The chunked gated-delta rule as the two-kernel family: TriSolve in
+/// place of the classic mask-build + kkt + row-serial inversion, and
+/// StateAdvance in place of the per-chunk sequential loop (outputs
+/// fused; no decay-mask tensors at all). The same contract as
+/// gdn::chunk_rule (pre-l2normed q/k, q pre-scaled, all f32,
+/// initial-state carry; pad rows inert).
 pub(crate) fn chunk_rule_fused(
     q: &candle_core::Tensor,
     k: &candle_core::Tensor,
@@ -235,16 +474,6 @@ pub(crate) fn chunk_rule_fused(
     let k_beta = k_beta.reshape((heads, chunks, gdn::CHUNK, head_k))?;
     let g = g.reshape((heads, chunks, gdn::CHUNK))?.cumsum(2)?;
 
-    let lower_incl = gdn::lower_triangle(gdn::CHUNK, false, device)?;
-
-    // The state loop still consumes the decay mask (StateAdvance
-    // retires it); the solve no longer does.
-    let diff = g.unsqueeze(3)?.broadcast_sub(&g.unsqueeze(2)?)?;
-    let decay_mask = diff
-        .broadcast_mul(&lower_incl)?
-        .exp()?
-        .broadcast_mul(&lower_incl)?;
-
     // TriSolve: the whole intra-chunk build + inversion in one launch.
     let blocks = heads * chunks;
     let k_blocks = k.reshape((blocks, gdn::CHUNK, head_k))?.contiguous()?;
@@ -265,40 +494,24 @@ pub(crate) fn chunk_rule_fused(
     let g_exp = g.exp()?.unsqueeze(3)?;
     let k_cumdecay = attn.matmul(&k_beta.broadcast_mul(&g_exp)?.contiguous()?)?;
 
-    // Per-chunk sequential state advance - the classic loop verbatim
-    // (the StateAdvance slice replaces it).
-    let mut carried = state.clone();
-    let mut outs = Vec::with_capacity(chunks);
-    for chunk_idx in 0..chunks {
-        let q_i = q.narrow(1, chunk_idx, 1)?.squeeze(1)?.contiguous()?;
-        let k_i = k.narrow(1, chunk_idx, 1)?.squeeze(1)?.contiguous()?;
-        let v_i = value.narrow(1, chunk_idx, 1)?.squeeze(1)?;
-        let g_i = g.narrow(1, chunk_idx, 1)?.squeeze(1)?;
-        let mask_i = decay_mask.narrow(1, chunk_idx, 1)?.squeeze(1)?;
-        let attn_local = q_i
-            .matmul(&k_i.transpose(1, 2)?.contiguous()?)?
-            .mul(&mask_i)?
-            .broadcast_mul(&lower_incl)?;
-        let v_prime = k_cumdecay
-            .narrow(1, chunk_idx, 1)?
-            .squeeze(1)?
-            .contiguous()?
-            .matmul(&carried)?;
-        let v_new = v_i.sub(&v_prime)?;
-        let g_exp_i = g_i.exp()?.unsqueeze(2)?;
-        let attn_inter = q_i.broadcast_mul(&g_exp_i)?.matmul(&carried)?;
-        outs.push((attn_inter + attn_local.matmul(&v_new)?)?);
-        let g_last = g_i.narrow(1, gdn::CHUNK - 1, 1)?;
-        let state_decay = g_last.exp()?.unsqueeze(2)?;
-        let k_scale = g_last.broadcast_sub(&g_i)?.exp()?.unsqueeze(2)?;
-        carried = (carried.broadcast_mul(&state_decay)?
-            + k_i
-                .broadcast_mul(&k_scale)?
-                .transpose(1, 2)?
-                .contiguous()?
-                .matmul(&v_new)?)?;
-    }
-    let out = candle_core::Tensor::cat(&outs, 1)?
+    // StateAdvance: the serial inter-chunk recurrence + the chunk
+    // outputs in one launch. cat on a non-zero dim returns a
+    // transposed view (the era-one contiguity lesson); the kernel
+    // wants packed rows.
+    let bundle = candle_core::Tensor::cat(
+        &[&q, &k, &k_cumdecay, &value, &g.unsqueeze(3)?],
+        3,
+    )?
+    .contiguous()?;
+    let carried = state.copy()?;
+    let out = candle_core::Tensor::zeros(
+        (heads, chunks, gdn::CHUNK, head_v),
+        candle_core::DType::F32,
+        device,
+    )?;
+    carried.inplace_op3(&bundle, &out, &StateAdvance)?;
+    let out = out
+        .reshape((heads, chunks * gdn::CHUNK, head_v))?
         .narrow(1, 0, t)?
         .transpose(0, 1)?
         .contiguous()?;
