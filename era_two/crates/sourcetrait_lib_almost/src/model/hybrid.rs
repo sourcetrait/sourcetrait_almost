@@ -15,6 +15,15 @@ enum Layer {
     Attn(AttnLayer),
 }
 
+/// SpeculationPort: the pre-verification cache mark. Attention rows
+/// are prefix-correct, so their rewind is a length reset recorded
+/// here; the GDN caches are cumulative, so the mark shadows them per
+/// layer and a partial accept restores the shadows while the caller
+/// re-advances the accepted rows (forward_chunk_carry).
+pub(crate) struct SpecMark {
+    pub(crate) context_len: usize,
+}
+
 /// The margin a graph arm pre-reserves past the live length when the
 /// sample budget exceeds it (the 32768 default budget would
 /// otherwise pre-grow gigabytes a typical decode never touches).
@@ -371,6 +380,41 @@ impl OlmoHybrid {
             context_len: file.context_len,
             context_ids: file.context_ids,
         })
+    }
+
+    /// SpeculationPort: shadow every GDN layer's carried caches and
+    /// record the live lengths - the mark a verification forward can
+    /// roll back to.
+    pub(crate) fn spec_mark(&mut self) -> LibAlmostResult<SpecMark> {
+        for layer in &mut self.layers {
+            if let Layer::Gdn(gdn) = layer {
+                gdn.shadow_save()?;
+            }
+        }
+        Ok(SpecMark {
+            context_len: self.context_len,
+        })
+    }
+
+    /// SpeculationPort: roll every carried cache back to the mark -
+    /// GDN shadows restore in place, attention KV lengths and the
+    /// context length reset (rows past the mark become invisible; the
+    /// caller re-advances the accepted rows through
+    /// forward_chunk_carry). Classic-path only by construction
+    /// (speculation never arms graphs and refuses eviction).
+    pub(crate) fn spec_rollback(&mut self, mark: &SpecMark) -> LibAlmostResult<()> {
+        for layer in &mut self.layers {
+            match layer {
+                Layer::Gdn(gdn) => gdn.shadow_restore()?,
+                Layer::Attn(attn) => {
+                    if let Some(kv) = &mut attn.kv {
+                        kv.len = mark.context_len;
+                    }
+                }
+            }
+        }
+        self.context_len = mark.context_len;
+        Ok(())
     }
 
     /// KvEviction keep-sets from the live last-pass scores, one per

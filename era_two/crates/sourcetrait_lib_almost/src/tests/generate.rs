@@ -149,6 +149,7 @@ fn bench_rows_cuda() {
             _ => LibSettings::default(),
         },
     };
+    let bench_speculate = settings.generation.speculate;
     let mut model = OlmoHybrid::new(&config, settings, weights).expect("model");
     let tokenizer = load_tokenizer(&dir).expect("tokenizer");
 
@@ -170,6 +171,7 @@ fn bench_rows_cuda() {
             sample_len: decode_window,
             chat: false,
             ignore_stops: true,
+            speculate: bench_speculate,
             ..GenerateOptions::default()
         };
         let mut generation = model
@@ -183,8 +185,13 @@ fn bench_rows_cuda() {
         let decode_rate =
             (report.generated_token_count.saturating_sub(1)) as f64 / report.decode_seconds;
         println!(
-            "bench {file}: prompt {} tok, prefill {:.0} tok/s, decode {:.1} tok/s ({} tokens)",
-            report.prompt_token_count, prefill_rate, decode_rate, report.generated_token_count
+            "bench {file}: prompt {} tok, prefill {:.0} tok/s, decode {:.1} tok/s ({} tokens, drafted {}, accepted {})",
+            report.prompt_token_count,
+            prefill_rate,
+            decode_rate,
+            report.generated_token_count,
+            report.drafted_token_count,
+            report.accepted_draft_token_count
         );
         assert_eq!(
             report.generated_token_count, decode_window,

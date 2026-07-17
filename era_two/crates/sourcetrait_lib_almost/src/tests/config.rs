@@ -222,6 +222,18 @@ fn named_profiles_load_their_component_file() {
 }
 
 #[test]
+fn speculate_rides_the_generation_table() {
+    let shell: LibSettingsToml =
+        toml::from_str("[generation]\ngreedy = true\nspeculate = true\n").expect("parses");
+    let settings: LibSettings = shell.try_into().expect("merges");
+    assert!(settings.generation.speculate);
+    assert!(
+        !LibSettings::default().generation.speculate,
+        "the embedded defaults stay speculation-free"
+    );
+}
+
+#[test]
 fn eviction_arms_by_decode_cap_with_protection_defaults() {
     let shell: LibSettingsToml =
         toml::from_str("[eviction]\ndecode_cap = 2048\n").expect("parses");

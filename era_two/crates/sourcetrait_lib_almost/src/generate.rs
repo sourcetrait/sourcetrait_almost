@@ -33,6 +33,13 @@ pub struct GenerateOptions {
     /// budget - the bench posture (the incumbent rows force their
     /// decode length the same way). Never a chat behavior.
     pub ignore_stops: bool,
+    /// SpeculationPort lookup speculation: draft continuations from
+    /// earlier context occurrences, verify in one batched carried
+    /// forward. Greedy-only (verification rides the same argmax
+    /// sampler - token-exact vs plain greedy at f32); refuses
+    /// eviction-armed settings and keeps the classic decode path
+    /// (graphs never arm on a speculative run).
+    pub speculate: bool,
 }
 
 impl Default for GenerateOptions {
@@ -44,6 +51,7 @@ impl Default for GenerateOptions {
             sample_len: 32_768,
             chat: true,
             ignore_stops: false,
+            speculate: false,
         }
     }
 }
@@ -81,6 +89,10 @@ pub struct GenerationReport {
     pub finish_reason: Option<FinishReason>,
     pub prompt_token_count: usize,
     pub generated_token_count: usize,
+    /// SpeculationPort tallies (zero when speculation was off or
+    /// never fired).
+    pub drafted_token_count: usize,
+    pub accepted_draft_token_count: usize,
     pub prefill_seconds: f64,
     pub decode_seconds: f64,
     /// Detokenizer tail not yet emitted through the steps.
@@ -107,6 +119,15 @@ pub struct Generation<'a> {
     context_ids: Vec<u32>,
     emitted_bytes: usize,
     pending_id: Option<u32>,
+    /// SpeculationPort: verification-accepted tokens awaiting
+    /// emission - already consumed into the caches and the trail, so
+    /// their yields owe no forward.
+    queued: VecDeque<u32>,
+    speculate: bool,
+    index: speculate::LookupIndex,
+    policy: speculate::DraftPolicy,
+    drafted_count: usize,
+    accepted_draft_count: usize,
     sample_len: usize,
     finish_reason: Option<FinishReason>,
     failed: bool,
@@ -186,6 +207,16 @@ impl OlmoHybrid {
             snafu::whatever!("empty prompt after rendering");
         }
 
+        if options.speculate {
+            snafu::ensure_whatever!(
+                options.temperature.is_none(),
+                "speculation is greedy-only (sampling verification is a later track)"
+            );
+            snafu::ensure_whatever!(
+                self.settings().eviction.is_none(),
+                "speculation under eviction is not supported yet (run eviction-off)"
+            );
+        }
         let sampling = match (options.temperature, options.top_p) {
             (None, _) => r::sampling::Sampling::ArgMax,
             (Some(temperature), Some(p)) => r::sampling::Sampling::TopP { p, temperature },
@@ -201,6 +232,12 @@ impl OlmoHybrid {
             context_ids,
             emitted_bytes: 0,
             pending_id: None,
+            queued: VecDeque::new(),
+            speculate: options.speculate,
+            index: speculate::LookupIndex::new(),
+            policy: speculate::DraftPolicy::new(),
+            drafted_count: 0,
+            accepted_draft_count: 0,
             sample_len: options.sample_len,
             finish_reason: None,
             failed: false,
@@ -210,6 +247,11 @@ impl OlmoHybrid {
             model: self,
             tokenizer,
         };
+        if generation.speculate {
+            // The whole committed context (a carried trail included)
+            // seeds the index; the emitted tokens join per round.
+            generation.index.extend(&generation.context_ids);
+        }
 
         let prefill_started = std::time::Instant::now();
         // The known-length pre-reserve: the whole run's KV capacity
@@ -246,7 +288,9 @@ impl OlmoHybrid {
         }
         // Arm the staged graph decode after prefill (settings.graph;
         // cuda builds only - Model::new already rejected the rest).
-        if generation.model.settings().graph {
+        // Speculation keeps the classic path silently (the era-one
+        // scoping): variable-length verify chunks would churn buckets.
+        if generation.model.settings().graph && !generation.speculate {
             let expected_total =
                 context_before + generation.prompt_token_count + generation.sample_len;
             generation.model.arm_graph_decode(expected_total)?;
@@ -293,17 +337,32 @@ impl Generation<'_> {
         if self.finish_reason.is_some() || self.failed {
             return Ok(None);
         }
-        let Some(token_id) = self.pending_id.take() else {
-            return Ok(None);
+        let (token_id, from_queue) = match self.queued.pop_front() {
+            Some(token_id) => (token_id, true),
+            None => match self.pending_id.take() {
+                Some(token_id) => (token_id, false),
+                None => return Ok(None),
+            },
         };
         if !self.ignore_stops && self.stop_ids.contains(&token_id) {
+            self.queued.clear();
             self.finish_reason = Some(FinishReason::StopToken);
             return Ok(None);
         }
         self.generated_ids.push(token_id);
         let chunk = self.emit_chunk()?;
         if self.generated_ids.len() >= self.sample_len {
+            self.queued.clear();
             self.finish_reason = Some(FinishReason::SampleLen);
+            return Ok(Some(GenerationStep { token_id, chunk }));
+        }
+        if from_queue {
+            // SpeculationPort: a verification-accepted token - already
+            // consumed into the caches and the trail; no forward owed.
+            return Ok(Some(GenerationStep { token_id, chunk }));
+        }
+        if self.speculate {
+            self.stage_or_speculate(token_id)?;
             return Ok(Some(GenerationStep { token_id, chunk }));
         }
         // KvEviction overflow epoch: decode outgrew the cap by the
@@ -337,6 +396,106 @@ impl Generation<'_> {
         Ok(Some(GenerationStep { token_id, chunk }))
     }
 
+    /// One SpeculationPort round for the emitted token: index it,
+    /// probe the ladder, and either verify [token ++ draft] in one
+    /// batched carried forward or fall to the plain single step. On a
+    /// partial accept the caches roll back to the mark and the
+    /// accepted rows re-advance logits-free (the GDN caches are
+    /// cumulative - the shadow restore + replay replaces era-one's
+    /// exact ring rewind); a full accept keeps the caches as-is.
+    /// Token-exact vs plain greedy: every row rides the same argmax
+    /// sampler.
+    fn stage_or_speculate(&mut self, token_id: u32) -> LibAlmostResult<()> {
+        // The emitted token is committed context NOW - it must join
+        // the index before drafting, or every draft continues the
+        // pre-token tail and competes with the token itself.
+        self.index.extend(&[token_id]);
+        let budget = self.sample_len.saturating_sub(self.generated_ids.len());
+        let draft = if budget > 0 {
+            let probe = self.policy.probe_limit();
+            self.index
+                .draft(probe.min(budget))
+                .map(|(matched_n, mut tokens)| {
+                    tokens.truncate(self.policy.draft_limit(matched_n).min(budget));
+                    tokens
+                })
+                .filter(|tokens| !tokens.is_empty())
+        } else {
+            None
+        };
+        let Some(draft) = draft else {
+            // Plain single step (classic path; speculation never arms
+            // graphs).
+            let step_ids =
+                candle_core::Tensor::from_vec(vec![token_id], 1, self.model.device())?;
+            let logits = self.model.forward_chunk(&step_ids)?;
+            self.context_ids.push(token_id);
+            self.pending_id = Some(self.sample(&logits)?);
+            return Ok(());
+        };
+
+        let span = 1 + draft.len();
+        let mark = self.model.spec_mark()?;
+        let mut block: Vec<u32> = Vec::with_capacity(span);
+        block.push(token_id);
+        block.extend_from_slice(&draft);
+        let block_ids =
+            candle_core::Tensor::from_vec(block, span, self.model.device())?;
+        let logits = self
+            .model
+            .forward_chunk(&block_ids)?
+            .to_dtype(candle_core::DType::F32)?
+            .to_device(&candle_core::Device::Cpu)?;
+        self.drafted_count += draft.len();
+
+        let mut greedy_next: Vec<u32> = Vec::with_capacity(span);
+        for row_index in 0..span {
+            let row = logits.narrow(0, row_index, 1)?.squeeze(0)?;
+            greedy_next.push(self.processor.sample(&row)?);
+        }
+        let mut accepted: Vec<u32> = vec![token_id];
+        for (draft_index, &draft_token) in draft.iter().enumerate() {
+            if greedy_next[draft_index] == draft_token {
+                accepted.push(draft_token);
+            } else {
+                break;
+            }
+        }
+        let consumed = accepted.len();
+        self.accepted_draft_count += consumed - 1;
+        self.policy.record(consumed - 1);
+        let bonus = greedy_next[consumed - 1];
+
+        if consumed < span {
+            // Partial accept: restore the mark and re-advance the
+            // accepted rows logits-free (the bonus row is already in
+            // hand from the verification logits).
+            self.model.spec_rollback(&mark)?;
+            let replay = candle_core::Tensor::from_vec(
+                accepted.clone(),
+                consumed,
+                self.model.device(),
+            )?;
+            self.model.forward_chunk_carry(&replay)?;
+        }
+        self.context_ids.extend_from_slice(&accepted);
+        // token_id is already indexed; the verified continuation
+        // joins now.
+        self.index.extend(&accepted[1..]);
+
+        let mut queued: Vec<u32> = accepted[1..].to_vec();
+        let mut pending = bonus;
+        if !self.ignore_stops
+            && let Some(stop_at) = queued.iter().position(|t| self.stop_ids.contains(t))
+        {
+            pending = queued[stop_at];
+            queued.truncate(stop_at);
+        }
+        self.queued = queued.into();
+        self.pending_id = Some(pending);
+        Ok(())
+    }
+
     /// Close the generation: decode timing, the detokenizer tail, and
     /// the accounting.
     pub fn finish(self) -> GenerationReport {
@@ -354,6 +513,8 @@ impl Generation<'_> {
             finish_reason: self.finish_reason,
             prompt_token_count: self.prompt_token_count,
             generated_token_count: self.generated_ids.len(),
+            drafted_token_count: self.drafted_count,
+            accepted_draft_token_count: self.accepted_draft_count,
             prefill_seconds: self.prefill_seconds,
             decode_seconds,
             rest,

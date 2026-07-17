@@ -485,6 +485,7 @@ pub struct GenerationToml {
     pub sample_len: Option<usize>,
     pub chat: Option<bool>,
     pub ignore_stops: Option<bool>,
+    pub speculate: Option<bool>,
 }
 
 /// The lib component's settings file shape (TOML format layer).
@@ -538,6 +539,7 @@ fn merged_generation(user: GenerationToml, base: GenerationToml) -> GenerateOpti
         sample_len: user.sample_len.or(base.sample_len).unwrap_or(code.sample_len),
         chat: user.chat.or(base.chat).unwrap_or(code.chat),
         ignore_stops: user.ignore_stops.or(base.ignore_stops).unwrap_or(code.ignore_stops),
+        speculate: user.speculate.or(base.speculate).unwrap_or(code.speculate),
     }
 }
 

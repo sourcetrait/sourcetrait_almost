@@ -25,11 +25,15 @@ pub(crate) mod norms;
 #[cfg(feature = "attn-profile")]
 pub(crate) mod profile;
 pub(crate) mod snapshot;
+pub(crate) mod speculate;
 pub(crate) mod tokenizer;
 
 #[allow(unused_imports)]
 pub(crate) use std::{
-    collections::HashMap,
+    collections::{
+        HashMap,
+        VecDeque,
+    },
     env,
     fs,
     io,
@@ -144,5 +148,6 @@ mod tests {
     #[cfg(feature = "attn-profile")]
     mod profile;
     mod snapshot;
+    mod speculate;
     mod tokenizer;
 }

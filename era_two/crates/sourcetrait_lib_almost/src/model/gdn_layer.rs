@@ -56,6 +56,10 @@ pub(crate) struct GdnLayer {
     fused_prefill: bool,
     state: candle_core::Tensor,
     conv_tail: candle_core::Tensor,
+    /// SpeculationPort shadow buffers (state + conv tail), built at
+    /// the first spec mark; plain device copies - speculation rides
+    /// the classic path only, so no capture/address constraints bind.
+    spec_shadow: Option<(candle_core::Tensor, candle_core::Tensor)>,
 }
 
 impl GdnLayer {
@@ -113,6 +117,7 @@ impl GdnLayer {
                 &device,
             )?,
             conv_tail: f32_zeros((kernel - 1, key_dim + key_dim + value_dim))?,
+            spec_shadow: None,
             input_layernorm: vb.pp("input_layernorm").get(hidden, "weight")?,
             post_attention_layernorm: vb.pp("post_attention_layernorm").get(hidden, "weight")?,
             qkvg_proj: candle_nn::Linear::new(
@@ -541,6 +546,32 @@ impl GdnLayer {
         self.state.slice_set(&self.state.zeros_like()?, 0, 0)?;
         self.conv_tail
             .slice_set(&self.conv_tail.zeros_like()?, 0, 0)?;
+        Ok(())
+    }
+
+    /// SpeculationPort: snapshot the carried caches into the shadow
+    /// buffers (lazily allocated fresh storage - slice_set refuses
+    /// shared storage).
+    pub(crate) fn shadow_save(&mut self) -> LibAlmostResult<()> {
+        if self.spec_shadow.is_none() {
+            self.spec_shadow =
+                Some((self.state.zeros_like()?, self.conv_tail.zeros_like()?));
+        }
+        let (state_shadow, tail_shadow) =
+            self.spec_shadow.as_ref().expect("just ensured");
+        state_shadow.slice_set(&self.state, 0, 0)?;
+        tail_shadow.slice_set(&self.conv_tail, 0, 0)?;
+        Ok(())
+    }
+
+    /// SpeculationPort: restore the carried caches from the shadow
+    /// buffers, in place (address-stable like every cache write).
+    pub(crate) fn shadow_restore(&mut self) -> LibAlmostResult<()> {
+        let Some((state_shadow, tail_shadow)) = &self.spec_shadow else {
+            snafu::whatever!("shadow restore without a saved shadow");
+        };
+        self.state.slice_set(state_shadow, 0, 0)?;
+        self.conv_tail.slice_set(tail_shadow, 0, 0)?;
         Ok(())
     }
 }
