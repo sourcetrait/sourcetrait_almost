@@ -105,7 +105,10 @@ pub use crate::generate::{
     GenerationReport,
     GenerationStep,
 };
-pub use crate::model::hybrid::OlmoHybrid;
+pub use crate::model::hybrid::{
+    ContextMark,
+    OlmoHybrid,
+};
 pub use crate::needle::{
     NeedleCellResult,
     NeedleKey,

@@ -178,6 +178,10 @@ impl ConfigProfile {
     pub fn baseline_config(&self) -> PathBuf {
         self.0.join("baseline.toml")
     }
+
+    pub fn lmst_config(&self) -> PathBuf {
+        self.0.join("lmst.toml")
+    }
 }
 
 /// A resolved settings-profile DIRECTORY (the settings/ sibling of
@@ -267,6 +271,10 @@ impl SettingsProfile {
 
     pub fn baseline_settings(&self) -> PathBuf {
         self.0.join("baseline.toml")
+    }
+
+    pub fn lmst_settings(&self) -> PathBuf {
+        self.0.join("lmst.toml")
     }
 }
 

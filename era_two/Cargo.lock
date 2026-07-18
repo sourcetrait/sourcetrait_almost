@@ -5638,7 +5638,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_lib_almost"
-version = "0.0.0-30"
+version = "0.0.0-31"
 dependencies = [
  "candle-core 0.11.0",
  "candle-flash-attn",
@@ -5657,12 +5657,16 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_lmst"
-version = "0.0.0-1"
+version = "0.0.0-2"
 dependencies = [
  "burn",
+ "candle-core 0.11.0",
  "clap",
+ "serde",
+ "serde_json",
  "snafu",
  "sourcetrait_lib_almost",
+ "tokenizers 0.23.1",
 ]
 
 [[package]]

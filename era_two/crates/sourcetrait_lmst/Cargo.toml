@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_lmst"
-version = "0.0.0-1"
+version = "0.0.0-2"
 edition = "2024"
 description = "lmst: the training, development, and testing tool"
 authors = ["SourceTrait <development@sourcetrait.com>"]
@@ -20,6 +20,10 @@ flash-attn = ["cuda", "sourcetrait_lib_almost/flash-attn"]
 
 [dependencies]
 burn.workspace = true
+candle-core.workspace = true
 clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 snafu.workspace = true
 sourcetrait_lib_almost.workspace = true
+tokenizers.workspace = true

@@ -24,6 +24,10 @@ pub(crate) struct SpecMark {
     pub(crate) context_len: usize,
 }
 
+/// The public handle mark_context returns (an opaque wrapper over the
+/// speculation mark).
+pub struct ContextMark(SpecMark);
+
 /// The margin a graph arm pre-reserves past the live length when the
 /// sample budget exceeds it (the 32768 default budget would
 /// otherwise pre-grow gigabytes a typical decode never touches).
@@ -179,7 +183,7 @@ impl OlmoHybrid {
     /// value-identical to forward_chunk's last row at f32; bf16 kernel
     /// shapes differ (1-row vs t-row gemm) - kin-class deltas ride the
     /// gates.
-    pub(crate) fn forward_chunk_last(
+    pub fn forward_chunk_last(
         &mut self,
         input_ids: &candle_core::Tensor,
     ) -> LibAlmostResult<candle_core::Tensor> {
@@ -194,7 +198,7 @@ impl OlmoHybrid {
     /// PrefillLogitsSkip: the intermediate-prefill-chunk form - the
     /// caches advance, no logits are computed (no norm, no head) -
     /// where the skipped head traffic lives.
-    pub(crate) fn forward_chunk_carry(
+    pub fn forward_chunk_carry(
         &mut self,
         input_ids: &candle_core::Tensor,
     ) -> LibAlmostResult<()> {
@@ -380,6 +384,20 @@ impl OlmoHybrid {
             context_len: file.context_len,
             context_ids: file.context_ids,
         })
+    }
+
+    /// A public carried-context mark for shared-prefix scoring loops
+    /// (the lmst capability runner's MC continuations): shadow the GDN
+    /// caches, record the length; rewind with rollback_context. The
+    /// same classic-path-only constraints as speculation apply (never
+    /// under an armed graph; eviction never fires outside generate()).
+    pub fn mark_context(&mut self) -> LibAlmostResult<ContextMark> {
+        Ok(ContextMark(self.spec_mark()?))
+    }
+
+    /// Roll the carried caches back to a mark_context mark.
+    pub fn rollback_context(&mut self, mark: &ContextMark) -> LibAlmostResult<()> {
+        self.spec_rollback(&mark.0)
     }
 
     /// SpeculationPort: shadow every GDN layer's carried caches and
@@ -640,8 +658,9 @@ impl OlmoHybrid {
     }
 
     /// Gate-side switch between capture+replay and uncaptured staged
-    /// stepping (the gates' reference legs).
+    /// stepping (the gates' reference legs); dead outside test builds.
     #[cfg(feature = "cuda")]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn set_graph_capture(&mut self, enabled: bool) -> LibAlmostResult<()> {
         let Some(stage) = &mut self.graph_stage else {
             snafu::whatever!("no graph stage to configure (arm first)");
