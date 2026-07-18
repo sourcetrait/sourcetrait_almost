@@ -160,6 +160,76 @@ extern "C" __global__ void rms_norm_gated_fused_bf16(
         out_row[i] = f32_to_bf16(weighted * silu);
     }
 }
+
+// FusedHeadPrep: the t=1 GDN head-prep chain in one launch - the
+// conv tap's bf16 output row splits per head, q/k take the f32 l2
+// norms (+ the q scale), v upcasts, and the gating scalars
+// (softplus-guarded g -> decay, sigmoid beta) compute from the dyn
+// row - writing the [heads, 2dk+dv+2] q | k | v | decay | beta
+// operand GdnFusedStep consumes, directly (the classic chain's
+// casts, norm chains, gate soup, and the packing cat collapse).
+// One block per head, HP_THREADS threads (pow2 tree for the two
+// sumsq reductions, zero-padded lanes); f32 math end-to-end from
+// the bf16 inputs - the classic chain's own formulas, reassociated
+// (reciprocal-mul for the l2 divide; the component lock pins).
+#define HP_DK 96u
+#define HP_DV 192u
+#define HP_ROW (2u * HP_DK + HP_DV + 2u)
+#define HP_THREADS 128u
+extern "C" __global__ void head_prep_f32(
+    float* packed,
+    const unsigned short* conv_out,
+    const unsigned short* dyn_row,
+    unsigned int heads,
+    float q_scale,
+    float beta_scale
+) {
+    __shared__ float red[HP_THREADS];
+    __shared__ float inv_q;
+    __shared__ float inv_k;
+    unsigned int h = blockIdx.x;
+    unsigned int t = threadIdx.x;
+    if (h >= heads) { return; }
+    const unsigned short* q_in = conv_out + h * HP_DK;
+    const unsigned short* k_in = conv_out + heads * HP_DK + h * HP_DK;
+    const unsigned short* v_in = conv_out + 2u * heads * HP_DK + h * HP_DV;
+    float* out_row = packed + (unsigned long long)h * HP_ROW;
+    float q_val = t < HP_DK ? bf16_to_f32(q_in[t]) : 0.f;
+    red[t] = q_val * q_val;
+    __syncthreads();
+    for (unsigned int stride = HP_THREADS / 2u; stride > 0u; stride >>= 1u) {
+        if (t < stride) { red[t] += red[t + stride]; }
+        __syncthreads();
+    }
+    if (t == 0u) { inv_q = 1.f / sqrtf(red[0] + 1e-6f); }
+    __syncthreads();
+    float k_val = t < HP_DK ? bf16_to_f32(k_in[t]) : 0.f;
+    red[t] = k_val * k_val;
+    __syncthreads();
+    for (unsigned int stride = HP_THREADS / 2u; stride > 0u; stride >>= 1u) {
+        if (t < stride) { red[t] += red[t + stride]; }
+        __syncthreads();
+    }
+    if (t == 0u) { inv_k = 1.f / sqrtf(red[0] + 1e-6f); }
+    __syncthreads();
+    if (t < HP_DK) {
+        out_row[t] = q_val * inv_q * q_scale;
+        out_row[HP_DK + t] = k_val * inv_k;
+    }
+    for (unsigned int i = t; i < HP_DV; i += HP_THREADS) {
+        out_row[2u * HP_DK + i] = bf16_to_f32(v_in[i]);
+    }
+    if (t == 0u) {
+        float a_v = bf16_to_f32(dyn_row[h]);
+        float b_v = bf16_to_f32(dyn_row[heads + h]);
+        float a_log = bf16_to_f32(dyn_row[2u * heads + h]);
+        float dt = bf16_to_f32(dyn_row[3u * heads + h]);
+        float x = a_v + dt;
+        float sp = x > 20.f ? x : logf(1.f + expf(x));
+        out_row[HP_ROW - 2u] = expf(-(expf(a_log) * sp));
+        out_row[HP_ROW - 1u] = beta_scale / (1.f + expf(-b_v));
+    }
+}
 "#;
 
 /// Lazily nvrtc-compiled module, one per process (single-device box).
@@ -559,6 +629,107 @@ impl candle_core::InplaceOp3 for RmsNormGatedFused {
             .arg(&dv);
         if let Err(error) = unsafe { builder.launch(config) } {
             candle_core::bail!("rms_norm_gated_fused launch failed: {error}");
+        }
+        Ok(())
+    }
+}
+
+/// `packed.inplace_op3(&conv_out, &dyn_row, &HeadPrepFused { .. })`:
+/// packed (heads, 2*dk + dv + 2) f32 - WRITTEN (the GdnFusedStep
+/// operand, q | k | v | decay | beta; candle tensors mutate through
+/// shared storage by design); conv_out (1, 2*key + value) bf16 (the
+/// decode conv tap's output row); dyn_row (1, 4 * heads) bf16
+/// columns a | b | A_log | dt_bias (the two gemv outputs catted
+/// with the layer's packed static). Geometry-locked to dk 96 /
+/// dv 192; all contiguous, all addressed at their layout offsets.
+pub(crate) struct HeadPrepFused {
+    pub(crate) q_scale: f32,
+    pub(crate) beta_scale: f32,
+}
+
+impl candle_core::InplaceOp3 for HeadPrepFused {
+    fn name(&self) -> &'static str {
+        "almost_head_prep_fused"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _s1: &mut candle_core::CpuStorage,
+        _l1: &candle_core::Layout,
+        _s2: &candle_core::CpuStorage,
+        _l2: &candle_core::Layout,
+        _s3: &candle_core::CpuStorage,
+        _l3: &candle_core::Layout,
+    ) -> candle_core::Result<()> {
+        candle_core::bail!("head_prep is a cuda decode building block")
+    }
+
+    fn cuda_fwd(
+        &self,
+        packed: &mut candle_core::CudaStorage,
+        packed_layout: &candle_core::Layout,
+        conv_out: &candle_core::CudaStorage,
+        conv_layout: &candle_core::Layout,
+        dyn_row: &candle_core::CudaStorage,
+        dyn_layout: &candle_core::Layout,
+    ) -> candle_core::Result<()> {
+        use cudarc::driver::{DevicePtr, PushKernelArg};
+
+        let (heads, row) = packed_layout.shape().dims2()?;
+        let conv_dims = conv_layout.shape().dims2()?;
+        let dyn_dims = dyn_layout.shape().dims2()?;
+        if row != 2 * 96 + 192 + 2
+            || conv_dims != (1, heads * (2 * 96 + 192))
+            || dyn_dims != (1, 4 * heads)
+        {
+            candle_core::bail!(
+                "head_prep wants packed (h, 386), conv_out (1, h*384), dyn (1, 4h); \
+                 got {:?}, {conv_dims:?}, {dyn_dims:?}",
+                (heads, row)
+            );
+        }
+        if !packed_layout.is_contiguous()
+            || !conv_layout.is_contiguous()
+            || !dyn_layout.is_contiguous()
+        {
+            candle_core::bail!("head_prep wants contiguous operands");
+        }
+
+        let device = packed.device.clone();
+        let stream = device.cuda_stream();
+        let function = match kernel(&device, "head_prep_f32") {
+            Ok(function) => function,
+            Err(error) => candle_core::bail!("{error}"),
+        };
+        let packed_slice = packed
+            .as_cuda_slice::<f32>()?
+            .slice(packed_layout.start_offset()..);
+        let (packed_ptr, _packed_guard) = packed_slice.device_ptr(&stream);
+        let conv_slice = conv_out
+            .as_cuda_slice::<half::bf16>()?
+            .slice(conv_layout.start_offset()..);
+        let (conv_ptr, _conv_guard) = conv_slice.device_ptr(&stream);
+        let dyn_slice = dyn_row
+            .as_cuda_slice::<half::bf16>()?
+            .slice(dyn_layout.start_offset()..);
+        let (dyn_ptr, _dyn_guard) = dyn_slice.device_ptr(&stream);
+
+        let heads = heads as u32;
+        let config = cudarc::driver::LaunchConfig {
+            grid_dim: (heads, 1, 1),
+            block_dim: (128, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut builder = stream.launch_builder(&function);
+        builder
+            .arg(&packed_ptr)
+            .arg(&conv_ptr)
+            .arg(&dyn_ptr)
+            .arg(&heads)
+            .arg(&self.q_scale)
+            .arg(&self.beta_scale);
+        if let Err(error) = unsafe { builder.launch(config) } {
+            candle_core::bail!("head_prep launch failed: {error}");
         }
         Ok(())
     }

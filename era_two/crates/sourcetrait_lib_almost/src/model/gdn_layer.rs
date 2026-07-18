@@ -34,6 +34,11 @@ pub(crate) struct GdnLayer {
     /// Some only when fused_prefill is armed.
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     prefill_static: Option<candle_core::Tensor>,
+    /// FusedHeadPrep static ([1, 2 * heads] bf16, A_log | dt_bias) -
+    /// the tail of the decode step's dyn row; Some only when
+    /// fused_gdn is armed (independent of fused_prefill by design).
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    decode_static: Option<candle_core::Tensor>,
     a_log: candle_core::Tensor,
     dt_bias: candle_core::Tensor,
     o_norm: candle_core::Tensor,
@@ -110,6 +115,17 @@ impl GdnLayer {
         } else {
             None
         };
+        let decode_static = if fused_gdn {
+            Some(
+                candle_core::Tensor::cat(
+                    &[&a_log.reshape((1, heads))?, &dt_bias.reshape((1, heads))?],
+                    1,
+                )?
+                .contiguous()?,
+            )
+        } else {
+            None
+        };
         Ok(Self {
             state: candle_core::Tensor::zeros(
                 (heads, config.linear_key_head_dim, config.linear_value_head_dim),
@@ -140,6 +156,7 @@ impl GdnLayer {
             a_log,
             dt_bias,
             prefill_static,
+            decode_static,
             o_norm: vb_attn.pp("o_norm").get(config.linear_value_head_dim, "weight")?,
             mlp: Mlp::new(hidden, config.intermediate_size, vb.pp("mlp"))?,
             num_heads: heads,
@@ -345,6 +362,15 @@ impl GdnLayer {
     fn mixer_carried(&mut self, x: &candle_core::Tensor) -> LibAlmostResult<candle_core::Tensor> {
         let (seq_len, _) = x.dims2()?;
         #[cfg(feature = "cuda")]
+        if seq_len == 1
+            && self.fused_gdn
+            && x.device().is_cuda()
+            && x.dtype() == candle_core::DType::BF16
+            && self.decode_static.is_some()
+        {
+            return self.fused_decode_step(x);
+        }
+        #[cfg(feature = "cuda")]
         if seq_len > 1
             && self.fused_prefill
             && x.device().is_cuda()
@@ -405,6 +431,45 @@ impl GdnLayer {
         self.finish_mixer(y, gate, seq_len, self.fused_gdn)
     }
 
+    /// The FusedHeadPrep decode step (t == 1, cuda bf16, fused_gdn):
+    /// conv tap -> ONE head-prep launch (l2 norms + q scale + gates
+    /// written straight into the packed operand) -> GdnFusedStep.
+    /// The a/b gemvs stay cublas (the accumulation-order rule); the
+    /// dyn row is their outputs catted with the packed static. The
+    /// classic paths (cpu, non-bf16, fused off) never come here.
+    #[cfg(feature = "cuda")]
+    fn fused_decode_step(
+        &mut self,
+        x: &candle_core::Tensor,
+    ) -> LibAlmostResult<candle_core::Tensor> {
+        let (conv_in, gate) = self.project_fused(x)?;
+        let conv_out = self.conv_carried(&conv_in, 1)?;
+        let a_row = self.a_proj.forward(x)?;
+        let b_row = self.b_proj.forward(x)?;
+        let statics = self
+            .decode_static
+            .as_ref()
+            .expect("checked by the dispatch");
+        let dyn_row =
+            candle_core::Tensor::cat(&[&a_row, &b_row, statics], 1)?.contiguous()?;
+        let packed = candle_core::Tensor::zeros(
+            (self.num_heads, 2 * self.head_k_dim + self.head_v_dim + 2),
+            candle_core::DType::F32,
+            x.device(),
+        )?;
+        packed.inplace_op3(&conv_out, &dyn_row, &fused::HeadPrepFused {
+            q_scale: (self.head_k_dim as f64).powf(-0.5) as f32,
+            beta_scale: if self.allow_neg_eigval { 2.0 } else { 1.0 },
+        })?;
+        let y = candle_core::Tensor::zeros(
+            (self.num_heads, self.head_v_dim),
+            candle_core::DType::F32,
+            x.device(),
+        )?;
+        self.state.inplace_op3(&packed, &y, &fused::GdnFusedStep)?;
+        self.finish_mixer(y.unsqueeze(0)?, gate, 1, true)
+    }
+
     /// One carried multi-token chunk on the CLASSIC chain (the
     /// PrefillDispatch kernel family dispatches earlier, in
     /// mixer_carried; cpu and non-bf16 grades stay here). Advances
@@ -422,10 +487,9 @@ impl GdnLayer {
         Ok(out)
     }
 
-    /// One carried decode step (t == 1): the fused kernel when armed
-    /// on cuda (the state updates in place INSIDE the launch), the
-    /// classic candle chain otherwise. Both return the [1, heads, dv]
-    /// f32 readout.
+    /// One carried decode step (t == 1) on the CLASSIC chain; the
+    /// armed cuda bf16 path rides fused_decode_step (FusedHeadPrep)
+    /// and never comes here. Returns the [1, heads, dv] f32 readout.
     fn carried_decode_step(
         &mut self,
         q: &candle_core::Tensor,
@@ -434,32 +498,6 @@ impl GdnLayer {
         g: &candle_core::Tensor,
         beta: &candle_core::Tensor,
     ) -> LibAlmostResult<candle_core::Tensor> {
-        #[cfg(feature = "cuda")]
-        if self.fused_gdn && q.device().is_cuda() {
-            let decay = g.exp()?.reshape((self.num_heads, 1))?;
-            let beta_column = beta.reshape((self.num_heads, 1))?;
-            // cat on a non-zero dim returns a transposed view (the
-            // era-one contiguity lesson); the kernel wants packed rows.
-            let packed = candle_core::Tensor::cat(
-                &[
-                    &q.squeeze(0)?,
-                    &k.squeeze(0)?,
-                    &v.squeeze(0)?,
-                    &decay,
-                    &beta_column,
-                ],
-                1,
-            )?
-            .contiguous()?;
-            let y = candle_core::Tensor::zeros(
-                (self.num_heads, self.head_v_dim),
-                candle_core::DType::F32,
-                q.device(),
-            )?;
-            self.state
-                .inplace_op3(&packed, &y, &fused::GdnFusedStep)?;
-            return Ok(y.unsqueeze(0)?);
-        }
         let (next_state, y_t) = gdn::recurrent_step(
             &self.state,
             &q.squeeze(0)?,

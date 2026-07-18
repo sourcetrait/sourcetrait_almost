@@ -1,8 +1,8 @@
 //! GdnChainFusion locks: the fused decode step and the fused norms
 //! against the classic candle chains on the real geometry (cuda;
 //! checkpoint-free).
-use crate::fused::{ConvStepFused, GdnFusedStep, RmsNormFused, RmsNormGatedFused};
-use crate::gdn::{conv_with_tail, recurrent_step};
+use crate::fused::{ConvStepFused, GdnFusedStep, HeadPrepFused, RmsNormFused, RmsNormGatedFused};
+use crate::gdn::{conv_with_tail, gdn_gates, l2_norm, recurrent_step};
 use crate::norms::{rms_norm, rms_norm_gated};
 
 fn splitmix_f32(seed: &mut u64, count: usize) -> Vec<f32> {
@@ -259,4 +259,108 @@ fn fused_rms_norm_gated_matches_the_classic_chain() {
     );
     println!("fused rms_norm_gated vs classic: nmse {spread:.3e}");
     assert!(spread <= 5e-5, "spread {spread:.3e} beyond the bf16 rounding class");
+}
+
+/// The FusedHeadPrep lock: the head-prep kernel against the classic
+/// prep chain (split narrows + f32 upcasts + l2 norms + q scale +
+/// gdn_gates + the decay/beta pack) on synthetic rows at the real
+/// geometry. Identical bf16 inputs, all-f32 math both sides -
+/// reassociation + reciprocal-mul class; bar 1e-9 provisional from
+/// the class expectation, re-pinned at the first measurement.
+#[test]
+#[ignore = "needs a cuda card"]
+fn fused_head_prep_matches_the_classic_chain() {
+    let (heads, dk, dv) = (30usize, 96usize, 192usize);
+    let key_width = heads * dk;
+    let value_width = heads * dv;
+    let conv_width = 2 * key_width + value_width;
+    let device = candle_core::Device::new_cuda(0).expect("cuda");
+    let mut seed = 0x4EAD_00AA_0BAD_F00Du64;
+
+    let conv_out = synth(&mut seed, (1, conv_width), &device)
+        .to_dtype(candle_core::DType::BF16)
+        .expect("conv bf16");
+    let a_row = synth(&mut seed, (1, heads), &device)
+        .to_dtype(candle_core::DType::BF16)
+        .expect("a bf16");
+    let b_row = synth(&mut seed, (1, heads), &device)
+        .to_dtype(candle_core::DType::BF16)
+        .expect("b bf16");
+    let a_log = synth(&mut seed, (1, heads), &device)
+        .squeeze(0)
+        .expect("a_log shape")
+        .to_dtype(candle_core::DType::BF16)
+        .expect("a_log bf16");
+    let dt_bias = synth(&mut seed, (1, heads), &device)
+        .squeeze(0)
+        .expect("dt shape")
+        .to_dtype(candle_core::DType::BF16)
+        .expect("dt bf16");
+
+    // The classic chain, verbatim shapes (split_conv + heads_and_gates
+    // + the decode pack).
+    let head_span = |offset: usize, width: usize, dim: usize| -> candle_core::Tensor {
+        conv_out
+            .narrow(1, offset, width)
+            .expect("narrow")
+            .contiguous()
+            .expect("contiguous")
+            .reshape((1, heads, dim))
+            .expect("reshape")
+            .to_dtype(candle_core::DType::F32)
+            .expect("f32")
+    };
+    let q = l2_norm(&head_span(0, key_width, dk)).expect("q norm");
+    let q = (q * (dk as f64).powf(-0.5)).expect("q scale");
+    let k = l2_norm(&head_span(key_width, key_width, dk)).expect("k norm");
+    let v = head_span(2 * key_width, value_width, dv);
+    let (g, beta) = gdn_gates(&a_row, &b_row, &a_log, &dt_bias, true).expect("gates");
+    let decay = g.exp().expect("decay").reshape((heads, 1)).expect("decay col");
+    let beta_col = beta.reshape((heads, 1)).expect("beta col");
+    let classic = candle_core::Tensor::cat(
+        &[
+            &q.squeeze(0).expect("q rows"),
+            &k.squeeze(0).expect("k rows"),
+            &v.squeeze(0).expect("v rows"),
+            &decay,
+            &beta_col,
+        ],
+        1,
+    )
+    .expect("classic pack")
+    .contiguous()
+    .expect("packed rows");
+
+    // The fused kernel over the same inputs.
+    let dyn_row = candle_core::Tensor::cat(
+        &[
+            &a_row,
+            &b_row,
+            &a_log.reshape((1, heads)).expect("a_log row"),
+            &dt_bias.reshape((1, heads)).expect("dt row"),
+        ],
+        1,
+    )
+    .expect("dyn cat")
+    .contiguous()
+    .expect("dyn row");
+    let packed = candle_core::Tensor::zeros(
+        (heads, 2 * dk + dv + 2),
+        candle_core::DType::F32,
+        &device,
+    )
+    .expect("packed");
+    packed
+        .inplace_op3(&conv_out, &dyn_row, &HeadPrepFused {
+            q_scale: (dk as f64).powf(-0.5) as f32,
+            beta_scale: 2.0,
+        })
+        .expect("head prep");
+
+    let spread = relative_spread(&packed, &classic);
+    println!("fused head_prep vs classic: nmse {spread:.3e}");
+    assert!(
+        spread <= 1e-9,
+        "spread {spread:.3e} beyond the f32 reassociation class"
+    );
 }
