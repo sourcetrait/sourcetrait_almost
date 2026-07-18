@@ -28,9 +28,9 @@ const FIXTURE_TYPEDEF: &str =
 const TRANSCRIPT_TYPEDEF: &str = "record<name: string, kind: string, \
      meta: record<model: string, settings: string, device: string, \
      lmst_version: string, recorded_at: int>, \
-     turns: table<index: int, prompt: string, suffix_ids: list<int>, \
-     emitted_ids: list<int>, consumed: int, finish: string, \
-     prefill_seconds: float, decode_seconds: float>>";
+     turns: table<index: int, prompt: string, text: string, \
+     suffix_ids: list<int>, emitted_ids: list<int>, consumed: int, \
+     finish: string, prefill_seconds: float, decode_seconds: float>>";
 
 /// The hand-authored phase-annotation shape (spec_phases_<name>.nuon);
 /// `end` is exclusive, -1 = to the turn's end; token indices index
@@ -270,10 +270,14 @@ fn record_transcript(
             model.generate_from(tokenizer, &restored, prompt, &options)?
         };
         let mut emitted: Vec<u32> = Vec::new();
+        let mut text = String::new();
         for step in generation.by_ref() {
-            emitted.push(step?.token_id);
+            let step = step?;
+            emitted.push(step.token_id);
+            text.push_str(&step.chunk);
         }
         let report = generation.finish();
+        text.push_str(&report.rest);
         let finish = match report.finish_reason {
             Some(lib::FinishReason::StopToken) => "stop_token",
             Some(lib::FinishReason::SampleLen) => "sample_len",
@@ -293,6 +297,7 @@ fn record_transcript(
             lib::nu::record! {
                 "index" => v_int(index as i64),
                 "prompt" => v_str(prompt),
+                "text" => v_str(&text),
                 "suffix_ids" => v_int_list(&suffix_ids),
                 "emitted_ids" => v_int_list(&emitted),
                 "consumed" => v_int(consumed as i64),
