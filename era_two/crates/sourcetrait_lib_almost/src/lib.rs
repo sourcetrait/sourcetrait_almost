@@ -22,6 +22,7 @@ pub(crate) mod model {
 }
 pub(crate) mod needle;
 pub(crate) mod norms;
+pub mod nu;
 #[cfg(feature = "attn-profile")]
 pub(crate) mod profile;
 pub(crate) mod snapshot;
@@ -57,6 +58,16 @@ pub(crate) mod r {
     #[cfg(feature = "flash-attn")]
     pub(crate) mod flash {
         pub(crate) use candle_flash_attn::flash_attn;
+    }
+    pub(crate) mod nu {
+        pub(crate) use nu_parser::parse;
+        pub(crate) use nu_protocol::{
+            ast::Expr,
+            engine::{
+                EngineState,
+                StateWorkingSet,
+            },
+        };
     }
     pub(crate) mod sampling {
         pub(crate) use candle_transformers::generation::{
@@ -125,6 +136,11 @@ pub use crate::snapshot::{
     RestoredContext,
     snapshot_path,
 };
+pub use crate::speculate::{
+    DraftPolicy,
+    LookupIndex,
+    MAX_DRAFT,
+};
 pub use crate::tokenizer::{
     load_tokenizer,
     verify_token_map,
@@ -148,6 +164,7 @@ mod tests {
     mod model;
     mod needle;
     mod norms;
+    mod nu;
     #[cfg(feature = "attn-profile")]
     mod profile;
     mod snapshot;

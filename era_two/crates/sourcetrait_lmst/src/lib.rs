@@ -2,9 +2,14 @@ pub(crate) mod capability;
 pub(crate) mod cli;
 pub(crate) mod error;
 pub mod run;
+pub(crate) mod speculate;
 
 #[allow(unused_imports)]
 pub(crate) use std::{
+    collections::{
+        HashMap,
+        VecDeque,
+    },
     fs,
     io,
     path::{
@@ -21,9 +26,23 @@ pub(crate) use crate::cli::{
     CapabilityRunArgs,
     Cli,
     Command,
+    SpeculateCommand,
+    SpeculateRecordArgs,
+    SpeculateSimulateArgs,
+    SpeculateTokensArgs,
+};
+pub(crate) use crate::speculate::{
+    speculate_record,
+    speculate_simulate,
+    speculate_tokens,
 };
 #[allow(unused_imports)]
 pub(crate) use crate::error::{
     LmstError,
     LmstResult,
 };
+
+#[cfg(test)]
+mod tests {
+    mod speculate;
+}

@@ -6,6 +6,11 @@ pub fn run() {
         Command::Capability { command } => match command {
             CapabilityCommand::Run(args) => capability_run(&cli, args),
         },
+        Command::Speculate { command } => match command {
+            SpeculateCommand::Record(args) => speculate_record(&cli, args),
+            SpeculateCommand::Simulate(args) => speculate_simulate(args),
+            SpeculateCommand::Tokens(args) => speculate_tokens(&cli, args),
+        },
     };
     if let Err(error) = outcome {
         eprintln!("lmst: {error}");

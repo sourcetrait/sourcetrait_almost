@@ -19,7 +19,7 @@ const NGRAM_MAX: usize = 4;
 /// 16 beat 8 by +17% on echo-shaped decode in era one (the tracking
 /// ceiling only reaches it on deep accepts, so partial-accept
 /// workloads never pay the wider span).
-pub(crate) const MAX_DRAFT: usize = 16;
+pub const MAX_DRAFT: usize = 16;
 
 /// Consecutive zero-accept rounds at the floor ceiling before drafting
 /// pauses.
@@ -41,8 +41,10 @@ struct GramSpots {
 /// generation) with its ladder grams mapped to continuation positions,
 /// maintained incrementally off the critical path. When the context
 /// tail matches an earlier gram, the tokens that followed it become
-/// draft candidates; greedy verification keeps logits exact.
-pub(crate) struct LookupIndex {
+/// draft candidates; greedy verification keeps logits exact. Public
+/// for offline replay over recorded streams (the same index the live
+/// generation drives).
+pub struct LookupIndex {
     map: HashMap<(u8, [u32; NGRAM_MAX]), GramSpots>,
     tokens: Vec<u32>,
 }
@@ -54,8 +56,14 @@ fn gram_key(tokens: &[u32], end: usize, n: usize) -> (u8, [u32; NGRAM_MAX]) {
     (n as u8, gram)
 }
 
+impl Default for LookupIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LookupIndex {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             map: HashMap::new(),
             tokens: Vec::new(),
@@ -64,7 +72,7 @@ impl LookupIndex {
 
     /// Append accepted tokens, indexing each completed ladder gram to
     /// the position where its continuation starts.
-    pub(crate) fn extend(&mut self, new_tokens: &[u32]) {
+    pub fn extend(&mut self, new_tokens: &[u32]) {
         for &token in new_tokens {
             self.tokens.push(token);
             let len = self.tokens.len();
@@ -91,7 +99,7 @@ impl LookupIndex {
     /// most recent EARLIER occurrence of the longest-matching ladder
     /// gram. Returns the matched level with the tokens; None when no
     /// level has an earlier occurrence or the limit is empty.
-    pub(crate) fn draft(&self, limit: usize) -> Option<(usize, Vec<u32>)> {
+    pub fn draft(&self, limit: usize) -> Option<(usize, Vec<u32>)> {
         let len = self.tokens.len();
         if limit == 0 {
             return None;
@@ -128,8 +136,9 @@ impl LookupIndex {
 /// drafts and shrinks on rejected ones, and a sustained cold streak
 /// pauses drafting entirely - novel output converges to plain-greedy
 /// cost instead of paying the verification-forward tax on every false
-/// hit.
-pub(crate) struct DraftPolicy {
+/// hit. Public for offline replay (v1-as-is simulates through this
+/// exact code).
+pub struct DraftPolicy {
     /// Tokens the next draft may carry; MAX_DRAFT when hot, 1 at the
     /// floor.
     ceiling: usize,
@@ -139,8 +148,14 @@ pub(crate) struct DraftPolicy {
     cooldown: usize,
 }
 
+impl Default for DraftPolicy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DraftPolicy {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             ceiling: MAX_DRAFT,
             zero_streak: 0,
@@ -151,7 +166,7 @@ impl DraftPolicy {
     /// Per-round allowance, read before the index probe; 0 while
     /// paused. Each call is one prospective-draft round (ticks a pause
     /// down).
-    pub(crate) fn probe_limit(&mut self) -> usize {
+    pub fn probe_limit(&mut self) -> usize {
         if self.cooldown > 0 {
             self.cooldown -= 1;
             if self.cooldown == 0 {
@@ -167,7 +182,7 @@ impl DraftPolicy {
     /// n-seeded length for a matched draft: 3+ carries the full
     /// ceiling; the low-precision 2-gram floor drafts short until the
     /// run is hot.
-    pub(crate) fn draft_limit(&self, matched_n: usize) -> usize {
+    pub fn draft_limit(&self, matched_n: usize) -> usize {
         if matched_n >= 3 || self.ceiling == MAX_DRAFT {
             self.ceiling
         } else {
@@ -181,7 +196,7 @@ impl DraftPolicy {
     /// their true depth instead of paying full-span rejections),
     /// halve on a full rejection, pause after a sustained cold streak
     /// at the floor.
-    pub(crate) fn record(&mut self, accepted: usize) {
+    pub fn record(&mut self, accepted: usize) {
         if accepted > 0 {
             self.zero_streak = 0;
             self.ceiling = (accepted * 2).clamp(2, MAX_DRAFT);
