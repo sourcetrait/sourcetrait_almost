@@ -1,11 +1,11 @@
 [workspace]
 resolver = "3"
 members = [
-  "crates/sourcetrait_lib_almost",
-  "crates/sourcetrait_almost",
-  "crates/sourcetrait_lmst",
-  "crates/sourcetrait_yallmost",
-  "crates/sourcetrait_lastmost",
+  "crates/sourcetrait_lib_quest",
+  "crates/sourcetrait_quest",
+  "crates/sourcetrait_bquest",
+  "crates/sourcetrait_campaign",
+  "crates/sourcetrait_refquest",
 ]
 
 [workspace.dependencies]
@@ -26,6 +26,6 @@ safetensors = { version = "0.8" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 snafu = { version = "0.9" }
-sourcetrait_lib_almost = { path = "crates/sourcetrait_lib_almost" }
+sourcetrait_lib_quest = { path = "crates/sourcetrait_lib_quest" }
 tokenizers = { version = "0.23" }
 toml = { version = "0.9" }

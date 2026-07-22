@@ -1,0 +1,25 @@
+[package]
+name = "sourcetrait_campaign"
+version = "0.0.0-2"
+edition = "2024"
+description = "camp: the interactive terminal chat over sourcetrait_lib_quest"
+authors = ["SourceTrait <development@sourcetrait.com>"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/sourcetrait/sourcetrait_quest"
+homepage = "https://sourcetrait.com"
+categories = []
+keywords = ["sourcetrait", "quest", "camp", "chat"]
+
+[[bin]]
+name = "camp"
+path = "src/main.rs"
+
+[features]
+cuda = ["sourcetrait_lib_quest/cuda"]
+flash-attn = ["cuda", "sourcetrait_lib_quest/flash-attn"]
+
+[dependencies]
+clap.workspace = true
+ratatui.workspace = true
+snafu.workspace = true
+sourcetrait_lib_quest.workspace = true

@@ -1,12 +1,12 @@
 [workspace]
 resolver = "3"
 members = [
-  "crates/sourcetrait_almost_lib",
-  "crates/sourcetrait_almost_compat",
-  "crates/sourcetrait_almost_heat",
-  "crates/sourcetrait_almost_cli",
-  "crates/sourcetrait_almost_tui",
-  "crates/sourcetrait_almost_plugin",
+  "crates/sourcetrait_quest_lib",
+  "crates/sourcetrait_quest_compat",
+  "crates/sourcetrait_quest_heat",
+  "crates/sourcetrait_quest_cli",
+  "crates/sourcetrait_campaign",
+  "crates/sourcetrait_quest_plugin",
 ]
 
 [workspace.dependencies]
@@ -27,7 +27,7 @@ safetensors = { version = "0.8" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 snafu = { version = "0.9" }
-sourcetrait_almost_compat = { path = "crates/sourcetrait_almost_compat" }
-sourcetrait_almost_lib = { path = "crates/sourcetrait_almost_lib" }
+sourcetrait_quest_compat = { path = "crates/sourcetrait_quest_compat" }
+sourcetrait_quest_lib = { path = "crates/sourcetrait_quest_lib" }
 tokenizers = { version = "0.23" }
 toml = { version = "0.9" }

@@ -1,3 +1,0 @@
-model = "allenai/Olmo-Hybrid-Instruct-DPO-7B"
-models_dir = "$XDG_DATA_HOME/huggingface/model"
-snapshots_dir = "$XDG_CACHE_HOME/sourcetrait/almost/snapshots"

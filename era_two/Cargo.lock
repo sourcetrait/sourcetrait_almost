@@ -6175,28 +6175,32 @@ dependencies = [
 ]
 
 [[package]]
-name = "sourcetrait_almost"
-version = "0.0.0-1"
+name = "sourcetrait_bquest"
+version = "0.0.0-4"
 dependencies = [
+ "burn",
+ "candle-core 0.11.0",
  "clap",
- "snafu",
- "sourcetrait_lib_almost",
-]
-
-[[package]]
-name = "sourcetrait_lastmost"
-version = "0.0.0-7"
-dependencies = [
- "clap",
- "safetensors 0.8.0",
+ "serde",
  "serde_json",
  "snafu",
- "sourcetrait_lib_almost",
+ "sourcetrait_lib_quest",
+ "tokenizers 0.23.1",
 ]
 
 [[package]]
-name = "sourcetrait_lib_almost"
-version = "0.0.0-32"
+name = "sourcetrait_campaign"
+version = "0.0.0-2"
+dependencies = [
+ "clap",
+ "ratatui",
+ "snafu",
+ "sourcetrait_lib_quest",
+]
+
+[[package]]
+name = "sourcetrait_lib_quest"
+version = "0.0.0-33"
 dependencies = [
  "candle-core 0.11.0",
  "candle-flash-attn",
@@ -6217,27 +6221,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "sourcetrait_lmst"
-version = "0.0.0-3"
+name = "sourcetrait_quest"
+version = "0.0.0-2"
 dependencies = [
- "burn",
- "candle-core 0.11.0",
  "clap",
- "serde",
- "serde_json",
  "snafu",
- "sourcetrait_lib_almost",
- "tokenizers 0.23.1",
+ "sourcetrait_lib_quest",
 ]
 
 [[package]]
-name = "sourcetrait_yallmost"
-version = "0.0.0-1"
+name = "sourcetrait_refquest"
+version = "0.0.0-8"
 dependencies = [
  "clap",
- "ratatui",
+ "safetensors 0.8.0",
+ "serde_json",
  "snafu",
- "sourcetrait_lib_almost",
+ "sourcetrait_lib_quest",
 ]
 
 [[package]]

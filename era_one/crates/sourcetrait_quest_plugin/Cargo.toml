@@ -1,0 +1,17 @@
+[package]
+name = "sourcetrait_quest_plugin"
+version = "0.0.0-2"
+edition = "2024"
+description = "The quest typed-channel boundary: nu Value/Type/NUON conversion and conformance"
+authors = ["SourceTrait <development@sourcetrait.com>"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/sourcetrait/sourcetrait_quest"
+homepage = "https://sourcetrait.com"
+categories = []
+keywords = ["sourcetrait", "quest", "nushell", "plugin", "olmo"]
+
+[dependencies]
+nu-parser.workspace = true
+nu-protocol.workspace = true
+nuon.workspace = true
+snafu.workspace = true

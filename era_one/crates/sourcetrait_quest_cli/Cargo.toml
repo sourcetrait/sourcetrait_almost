@@ -1,0 +1,25 @@
+[package]
+name = "sourcetrait_quest_cli"
+version = "0.0.0-15"
+edition = "2024"
+description = "quest: the command-line interface over sourcetrait_quest_lib"
+authors = ["SourceTrait <development@sourcetrait.com>"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/sourcetrait/sourcetrait_quest"
+homepage = "https://sourcetrait.com"
+categories = []
+keywords = ["sourcetrait", "quest", "cli", "olmo"]
+
+[[bin]]
+name = "quest"
+path = "src/main.rs"
+
+[features]
+attn-profile = ["sourcetrait_quest_lib/attn-profile"]
+cuda = ["sourcetrait_quest_lib/cuda"]
+flash-attn = ["cuda", "sourcetrait_quest_lib/flash-attn"]
+
+[dependencies]
+clap.workspace = true
+snafu.workspace = true
+sourcetrait_quest_lib.workspace = true
