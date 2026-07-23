@@ -2,6 +2,7 @@ pub(crate) mod capability;
 pub(crate) mod checker_data;
 pub(crate) mod cli;
 pub(crate) mod convert;
+pub(crate) mod doc;
 pub(crate) mod error;
 pub(crate) mod ifeval;
 pub(crate) mod punkt;
@@ -43,11 +44,13 @@ pub(crate) use crate::cli::{
     CapabilityScoreArgs,
     Cli,
     Command,
+    DocCommand,
     SpeculateCommand,
     SpeculateRecordArgs,
     SpeculateSimulateArgs,
     SpeculateTokensArgs,
 };
+pub(crate) use crate::doc::doc_cli;
 #[allow(unused_imports)]
 pub(crate) use crate::convert::{
     capability_convert,
@@ -109,6 +112,7 @@ pub(crate) use crate::error::{
 #[cfg(test)]
 mod tests {
     mod convert;
+    mod doc;
     mod score;
     mod speculate;
 }

@@ -29,12 +29,25 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: CapabilityCommand,
     },
+    /// Self-documentation of the always-moving surface.
+    Doc {
+        #[command(subcommand)]
+        command: DocCommand,
+    },
     /// The Speculation:DepthProbe instrument (recorded greedy streams
     /// + the offline policy/cost-model simulator).
     Speculate {
         #[command(subcommand)]
         command: SpeculateCommand,
     },
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub(crate) enum DocCommand {
+    /// Print the whole command tree as an eye-tree listing - one
+    /// `name # summary` line per category/topic/action, no flag or
+    /// parameter detail (the grammar signature-block style).
+    Cli,
 }
 
 #[derive(Debug, clap::Subcommand)]

@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_bquest"
-version = "0.0.0-5"
+version = "0.0.0-6"
 edition = "2024"
 description = "bquest: the training, development, and testing tool"
 authors = ["SourceTrait <development@sourcetrait.com>"]

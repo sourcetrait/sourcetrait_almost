@@ -9,6 +9,9 @@ pub fn run() {
             CapabilityCommand::Score(args) => capability_score(args),
             CapabilityCommand::Bridge(args) => capability_bridge(args),
         },
+        Command::Doc { command } => match command {
+            DocCommand::Cli => doc_cli(),
+        },
         Command::Speculate { command } => match command {
             SpeculateCommand::Record(args) => speculate_record(&cli, args),
             SpeculateCommand::Simulate(args) => speculate_simulate(args),
