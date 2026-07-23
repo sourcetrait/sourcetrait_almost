@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_quest_camp"
-version = "0.0.0-2"
+version = "0.0.0-3"
 edition = "2024"
 description = "Campaign TUI for SourceTrait Quest"
 authors = ["SourceTrait <development@sourcetrait.com>"]
@@ -15,11 +15,13 @@ name = "camp"
 path = "src/main.rs"
 
 [features]
-attn-profile = ["sourcetrait_quest_lib/attn-profile"]
-cuda = ["sourcetrait_quest_lib/cuda"]
-flash-attn = ["cuda", "sourcetrait_quest_lib/flash-attn"]
+cuda = ["sourcetrait_quest_bridge_two/cuda"]
+flash-attn = ["cuda", "sourcetrait_quest_bridge_two/flash-attn"]
 
 [dependencies]
 clap.workspace = true
 ratatui.workspace = true
-sourcetrait_quest_lib.workspace = true
+snafu.workspace = true
+sourcetrait_quest_bridge.workspace = true
+sourcetrait_quest_bridge_two.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }

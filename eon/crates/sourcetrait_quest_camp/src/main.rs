@@ -1,3 +1,3 @@
 fn main() {
-    sourcetrait_campaign::run::run();
+    sourcetrait_quest_camp::run::run();
 }

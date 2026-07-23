@@ -1,0 +1,23 @@
+[package]
+name = "sourcetrait_quest_bridge_two"
+version = "0.0.0-1"
+edition = "2024"
+description = "Era-two implementation of the SourceTrait Quest bridge API"
+authors = ["SourceTrait <development@sourcetrait.com>"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/sourcetrait/sourcetrait_quest"
+homepage = "https://sourcetrait.com"
+categories = []
+keywords = ["sourcetrait", "quest", "bridge"]
+
+[features]
+cuda = ["sourcetrait_lib_quest/cuda"]
+flash-attn = ["cuda", "sourcetrait_lib_quest/flash-attn"]
+
+[dependencies]
+candle-core.workspace = true
+snafu.workspace = true
+sourcetrait_lib_quest.workspace = true
+sourcetrait_quest_bridge.workspace = true
+tokenizers.workspace = true
+tokio.workspace = true

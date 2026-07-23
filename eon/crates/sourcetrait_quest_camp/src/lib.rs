@@ -1,4 +1,5 @@
 pub(crate) mod chat;
+pub(crate) mod error;
 pub mod run;
 
 #[cfg(test)]
@@ -16,12 +17,22 @@ pub(crate) use std::{
         self,
     },
     path::PathBuf,
-    time::Duration,
 };
 
-pub(crate) use sourcetrait_quest_lib as lib;
+pub(crate) use sourcetrait_quest_bridge as bridge;
+pub(crate) use sourcetrait_quest_bridge::all::Era;
+pub(crate) use sourcetrait_quest_bridge_two as bridge_two;
+
+pub(crate) use crate::error::CampResult;
 
 pub(crate) mod r {
+    pub(crate) mod mpsc {
+        pub(crate) use tokio::sync::mpsc::{
+            Receiver,
+            Sender,
+            channel,
+        };
+    }
     pub(crate) mod term {
         pub(crate) use ratatui::crossterm::{
             event::{

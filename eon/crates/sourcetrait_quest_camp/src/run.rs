@@ -1,16 +1,21 @@
 use crate::*;
 
-/// camp: the interactive terminal chat (thin driver over the lib).
+/// camp: the interactive terminal chat (a bridge consumer over the
+/// era-two engine).
 #[derive(Debug, clap::Parser)]
 #[command(name = "camp", version, about)]
 struct Cli {
-    /// Config profile snake or TOML path (declared intent: model,
-    /// device, dtype, generation, eviction, chat)
-    #[arg(short = 'c', long)]
+    /// Profile root override: profile names resolve under
+    /// <dir>/config and <dir>/settings instead of the XDG suite root
+    #[arg(short = 'd', long = "dir")]
+    dir: Option<String>,
+    /// Config profile token: a pure snake resolves under the profile
+    /// root; anything else is a component-toml path; absent = the
+    /// `default` profile with the embedded-base fallback
+    #[arg(short = 'c', long = "config")]
     config: Option<String>,
-    /// Settings profile snake or TOML path (surgical runtime overrides;
-    /// absent auto-pairs the config profile's name)
-    #[arg(short = 's', long)]
+    /// Settings profile token: the same rules as --config
+    #[arg(short = 's', long = "settings")]
     settings: Option<String>,
 }
 
@@ -25,28 +30,22 @@ pub fn run() {
     }
 }
 
-fn drive(cli: Cli) -> lib::QuestResult<()> {
-    let (config, profile) = lib::load_config(cli.config.as_deref())?;
-    let mut settings = lib::load_settings(cli.settings.as_deref(), profile.as_deref(), &config)?;
-    // Chained sessions regrow the kv buffers, which parks captured
-    // graph buffers for near-zero replay benefit (phase D: +-1-3%);
-    // chat therefore always runs capture-off.
-    if settings.graph {
-        eprintln!("camp: chained chat runs capture-off (graph profile setting ignored)");
-        settings.graph = false;
-    }
-    let device = lib::resolve_device(&config)?;
-    let dtype = lib::resolve_dtype(&config, &device);
+/// Open the session (the engine thread spawns off-runtime), then run
+/// the async chat loop on a current-thread runtime - camp's futures
+/// are channel receives, so no driver features are needed.
+fn drive(cli: Cli) -> CampResult<()> {
+    let era = bridge_two::BridgeTwo;
+    let info = era.info();
     eprintln!(
-        "camp: device {device:?}, dtype {dtype:?}{}",
-        if settings.use_flash_attn { ", flash" } else { "" }
+        "camp: era {} ({}) - the model loads on the session thread",
+        info.era, info.model
     );
-    let dir = config
-        .model_dir
-        .clone()
-        .unwrap_or_else(|| lib::default_model_dir(&config.model_id));
-    let paths = lib::ensure_model(&config.model_id, &dir)?;
-    let loaded = lib::load_model(&paths, &device, dtype, settings)?;
-    eprintln!("camp: weights loaded in {:.1}s", loaded.load_seconds);
-    chat::chat(loaded, &config)
+    let session = era.open_chat(&bridge::all::ChatOptions {
+        dir: cli.dir,
+        config: cli.config,
+        settings: cli.settings,
+        sample_len: None,
+    })?;
+    let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+    runtime.block_on(chat::chat(session))
 }

@@ -3,6 +3,10 @@ use crate::*;
 /// Cap on the input box's visible text rows (it scrolls beyond this).
 const INPUT_MAX_ROWS: u16 = 8;
 
+/// Terminal-event channel bound (keystrokes and pastes are small and
+/// consumer-paced).
+const INPUT_CAPACITY: usize = 64;
+
 /// Who a transcript turn belongs to (drives the line style).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Speaker {
@@ -17,44 +21,52 @@ pub(crate) struct Turn {
 }
 
 /// One conversation: its base62 nom (the top-right title and the log
-/// file's stem), the transcript, and the model-side continuation state.
-/// /new replaces the whole thing (and clears the KV cache).
+/// file's stem) and the transcript. /new replaces the whole thing and
+/// asks the engine to Reset its context.
 struct Session {
     nom: String,
     log_path: Option<PathBuf>,
     turns: Vec<Turn>,
-    restored: Option<lib::RestoredContext>,
     /// Transcript lines scrolled back from the bottom (PgUp/PgDn).
     scroll_back: usize,
 }
 
 impl Session {
-    fn new(log: bool) -> lib::QuestResult<Self> {
+    fn new() -> CampResult<Self> {
         let nom = base62(RandomState::new().build_hasher().finish());
-        let log_path = if log {
-            let dir = lib::default_sessions_dir();
-            std::fs::create_dir_all(&dir)?;
-            Some(dir.join(format!("{nom}.txt")))
-        } else {
-            None
-        };
+        let dir = sessions_dir()?;
+        std::fs::create_dir_all(&dir)?;
         Ok(Self {
-            nom,
-            log_path,
+            nom: nom.clone(),
+            log_path: Some(dir.join(format!("{nom}.txt"))),
             turns: Vec::new(),
-            restored: None,
             scroll_back: 0,
         })
     }
 
     /// Rewrite the session log with the whole transcript (each turn
     /// updates it; cheap at chat sizes).
-    fn write_log(&self) -> lib::QuestResult<()> {
+    fn write_log(&self) -> CampResult<()> {
         if let Some(path) = &self.log_path {
             std::fs::write(path, render_log(&self.turns))?;
         }
         Ok(())
     }
+}
+
+/// The session-log home: camp's OWN cache namespace,
+/// $XDG_CACHE_HOME/sourcetrait/camp/session (the spec fallback
+/// ~/.cache) - camp writes the log, so the home is camp's, not the
+/// quest suite's. Logs are on by default (the_user ruling).
+fn sessions_dir() -> CampResult<PathBuf> {
+    let base = match std::env::var("XDG_CACHE_HOME") {
+        Ok(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => match std::env::var("HOME") {
+            Ok(home) if !home.is_empty() => PathBuf::from(home).join(".cache"),
+            _ => snafu::whatever!("neither XDG_CACHE_HOME nor HOME is set"),
+        },
+    };
+    Ok(base.join("sourcetrait/camp/session"))
 }
 
 /// base62 rendering of a u64 (0-9A-Za-z), the session nom form.
@@ -166,7 +178,7 @@ fn draw(
     input: &str,
     cursor: usize,
     status: &str,
-) -> lib::QuestResult<()> {
+) -> CampResult<()> {
     terminal.draw(|frame| {
         let input_rows = (input.split('\n').count() as u16).clamp(1, INPUT_MAX_ROWS);
         let chunks = ratatui::layout::Layout::vertical([
@@ -207,120 +219,111 @@ fn draw(
     Ok(())
 }
 
-/// Run one submitted turn: stream the generation into the transcript,
-/// honoring Esc (stop this generation) and ctrl+c (stop + quit), then
-/// update the session log. Returns whether the app should quit. Takes
-/// the whole LoadedModel so the tui never names the tokenizer's crate
-/// (field borrows split it).
-fn run_turn(
-    terminal: &mut ratatui::DefaultTerminal,
-    loaded: &mut lib::LoadedModel,
-    options: &lib::GenerateOptions,
-    session: &mut Session,
-    status: &mut String,
-    text: &str,
-) -> lib::QuestResult<bool> {
-    session.scroll_back = 0;
-    session.turns.push(Turn { speaker: Speaker::You, text: String::from(text) });
-    session.turns.push(Turn { speaker: Speaker::Quest, text: String::new() });
-    *status = String::from("generating - esc stops");
-    draw(terminal, session, "", 0, status)?;
-
-    let rendered = match session.restored {
-        Some(_) => lib::chat_continue(text),
-        None => lib::chat_wrap(text),
-    };
-    let started = match session.restored.as_ref() {
-        Some(context) => loaded.model.generate_from(&loaded.tokenizer, context, &rendered, options),
-        None => loaded.model.generate(&loaded.tokenizer, &rendered, options),
-    };
-    let mut generation = match started {
-        Ok(generation) => generation,
-        Err(error) => {
-            session.turns.push(Turn { speaker: Speaker::Note, text: format!("error: {error}") });
-            *status = String::from("ready");
-            session.write_log()?;
-            return Ok(false);
-        }
-    };
-
-    let mut stopped = false;
-    let mut quit = false;
-    for step in &mut generation {
-        match step {
-            Ok(step) => {
-                if let Some(chunk) = step.chunk
-                    && let Some(last) = session.turns.last_mut()
-                {
-                    last.text.push_str(&chunk);
-                }
-            }
-            Err(error) => {
-                session.turns.push(Turn { speaker: Speaker::Note, text: format!("error: {error}") });
-                break;
-            }
-        }
-        draw(terminal, session, "", 0, status)?;
-        while r::term::event::poll(Duration::from_millis(0))? {
-            if let r::term::Event::Key(key) = r::term::event::read()?
-                && key.kind != r::term::KeyEventKind::Release
-            {
-                match key.code {
-                    r::term::KeyCode::Esc => stopped = true,
-                    r::term::KeyCode::Char('c')
-                        if key.modifiers.contains(r::term::KeyModifiers::CONTROL) =>
-                    {
-                        stopped = true;
-                        quit = true;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if stopped {
-            break;
-        }
-    }
-    let report = generation.finish()?;
-    if let Some(rest) = &report.rest
-        && let Some(last) = session.turns.last_mut()
-        && last.speaker == Speaker::Quest
-    {
-        last.text.push_str(rest);
-    }
-    let context_len = report.context_ids.len();
-    let rate = report.generated_token_count as f64 / report.decode_seconds.max(f64::EPSILON);
-    *status = format!(
-        "ready - {context_len} ctx tokens, last {:.1} tok/s{}",
-        rate,
-        if stopped { " (stopped)" } else { "" }
-    );
-    session.restored = Some(lib::RestoredContext {
-        context_len,
-        context_ids: report.context_ids,
-    });
-    session.write_log()?;
-    Ok(quit)
+/// The bridge link's view of the session: loading until Ready,
+/// generating between a submitted Turn and its TurnDone, closed when
+/// the engine says so (or its channel drops).
+struct LinkState {
+    ready: bool,
+    generating: bool,
+    closed: bool,
+    last_error: Option<String>,
 }
 
-/// Interactive chat TUI: the session transcript above a multiline input
-/// box. Enter submits, shift+enter inserts a newline (distinguishing the
-/// two needs a kitty-protocol terminal; elsewhere shift+enter arrives as
-/// plain Enter and submits), /exit quits, /new starts a fresh session
-/// (new nom + log, cleared transcript and KV), PgUp/PgDn scroll the
-/// transcript, Esc stops a generation early, ctrl+c quits anywhere.
-/// Turns stay in VRAM: each generation's report seeds the next turn's
-/// RestoredContext, so the KV cache carries the whole conversation
-/// without disk snapshots. Sessions log to
-/// <cache>/sourcetrait/quest/session/<nom>.txt per turn when
-/// config [chat] log = true (the default). The model arrives loaded
-/// (stderr diagnostics happen before the alternate screen); this wraps
-/// the event loop in terminal setup/teardown.
-pub(crate) fn chat(loaded: lib::LoadedModel, config: &lib::Config) -> lib::QuestResult<()> {
-    let session = Session::new(config.chat.log)?;
+/// What a handled terminal event tells the loop to do next.
+enum LoopAction {
+    Continue,
+    Quit,
+}
+
+/// Fold one bridge event into the transcript and state.
+fn apply_event(
+    event: bridge::all::ChatEvent,
+    session: &mut Session,
+    status: &mut String,
+    state: &mut LinkState,
+) -> CampResult<()> {
+    match event {
+        bridge::all::ChatEvent::Ready(info) => {
+            state.ready = true;
+            *status = format!("ready - era {} ({})", info.era, info.model);
+        }
+        bridge::all::ChatEvent::Chunk { text } => {
+            match session.turns.last_mut() {
+                Some(last) if last.speaker == Speaker::Quest => last.text.push_str(&text),
+                _ => session.turns.push(Turn { speaker: Speaker::Quest, text }),
+            }
+        }
+        bridge::all::ChatEvent::TurnDone(report) => {
+            state.generating = false;
+            let rate = report.generated_token_count as f64
+                / report.decode_seconds.max(f64::EPSILON);
+            let marker = match report.finish {
+                bridge::all::FinishReason::Cancelled => " (stopped)",
+                bridge::all::FinishReason::SampleLen => " (budget spent)",
+                bridge::all::FinishReason::StopToken => "",
+            };
+            *status = format!(
+                "ready - {} tokens at {rate:.1} tok/s{marker}",
+                report.generated_token_count
+            );
+            session.write_log()?;
+        }
+        bridge::all::ChatEvent::Error { message } => {
+            session.turns.push(Turn {
+                speaker: Speaker::Note,
+                text: format!("error: {message}"),
+            });
+            state.last_error = Some(message);
+        }
+        bridge::all::ChatEvent::Closed => {
+            state.closed = true;
+        }
+    }
+    Ok(())
+}
+
+/// Pump blocking crossterm reads into a channel the async loop
+/// selects on. The read has no shutdown handle - the thread ends
+/// with the process (this seam swaps to an async EventStream if
+/// that ever matters).
+fn spawn_input_pump() -> CampResult<r::mpsc::Receiver<r::term::Event>> {
+    let (events_tx, events_rx) = r::mpsc::channel(INPUT_CAPACITY);
+    let spawned = std::thread::Builder::new()
+        .name(String::from("camp-input"))
+        .spawn(move || {
+            while let Ok(event) = r::term::event::read() {
+                if events_tx.blocking_send(event).is_err() {
+                    break;
+                }
+            }
+        });
+    if let Err(e) = spawned {
+        snafu::whatever!("terminal input pump spawn failed: {e}");
+    }
+    Ok(events_rx)
+}
+
+/// Interactive chat TUI over a bridge ChatSession: the transcript
+/// above a multiline input box. Enter submits, shift+enter inserts a
+/// newline (distinguishing the two needs a kitty-protocol terminal;
+/// elsewhere shift+enter arrives as plain Enter and submits), .exit
+/// quits, .new starts a fresh session (new nom + log, engine Reset) -
+/// dot commands count only as the first character of the first line -
+/// PgUp/PgDn scroll the transcript, Esc cancels a generation early,
+/// ctrl+c quits anywhere. The conversation context lives engine-side;
+/// camp only sends turn text and renders events. Sessions log by
+/// default to <cache>/sourcetrait/camp/session/<nom>.txt per turn.
+/// The loop is async and event-driven: a select over the bridge
+/// events channel and a blocking-read input pump, redrawn per event -
+/// no poll cadence. This wraps it in terminal setup/teardown; the
+/// model loads on the engine thread, so the loop opens in a loading
+/// state.
+pub(crate) async fn chat(link: bridge::all::ChatSession) -> CampResult<()> {
+    let session = Session::new()?;
     if let Some(path) = &session.log_path {
         eprintln!("camp: logging session to {}", path.display());
     }
+    let bridge::all::ChatSession { requests, events } = link;
     let mut terminal = ratatui::try_init()?;
     let enhanced = r::term::supports_keyboard_enhancement().unwrap_or(false);
     if enhanced {
@@ -332,7 +335,12 @@ pub(crate) fn chat(loaded: lib::LoadedModel, config: &lib::Config) -> lib::Quest
         );
     }
     let _ = r::term::execute!(io::stdout(), r::term::EnableBracketedPaste);
-    let result = chat_loop(&mut terminal, loaded, config, session, enhanced);
+    let result = match spawn_input_pump() {
+        Ok(input_events) => {
+            chat_loop(&mut terminal, &requests, events, input_events, session, enhanced).await
+        }
+        Err(error) => Err(error),
+    };
     let _ = r::term::execute!(io::stdout(), r::term::DisableBracketedPaste);
     if enhanced {
         let _ = r::term::execute!(io::stdout(), r::term::PopKeyboardEnhancementFlags);
@@ -341,115 +349,201 @@ pub(crate) fn chat(loaded: lib::LoadedModel, config: &lib::Config) -> lib::Quest
     result
 }
 
-fn chat_loop(
+async fn chat_loop(
     terminal: &mut ratatui::DefaultTerminal,
-    loaded: lib::LoadedModel,
-    config: &lib::Config,
-    session: Session,
+    requests: &r::mpsc::Sender<bridge::all::ChatRequest>,
+    mut events: r::mpsc::Receiver<bridge::all::ChatEvent>,
+    mut input_events: r::mpsc::Receiver<r::term::Event>,
+    mut session: Session,
     enhanced: bool,
-) -> lib::QuestResult<()> {
-    let mut loaded = loaded;
-    let mut session = session;
-    let options = lib::GenerateOptions {
-        greedy: config.generation.greedy,
-        temperature: config.generation.temperature,
-        top_p: config.generation.top_p,
-        sample_len: config.generation.sample_len,
-        seed: config.generation.seed,
-        speculate: config.generation.speculate,
-        dump_logits: None,
-    };
+) -> CampResult<()> {
     let hint = if enhanced {
-        "enter submits, shift+enter newline, /new restarts, /exit quits, pgup/pgdn scroll"
+        "enter submits, shift+enter newline, .new restarts, .exit quits, pgup/pgdn scroll"
     } else {
-        "enter submits (shift+enter needs a kitty-protocol terminal), /new restarts, /exit quits"
+        "enter submits (shift+enter needs a kitty-protocol terminal), .new restarts, .exit quits"
     };
     session.turns.push(Turn { speaker: Speaker::Note, text: String::from(hint) });
     let mut input = String::new();
     let mut cursor = 0usize;
-    let mut status = String::from("ready");
+    let mut status = String::from("loading model...");
+    let mut state = LinkState {
+        ready: false,
+        generating: false,
+        closed: false,
+        last_error: None,
+    };
 
     loop {
         draw(terminal, &session, &input, cursor, &status)?;
-        match r::term::event::read()? {
-            r::term::Event::Key(key) if key.kind != r::term::KeyEventKind::Release => {
-                match key.code {
-                    r::term::KeyCode::Enter
-                        if key.modifiers.contains(r::term::KeyModifiers::SHIFT) =>
-                    {
-                        input.insert(byte_index(&input, cursor), '\n');
-                        cursor += 1;
+        tokio::select! {
+            event = events.recv() => match event {
+                Some(event) => apply_event(event, &mut session, &mut status, &mut state)?,
+                None => state.closed = true,
+            },
+            terminal_event = input_events.recv() => match terminal_event {
+                Some(terminal_event) => {
+                    let action = apply_terminal_event(
+                        terminal_event,
+                        requests,
+                        &mut session,
+                        &mut status,
+                        &mut state,
+                        &mut input,
+                        &mut cursor,
+                        hint,
+                    )
+                    .await?;
+                    if let LoopAction::Quit = action {
+                        return Ok(());
                     }
-                    r::term::KeyCode::Enter => {
-                        let text = input.trim().to_string();
-                        if text.is_empty() {
-                            continue;
-                        }
+                }
+                None => snafu::whatever!("the terminal input pump ended"),
+            },
+        }
+        if state.closed {
+            // Engine-initiated end (camp's own quits return above
+            // without waiting) - surface it after terminal restore.
+            match state.last_error.take() {
+                Some(message) => snafu::whatever!("the engine closed the session: {message}"),
+                None => snafu::whatever!("the engine closed the session"),
+            }
+        }
+    }
+}
+
+/// Fold one terminal event into the input buffer / session / bridge
+/// requests.
+#[allow(clippy::too_many_arguments)]
+async fn apply_terminal_event(
+    terminal_event: r::term::Event,
+    requests: &r::mpsc::Sender<bridge::all::ChatRequest>,
+    session: &mut Session,
+    status: &mut String,
+    state: &mut LinkState,
+    input: &mut String,
+    cursor: &mut usize,
+    hint: &str,
+) -> CampResult<LoopAction> {
+    match terminal_event {
+        r::term::Event::Key(key) if key.kind != r::term::KeyEventKind::Release => {
+            match key.code {
+                r::term::KeyCode::Enter
+                    if key.modifiers.contains(r::term::KeyModifiers::SHIFT) =>
+                {
+                    input.insert(byte_index(input, *cursor), '\n');
+                    *cursor += 1;
+                }
+                r::term::KeyCode::Enter => {
+                    if input.starts_with('.') {
+                        // Dot commands: the dot counts only as the
+                        // FIRST character of the FIRST line; the
+                        // first line is the command. A dot line that
+                        // is no known command notes instead of
+                        // reaching the model.
+                        let command = input
+                            .split('\n')
+                            .next()
+                            .unwrap_or("")
+                            .trim_end()
+                            .to_string();
                         input.clear();
-                        cursor = 0;
-                        if text == "/exit" {
-                            return Ok(());
+                        *cursor = 0;
+                        if command == ".exit" {
+                            let _ = requests.send(bridge::all::ChatRequest::Close).await;
+                            return Ok(LoopAction::Quit);
                         }
-                        if text == "/new" {
-                            loaded.model.clear_kv_cache();
-                            session = Session::new(config.chat.log)?;
+                        if command == ".new" {
+                            let _ = requests.send(bridge::all::ChatRequest::Reset).await;
+                            *session = Session::new()?;
                             session.turns.push(Turn {
                                 speaker: Speaker::Note,
                                 text: String::from(hint),
                             });
-                            status = String::from("ready - new session");
-                            continue;
+                            *status = String::from("ready - new session");
+                            return Ok(LoopAction::Continue);
                         }
-                        let quit = run_turn(
-                            terminal,
-                            &mut loaded,
-                            &options,
-                            &mut session,
-                            &mut status,
-                            &text,
-                        )?;
-                        if quit {
-                            return Ok(());
-                        }
+                        session.turns.push(Turn {
+                            speaker: Speaker::Note,
+                            text: format!("unknown command: {command}"),
+                        });
+                        return Ok(LoopAction::Continue);
                     }
-                    r::term::KeyCode::PageUp => {
-                        session.scroll_back = session.scroll_back.saturating_add(8);
+                    let text = input.trim().to_string();
+                    if text.is_empty() {
+                        return Ok(LoopAction::Continue);
                     }
-                    r::term::KeyCode::PageDown => {
-                        session.scroll_back = session.scroll_back.saturating_sub(8);
+                    input.clear();
+                    *cursor = 0;
+                    if !state.ready {
+                        session.turns.push(Turn {
+                            speaker: Speaker::Note,
+                            text: String::from("the model is still loading"),
+                        });
+                        return Ok(LoopAction::Continue);
                     }
-                    r::term::KeyCode::Char('c')
-                        if key.modifiers.contains(r::term::KeyModifiers::CONTROL) =>
+                    if state.generating {
+                        session.turns.push(Turn {
+                            speaker: Speaker::Note,
+                            text: String::from("a turn is generating - esc stops it"),
+                        });
+                        return Ok(LoopAction::Continue);
+                    }
+                    session.scroll_back = 0;
+                    session.turns.push(Turn { speaker: Speaker::You, text: text.clone() });
+                    session.turns.push(Turn { speaker: Speaker::Quest, text: String::new() });
+                    if requests
+                        .send(bridge::all::ChatRequest::Turn { text })
+                        .await
+                        .is_err()
                     {
-                        return Ok(());
+                        state.closed = true;
+                        return Ok(LoopAction::Continue);
                     }
-                    r::term::KeyCode::Char(_)
-                        if key.modifiers.contains(r::term::KeyModifiers::CONTROL) => {}
-                    r::term::KeyCode::Char(character) => {
-                        input.insert(byte_index(&input, cursor), character);
-                        cursor += 1;
-                    }
-                    r::term::KeyCode::Backspace => {
-                        if cursor > 0 {
-                            cursor -= 1;
-                            input.remove(byte_index(&input, cursor));
-                        }
-                    }
-                    r::term::KeyCode::Left => {
-                        cursor = cursor.saturating_sub(1);
-                    }
-                    r::term::KeyCode::Right if cursor < input.chars().count() => {
-                        cursor += 1;
-                    }
-                    _ => {}
+                    state.generating = true;
+                    *status = String::from("generating - esc stops");
                 }
+                r::term::KeyCode::Esc if state.generating => {
+                    let _ = requests.try_send(bridge::all::ChatRequest::Cancel);
+                }
+                r::term::KeyCode::PageUp => {
+                    session.scroll_back = session.scroll_back.saturating_add(8);
+                }
+                r::term::KeyCode::PageDown => {
+                    session.scroll_back = session.scroll_back.saturating_sub(8);
+                }
+                r::term::KeyCode::Char('c')
+                    if key.modifiers.contains(r::term::KeyModifiers::CONTROL) =>
+                {
+                    let _ = requests.send(bridge::all::ChatRequest::Close).await;
+                    return Ok(LoopAction::Quit);
+                }
+                r::term::KeyCode::Char(_)
+                    if key.modifiers.contains(r::term::KeyModifiers::CONTROL) => {}
+                r::term::KeyCode::Char(character) => {
+                    input.insert(byte_index(input, *cursor), character);
+                    *cursor += 1;
+                }
+                r::term::KeyCode::Backspace => {
+                    if *cursor > 0 {
+                        *cursor -= 1;
+                        input.remove(byte_index(input, *cursor));
+                    }
+                }
+                r::term::KeyCode::Left => {
+                    *cursor = cursor.saturating_sub(1);
+                }
+                r::term::KeyCode::Right if *cursor < input.chars().count() => {
+                    *cursor += 1;
+                }
+                _ => {}
             }
-            r::term::Event::Paste(pasted) => {
-                let normalized = pasted.replace("\r\n", "\n").replace('\r', "\n");
-                input.insert_str(byte_index(&input, cursor), &normalized);
-                cursor += normalized.chars().count();
-            }
-            _ => {}
         }
+        r::term::Event::Paste(pasted) => {
+            let normalized = pasted.replace("\r\n", "\n").replace('\r', "\n");
+            input.insert_str(byte_index(input, *cursor), &normalized);
+            *cursor += normalized.chars().count();
+        }
+        _ => {}
     }
+    Ok(LoopAction::Continue)
 }
