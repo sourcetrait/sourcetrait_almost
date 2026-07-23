@@ -1,5 +1,5 @@
 //! The era-two entry: identity plus session factories over the
-//! sourcetrait_lib_quest engine.
+//! sourcetrait_lib_quest_two engine.
 use crate::*;
 
 /// Era two: the Olmo-Hybrid DPO checkpoint on the lib_quest engine.

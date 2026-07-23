@@ -28,7 +28,7 @@ pub(crate) use std::{
     },
 };
 
-pub(crate) use sourcetrait_lib_quest as lib;
+pub(crate) use sourcetrait_lib_quest_two as lib;
 
 pub(crate) use crate::capability::{
     CAPABILITY_HOME_RELATIVE,

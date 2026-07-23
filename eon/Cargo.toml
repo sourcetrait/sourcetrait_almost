@@ -10,5 +10,5 @@ clap = { version = "4", features = ["derive"] }
 ratatui = { version = "0.29" }
 snafu = { version = "0.9" }
 sourcetrait_quest_bridge = { path = "crates/sourcetrait_quest_bridge" }
-sourcetrait_quest_bridge_two = { path = "../era_two/crates/sourcetrait_quest_bridge_two" }
+sourcetrait_quest_bridge_two = { path = "../era/two/crates/sourcetrait_quest_bridge_two" }
 tokio = { version = "1", features = ["sync"] }

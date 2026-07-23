@@ -1,6 +1,6 @@
 [package]
-name = "sourcetrait_refquest"
-version = "0.0.0-8"
+name = "sourcetrait_refquest_two"
+version = "0.0.0-9"
 edition = "2024"
 description = "refquest: baselining of the original model and its original tools"
 authors = ["SourceTrait <development@sourcetrait.com>"]
@@ -15,12 +15,12 @@ name = "refquest"
 path = "src/main.rs"
 
 [features]
-cuda = ["sourcetrait_lib_quest/cuda"]
-flash-attn = ["cuda", "sourcetrait_lib_quest/flash-attn"]
+cuda = ["sourcetrait_lib_quest_two/cuda"]
+flash-attn = ["cuda", "sourcetrait_lib_quest_two/flash-attn"]
 
 [dependencies]
 clap.workspace = true
 safetensors.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
-sourcetrait_lib_quest.workspace = true
+sourcetrait_lib_quest_two.workspace = true

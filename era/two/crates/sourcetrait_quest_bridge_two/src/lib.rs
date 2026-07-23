@@ -8,7 +8,7 @@ pub(crate) mod tests {
 
 pub(crate) use std::thread;
 
-pub(crate) use sourcetrait_lib_quest as lib;
+pub(crate) use sourcetrait_lib_quest_two as lib;
 pub(crate) use sourcetrait_quest_bridge as bridge;
 
 pub(crate) mod r {

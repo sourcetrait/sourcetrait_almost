@@ -4158,8 +4158,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "sourcetrait_lib_quest"
-version = "0.0.0-42"
+name = "sourcetrait_lib_quest_two"
+version = "0.0.0-43"
 dependencies = [
  "candle-core",
  "candle-flash-attn",
@@ -4189,11 +4189,11 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_quest_bridge_two"
-version = "0.0.0-1"
+version = "0.0.0-2"
 dependencies = [
  "candle-core",
  "snafu",
- "sourcetrait_lib_quest",
+ "sourcetrait_lib_quest_two",
  "sourcetrait_quest_bridge",
  "tokenizers 0.23.1",
  "tokio",
