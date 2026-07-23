@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_lib_quest"
-version = "0.0.0-36"
+version = "0.0.0-37"
 edition = "2024"
 description = "The shared library common to the quest toolset"
 authors = ["SourceTrait <development@sourcetrait.com>"]

@@ -36,9 +36,12 @@ pub struct GenerateOptions {
     /// SpeculationPort lookup speculation: draft continuations from
     /// earlier context occurrences, verify in one batched carried
     /// forward. Greedy-only (verification rides the same argmax
-    /// sampler - token-exact vs plain greedy at f32); refuses
-    /// eviction-armed settings and keeps the classic decode path
-    /// (graphs never arm on a speculative run).
+    /// sampler - token-exact vs plain greedy at f32); keeps the
+    /// classic decode path (graphs never arm on a speculative run).
+    /// EvictionMarriage: an armed capped store composes - overflow
+    /// epochs run between rounds, a partial accept keeps the
+    /// verify's kept rows and their in-chunk score writes, and the
+    /// rejected tail's stale scores hide behind kv.len.
     pub speculate: bool,
 }
 
@@ -212,10 +215,6 @@ impl OlmoHybrid {
                 options.temperature.is_none(),
                 "speculation is greedy-only (sampling verification is a later track)"
             );
-            snafu::ensure_whatever!(
-                self.settings().eviction.is_none(),
-                "speculation under eviction is not supported yet (run eviction-off)"
-            );
         }
         let sampling = match (options.temperature, options.top_p) {
             (None, _) => r::sampling::Sampling::ArgMax,
@@ -289,7 +288,8 @@ impl OlmoHybrid {
         // Arm the staged graph decode after prefill (settings.graph;
         // cuda builds only - Model::new already rejected the rest).
         // Speculation keeps the classic path silently (the era-one
-        // scoping): variable-length verify chunks would churn buckets.
+        // scoping): variable-length verify chunks would churn buckets
+        // (graph coexistence stays design-listed).
         if generation.model.settings().graph && !generation.speculate {
             let expected_total =
                 context_before + generation.prompt_token_count + generation.sample_len;
@@ -361,17 +361,20 @@ impl Generation<'_> {
             // consumed into the caches and the trail; no forward owed.
             return Ok(Some(GenerationStep { token_id, chunk }));
         }
-        if self.speculate {
-            self.stage_or_speculate(token_id)?;
-            return Ok(Some(GenerationStep { token_id, chunk }));
-        }
         // KvEviction overflow epoch: decode outgrew the cap by the
-        // slack - re-compact between steps (uncaptured host work; an
-        // armed graph keeps replaying at the unchanged bucket).
+        // slack - re-compact between rounds (uncaptured host work; an
+        // armed graph keeps replaying at the unchanged bucket, and a
+        // speculative round's verify span stays well inside the
+        // slack, so the round-start check bounds the store either
+        // way - EvictionMarriage).
         if let Some(evict) = self.model.settings().eviction.clone()
             && self.model.context_len() >= evict.decode_cap + evict::OVERFLOW_SLACK
         {
             self.model.evict_overflow(&evict)?;
+        }
+        if self.speculate {
+            self.stage_or_speculate(token_id)?;
+            return Ok(Some(GenerationStep { token_id, chunk }));
         }
         let logits = if self.model.graph_armed() {
             // A decode outrunning the armed capacity falls to the

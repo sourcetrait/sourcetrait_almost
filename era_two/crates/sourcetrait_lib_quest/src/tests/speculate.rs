@@ -233,6 +233,84 @@ fn spec_smoke_rates_cuda() {
     }
 }
 
+/// The EvictionMarriage drill (cuda): speculation over an armed
+/// capped store - a compacting repetitive prompt, forced decode
+/// across overflow epochs. The cap holds under speculative rounds,
+/// drafts accept, and the greedy marriage is deterministic (two
+/// passes id-identical). Retrieval quality needs no needle rung:
+/// the post-prefill compaction is question-window-ranked BEFORE any
+/// round, and needle decodes never reach an overflow epoch - the
+/// marriage's score-drift surface is exactly this long-decode shape.
+#[test]
+#[cfg(feature = "cuda")]
+#[ignore = "needs the DPO checkpoint + a cuda card"]
+fn spec_evict_drill_cuda() {
+    const CAP: usize = 512;
+    const BUDGET: usize = 300;
+    let dir = model_dir(consts::DPO_MODEL_NAME).expect("dpo dir");
+    let config = load_config(&dir).expect("config");
+    let tokenizer = load_tokenizer(&dir).expect("tokenizer");
+    let device = candle_core::Device::new_cuda(0).expect("cuda");
+    let weights = mmap_weights(&dir, candle_core::DType::BF16, &device).expect("mmap");
+    let settings = LibSettings {
+        eviction: Some(EvictionSettings {
+            decode_cap: CAP,
+            recent: 128,
+            sink: 4,
+            score_tail: 16,
+            score_slice: 16,
+        }),
+        ..LibSettings::default()
+    };
+    let mut model = OlmoHybrid::new(&config, settings, weights).expect("model");
+    let prompt = "the cat sat on the mat and looked at the dog. ".repeat(120);
+    let options = GenerateOptions {
+        temperature: None,
+        top_p: None,
+        sample_len: BUDGET,
+        chat: false,
+        ignore_stops: true,
+        speculate: true,
+        ..GenerateOptions::default()
+    };
+    let mut passes: Vec<(Vec<u32>, usize, usize)> = Vec::new();
+    for _ in 0..2 {
+        let (ids, report) = run_ids(&mut model, &tokenizer, &prompt, &options);
+        assert_eq!(report.generated_token_count, BUDGET, "forced decode length");
+        assert!(
+            report.prompt_token_count > CAP,
+            "the drill wants a compacting prompt ({})",
+            report.prompt_token_count
+        );
+        assert!(
+            model.context_len() < CAP + crate::evict::OVERFLOW_SLACK + MAX_DRAFT + 2,
+            "store cap held under speculative rounds ({})",
+            model.context_len()
+        );
+        assert!(
+            report.accepted_draft_token_count > 0,
+            "the repetitive drill must accept drafts"
+        );
+        passes.push((
+            ids,
+            report.drafted_token_count,
+            report.accepted_draft_token_count,
+        ));
+    }
+    assert_eq!(
+        passes[0].0, passes[1].0,
+        "greedy marriage runs must be deterministic"
+    );
+    println!(
+        "spec-evict drill: {} ids, drafted {} accepted {} (pass 2: drafted {} accepted {})",
+        passes[0].0.len(),
+        passes[0].1,
+        passes[0].2,
+        passes[1].1,
+        passes[1].2
+    );
+}
+
 fn argmax(row: &[f32]) -> u32 {
     let mut best = 0usize;
     for (index, value) in row.iter().enumerate() {
