@@ -69,13 +69,17 @@ pub(crate) use crate::cli::{
     Command,
     DocCommand,
     MixCommand,
+    MixPackArgs,
     MixRenderArgs,
     SpeculateCommand,
     SpeculateRecordArgs,
     SpeculateSimulateArgs,
     SpeculateTokensArgs,
 };
-pub(crate) use crate::mix::mix_render;
+pub(crate) use crate::mix::{
+    mix_pack,
+    mix_render,
+};
 pub(crate) use crate::doc::doc_cli;
 #[allow(unused_imports)]
 pub(crate) use crate::convert::{

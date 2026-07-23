@@ -13,6 +13,7 @@ pub fn run() {
             DocCommand::Cli => doc_cli(),
         },
         Command::Mix { command } => match command {
+            MixCommand::Pack(args) => mix_pack(&cli, args),
             MixCommand::Render(args) => mix_render(args),
         },
         Command::Speculate { command } => match command {

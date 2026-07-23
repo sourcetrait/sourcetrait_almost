@@ -50,9 +50,33 @@ pub(crate) enum Command {
 
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum MixCommand {
+    /// Pack document tables into shuffled training chunks (EOS-joined
+    /// token stream, seq_len + 1 rows, optional FIM on code).
+    Pack(MixPackArgs),
     /// Render corpus trees into dolma-field document tables (one
     /// file per document, verbatim text, identity in metadata).
     Render(MixRenderArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct MixPackArgs {
+    /// documents_<name>.nuon tables, consumed in the given order
+    /// (the mix order).
+    #[arg(long, required = true, num_args = 1..)]
+    pub(crate) documents: Vec<PathBuf>,
+    /// The packed-chunks artifact (.safetensors; a .nuon provenance
+    /// sidecar lands beside it).
+    #[arg(long)]
+    pub(crate) out: PathBuf,
+    /// Training window; chunks carry seq_len + 1 ids.
+    #[arg(long, default_value_t = 1024)]
+    pub(crate) seq_len: usize,
+    /// The deterministic pack seed (FIM draws + the chunk shuffle).
+    #[arg(long, default_value_t = 299_792_458)]
+    pub(crate) seed: u64,
+    /// Apply the lineage FIM transform to CODE documents.
+    #[arg(long)]
+    pub(crate) fim: bool,
 }
 
 #[derive(Debug, clap::Args)]

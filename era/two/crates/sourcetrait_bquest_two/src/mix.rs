@@ -262,6 +262,121 @@ pub(crate) fn chunk_and_shuffle(
     (chunks, dropped_tail)
 }
 
+/// `bquest mix pack`: document tables (in the given mix order) ->
+/// one shuffled packed-chunks artifact - "chunks" u32
+/// [n, seq_len + 1] safetensors plus a .nuon provenance sidecar.
+/// The model dir resolves through the global -c config (the
+/// tokenizer is the checkpoint's own).
+pub(crate) fn mix_pack(cli: &Cli, args: &MixPackArgs) -> BquestResult<()> {
+    let started = std::time::Instant::now();
+    let config = lib::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
+    let tokenizer = lib::load_tokenizer(&config.model_dir())?;
+    lib::verify_token_map(&tokenizer)?;
+    let document_type = lib::nu::parse_typedef(MIX_DOCUMENT_TYPEDEF)?;
+
+    let mut pack_documents: Vec<PackDocument> = Vec::new();
+    for path in &args.documents {
+        let table = lib::nu::load_value(path)?;
+        let rows = match table.as_list() {
+            Ok(rows) => rows,
+            Err(e) => snafu::whatever!("{}: not a document table: {e}", path.display()),
+        };
+        for row in rows {
+            lib::nu::conform(row, &document_type)?;
+            let record = match row.as_record() {
+                Ok(record) => record,
+                Err(e) => snafu::whatever!("document row: {e}"),
+            };
+            let Some(metadata_value) = record.get("metadata") else {
+                snafu::whatever!("document metadata is missing");
+            };
+            let metadata = match metadata_value.as_record() {
+                Ok(metadata) => metadata,
+                Err(e) => snafu::whatever!("document metadata is not a record: {e}"),
+            };
+            pack_documents.push(PackDocument {
+                text: field_str(record, "text")?,
+                code: field_str(metadata, "kind")? == "code",
+            });
+        }
+    }
+
+    let mut rng = SplitMix64::new(args.seed);
+    let stream = tokenize_documents(&tokenizer, &pack_documents, args.fim, &mut rng)?;
+    let (chunks, dropped_tail) = chunk_and_shuffle(&stream, args.seq_len, &mut rng);
+    snafu::ensure_whatever!(
+        !chunks.is_empty(),
+        "the stream ({} tokens) is shorter than one chunk (seq_len {})",
+        stream.len(),
+        args.seq_len
+    );
+
+    let width = args.seq_len + 1;
+    let mut chunk_bytes: Vec<u8> = Vec::with_capacity(chunks.len() * width * 4);
+    for chunk in &chunks {
+        for id in chunk {
+            chunk_bytes.extend_from_slice(&id.to_le_bytes());
+        }
+    }
+    let view = match safetensors::tensor::TensorView::new(
+        safetensors::Dtype::U32,
+        vec![chunks.len(), width],
+        &chunk_bytes,
+    ) {
+        Ok(view) => view,
+        Err(e) => snafu::whatever!("chunks view failed: {e}"),
+    };
+    if let Some(parent) = args.out.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    match safetensors::serialize_to_file(
+        vec![(String::from("chunks"), view)],
+        None,
+        &args.out,
+    ) {
+        Ok(()) => {}
+        Err(e) => snafu::whatever!("chunk artifact write failed: {e}"),
+    }
+
+    let provenance_path = args.out.with_extension("nuon");
+    let provenance = lib::nu::Value::record(
+        lib::nu::record! {
+            "documents" => lib::nu::Value::list(
+                args.documents
+                    .iter()
+                    .map(|p| v_str(&p.display().to_string()))
+                    .collect(),
+                span(),
+            ),
+            "document_count" => v_int(pack_documents.len() as i64),
+            "seq_len" => v_int(args.seq_len as i64),
+            "seed" => v_int(args.seed as i64),
+            "fim" => v_bool(args.fim),
+            "total_tokens" => v_int(stream.len() as i64),
+            "chunks" => v_int(chunks.len() as i64),
+            "dropped_tail" => v_int(dropped_tail as i64),
+            "bquest_version" => v_str(env!("CARGO_PKG_VERSION")),
+        },
+        span(),
+    );
+    lib::nu::save_value(&provenance_path, &provenance)?;
+
+    let summary = lib::nu::Value::record(
+        lib::nu::record! {
+            "chunks" => v_int(chunks.len() as i64),
+            "total_tokens" => v_int(stream.len() as i64),
+            "dropped_tail" => v_int(dropped_tail as i64),
+            "out" => v_str(&args.out.display().to_string()),
+            "seconds" => v_float(started.elapsed().as_secs_f64()),
+        },
+        span(),
+    );
+    println!("{}", lib::nu::to_nuon_text(&summary)?);
+    Ok(())
+}
+
 /// `bquest mix render`: corpus trees (per the spec) -> one
 /// whole-value documents_<name>.nuon table per spec row, rows
 /// conform-validated against the document typedef before write.
