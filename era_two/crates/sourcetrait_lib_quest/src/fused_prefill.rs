@@ -10,9 +10,14 @@
 //! the inter-chunk recurrence in two - StateStage runs the SERIAL
 //! state math alone, materializing each chunk's initial state and
 //! vnew rows to a scratch, and StateOut computes every chunk's
-//! output rows chunk-PARALLEL from that scratch. Raw pointer
-//! args on the model's own stream, operands addressed at their layout
-//! offsets (the offset-leak lock).
+//! output rows chunk-PARALLEL from that scratch. BundleBf16: the
+//! bundle's q | k | w | u columns ride bf16 pairs packed two per
+//! f32 cell (halving the rule family's bandwidth-bound bundle
+//! traffic) while g | beta and the recurrence state stay exact f32
+//! (the vllm accumulation-order lesson); PackPairs packs the gemm
+//! outputs into the w/u cells. Raw pointer args on the model's own
+//! stream, operands addressed at their layout offsets (the
+//! offset-leak lock).
 //!
 //! Numerics: the prep kernel runs the conv/silu/l2 chain in f32 where
 //! the classic chain rounds through bf16 per op (the FusedDecodeConv
@@ -23,20 +28,50 @@
 //! only the CARRIED cuda bf16 multi-token chunk branch does.
 use crate::*;
 
-/// Kernel geometry: one 64-row chunk tile per block. SA_ROW carries
-/// q | k | w | u | g | beta (beta rides for TriSolve/PrepKbg; the
-/// StateAdvancePipeline ignores it). PC_KH/PC_VH are the GDN head
-/// dims the family is geometry-locked to (dk 96 / dv 192).
+/// Kernel geometry: one 64-row chunk tile per block. A bundle row is
+/// SA_CELLS f32 cells: q | k | w | u as bf16 pairs (BundleBf16) at
+/// SA_QC/SA_KC/SA_WC/SA_UC, then exact-f32 g | beta at SA_GC/SA_BC
+/// (beta rides for TriSolve/PrepKbg; the StateAdvancePipeline
+/// ignores it). The family is geometry-locked to dk 96 / dv 192.
 const KERNEL_SRC: &str = r#"
 #define SA_DK 96u
 #define SA_DV 192u
 #define SA_COLS 48u
-#define SA_ROW (3u * SA_DK + SA_DV + 2u)
+#define SA_QC 0u
+#define SA_KC 48u
+#define SA_WC 96u
+#define SA_UC 144u
+#define SA_GC 240u
+#define SA_BC 241u
+#define SA_CELLS 242u
 #define PC_TAPS 4u
 
 __device__ __forceinline__ float bf16_to_f32(unsigned short bits) {
     unsigned int wide = ((unsigned int)bits) << 16;
     return __uint_as_float(wide);
+}
+
+__device__ __forceinline__ unsigned short f32_to_bf16(float value) {
+    unsigned int bits = __float_as_uint(value);
+    unsigned int rounded = bits + 0x7FFFu + ((bits >> 16) & 1u);
+    return (unsigned short)(rounded >> 16);
+}
+
+// BundleBf16: the q | k | w | u columns ride bf16 PAIRS packed two
+// per f32 cell (one 4-byte load carries two elements - the rule
+// family's bundle traffic halves), while g | beta stay EXACT f32
+// cells (the gating scalars compound through the recurrent state -
+// the vllm accumulation-order lesson). Even column = low half.
+__device__ __forceinline__ void unpack_pair(float cell, float* even, float* odd) {
+    unsigned int bits = __float_as_uint(cell);
+    *even = bf16_to_f32((unsigned short)(bits & 0xFFFFu));
+    *odd = bf16_to_f32((unsigned short)(bits >> 16u));
+}
+
+__device__ __forceinline__ float pack_pair(float even, float odd) {
+    unsigned int bits = (unsigned int)f32_to_bf16(even)
+        | (((unsigned int)f32_to_bf16(odd)) << 16u);
+    return __uint_as_float(bits);
 }
 
 // The intra-chunk solve: A0 = -(k_beta k^T . decay) strictly below
@@ -54,11 +89,15 @@ extern "C" __global__ void tri_solve_f32(
     float* sg = srow + 64u;                    // [64] cumulative gates
     unsigned long long b = blockIdx.x;
     unsigned int r = threadIdx.x;
-    const float* rows = bundle + b * 64ull * SA_ROW;
-    float beta_r = rows[r * SA_ROW + SA_ROW - 1u];
-    sg[r] = rows[r * SA_ROW + 3u * SA_DK + SA_DV];
-    for (unsigned int i = 0; i < SA_DK; ++i) {
-        sk[r * SA_DK + i] = rows[r * SA_ROW + SA_DK + i] * beta_r;
+    const float* rows = bundle + b * 64ull * SA_CELLS;
+    float beta_r = rows[r * SA_CELLS + SA_BC];
+    sg[r] = rows[r * SA_CELLS + SA_GC];
+    for (unsigned int i2 = 0; i2 < SA_COLS; ++i2) {
+        float k_even;
+        float k_odd;
+        unpack_pair(rows[r * SA_CELLS + SA_KC + i2], &k_even, &k_odd);
+        sk[r * SA_DK + 2u * i2] = k_even * beta_r;
+        sk[r * SA_DK + 2u * i2 + 1u] = k_odd * beta_r;
     }
     __syncthreads();
     // A0[r][c] = -(k_beta[r] . k[c]) * exp(g[r] - g[c]) strictly
@@ -67,8 +106,12 @@ extern "C" __global__ void tri_solve_f32(
         float value = 0.f;
         if (c < r) {
             float dot = 0.f;
-            for (unsigned int i = 0; i < SA_DK; ++i) {
-                dot += sk[r * SA_DK + i] * rows[c * SA_ROW + SA_DK + i];
+            for (unsigned int i2 = 0; i2 < SA_COLS; ++i2) {
+                float k_even;
+                float k_odd;
+                unpack_pair(rows[c * SA_CELLS + SA_KC + i2], &k_even, &k_odd);
+                dot += sk[r * SA_DK + 2u * i2] * k_even
+                    + sk[r * SA_DK + 2u * i2 + 1u] * k_odd;
             }
             value = -(dot * expf(sg[r] - sg[c]));
         }
@@ -193,10 +236,10 @@ extern "C" __global__ void prep_chunk_f32(
     }
     __syncthreads();
     unsigned long long brow =
-        ((unsigned long long)(h * chunks + chunk) * 64u + r) * SA_ROW;
-    bundle[brow + 3u * SA_DK + SA_DV] = sg[r];
+        ((unsigned long long)(h * chunks + chunk) * 64u + r) * SA_CELLS;
+    bundle[brow + SA_GC] = sg[r];
     if (tok >= t) { return; }
-    bundle[brow + SA_ROW - 1u] = beta;
+    bundle[brow + SA_BC] = beta;
     unsigned int hist = 4u + tok;
     unsigned int q_base = h * SA_DK;
     unsigned int k_base = heads * SA_DK + h * SA_DK;
@@ -221,6 +264,8 @@ extern "C" __global__ void prep_chunk_f32(
     }
     float q_inv = 1.f / sqrtf(q_sumsq + 1e-6f);
     float k_inv = 1.f / sqrtf(k_sumsq + 1e-6f);
+    float q_pair[2];
+    float k_pair[2];
     for (unsigned int i = 0; i < SA_DK; ++i) {
         float q_acc = 0.f;
         float k_acc = 0.f;
@@ -232,8 +277,12 @@ extern "C" __global__ void prep_chunk_f32(
         }
         float q_s = q_acc / (1.f + expf(-q_acc));
         float k_s = k_acc / (1.f + expf(-k_acc));
-        bundle[brow + i] = q_s * q_inv * q_scale;
-        bundle[brow + SA_DK + i] = k_s * k_inv;
+        q_pair[i & 1u] = q_s * q_inv * q_scale;
+        k_pair[i & 1u] = k_s * k_inv;
+        if ((i & 1u) == 1u) {
+            bundle[brow + SA_QC + i / 2u] = pack_pair(q_pair[0], q_pair[1]);
+            bundle[brow + SA_KC + i / 2u] = pack_pair(k_pair[0], k_pair[1]);
+        }
     }
     unsigned long long vrow =
         ((unsigned long long)(h * chunks + chunk) * 64u + r) * SA_DV;
@@ -255,12 +304,16 @@ extern "C" __global__ void prep_kbg_f32(
     const float* bundle
 ) {
     unsigned long long row = (unsigned long long)blockIdx.x * 64u + threadIdx.x;
-    const float* src = bundle + row * SA_ROW;
-    float beta_v = src[SA_ROW - 1u];
-    float g_exp = expf(src[3u * SA_DK + SA_DV]);
+    const float* src = bundle + row * SA_CELLS;
+    float beta_v = src[SA_BC];
+    float g_exp = expf(src[SA_GC]);
     float* dst = kbg + row * SA_DK;
-    for (unsigned int i = 0; i < SA_DK; ++i) {
-        dst[i] = (src[SA_DK + i] * beta_v) * g_exp;
+    for (unsigned int i2 = 0; i2 < SA_COLS; ++i2) {
+        float k_even;
+        float k_odd;
+        unpack_pair(src[SA_KC + i2], &k_even, &k_odd);
+        dst[2u * i2] = (k_even * beta_v) * g_exp;
+        dst[2u * i2 + 1u] = (k_odd * beta_v) * g_exp;
     }
 }
 
@@ -287,7 +340,7 @@ extern "C" __global__ void state_stage_f32(
     unsigned int stripe = blockIdx.y;
     unsigned int tid = threadIdx.x;
     unsigned int j = stripe * SA_COLS + tid;   // this thread's v-column
-    const unsigned long long chunk_stride = 64ull * SA_ROW;
+    const unsigned long long chunk_stride = 64ull * SA_CELLS;
     const float* bundle_h = bundle + h * (unsigned long long)chunks * chunk_stride;
     float* state_h = state + h * (unsigned long long)SA_DK * SA_DV;
     float* scratch_h = scratch
@@ -305,14 +358,19 @@ extern "C" __global__ void state_stage_f32(
         float* chunk_scratch = scratch_h
             + chunk * (unsigned long long)(SA_DK + 64u) * SA_DV;
         __syncthreads();
-        // Stage k + gates (strided over the stripe's threads).
-        for (unsigned int idx = tid; idx < 64u * SA_DK; idx += SA_COLS) {
-            unsigned int r = idx / SA_DK;
-            unsigned int i = idx - r * SA_DK;
-            sk[r * SA_DK + i] = rows[r * SA_ROW + SA_DK + i];
+        // Stage k + gates (strided over the stripe's threads; k
+        // unpacks from its pair cells).
+        for (unsigned int idx = tid; idx < 64u * SA_COLS; idx += SA_COLS) {
+            unsigned int r = idx / SA_COLS;
+            unsigned int i2 = idx - r * SA_COLS;
+            float k_even;
+            float k_odd;
+            unpack_pair(rows[r * SA_CELLS + SA_KC + i2], &k_even, &k_odd);
+            sk[r * SA_DK + 2u * i2] = k_even;
+            sk[r * SA_DK + 2u * i2 + 1u] = k_odd;
         }
         for (unsigned int r = tid; r < 64u; r += SA_COLS) {
-            sg[r] = rows[r * SA_ROW + 3u * SA_DK + SA_DV];
+            sg[r] = rows[r * SA_CELLS + SA_GC];
         }
         __syncthreads();
         for (unsigned int r = tid; r < 64u; r += SA_COLS) {
@@ -325,17 +383,23 @@ extern "C" __global__ void state_stage_f32(
         }
         __syncthreads();
         // v_new = u - w @ S over the carried column, written to the
-        // scratch's vnew rows for the output pass.
+        // scratch's vnew rows for the output pass (w and u unpack
+        // from their pair cells; per-element order is unchanged).
         #pragma unroll
         for (unsigned int r = 0; r < 64u; ++r) {
-            const float* row = rows + r * SA_ROW;
-            const float* w_row = row + 2u * SA_DK;
+            const float* row = rows + r * SA_CELLS;
             float acc = 0.f;
             #pragma unroll
-            for (unsigned int i = 0; i < SA_DK; ++i) {
-                acc += w_row[i] * s_reg[i];
+            for (unsigned int i2 = 0; i2 < SA_COLS; ++i2) {
+                float w_even;
+                float w_odd;
+                unpack_pair(row[SA_WC + i2], &w_even, &w_odd);
+                acc += w_even * s_reg[2u * i2] + w_odd * s_reg[2u * i2 + 1u];
             }
-            vnew[r] = row[3u * SA_DK + j] - acc;
+            float u_even;
+            float u_odd;
+            unpack_pair(row[SA_UC + j / 2u], &u_even, &u_odd);
+            vnew[r] = ((j & 1u) == 0u ? u_even : u_odd) - acc;
             chunk_scratch[(unsigned long long)(SA_DK + r) * SA_DV + j] = vnew[r];
         }
         // S = S * exp(g_last) + (k * exp(g_last - g))^T @ v_new -
@@ -384,7 +448,7 @@ extern "C" __global__ void state_out_f32(
     unsigned int stripe = blockIdx.z;
     unsigned int tid = threadIdx.x;
     unsigned int j = stripe * SA_COLS + tid;   // this thread's v-column
-    const unsigned long long chunk_stride = 64ull * SA_ROW;
+    const unsigned long long chunk_stride = 64ull * SA_CELLS;
     const float* rows = bundle
         + (h * (unsigned long long)chunks + chunk) * chunk_stride;
     const float* chunk_scratch = scratch
@@ -393,13 +457,17 @@ extern "C" __global__ void state_out_f32(
     float* out_rows = out
         + (h * (unsigned long long)chunks + chunk) * 64ull * SA_DV;
 
-    for (unsigned int idx = tid; idx < 64u * SA_DK; idx += SA_COLS) {
-        unsigned int r = idx / SA_DK;
-        unsigned int i = idx - r * SA_DK;
-        sk[r * SA_DK + i] = rows[r * SA_ROW + SA_DK + i];
+    for (unsigned int idx = tid; idx < 64u * SA_COLS; idx += SA_COLS) {
+        unsigned int r = idx / SA_COLS;
+        unsigned int i2 = idx - r * SA_COLS;
+        float k_even;
+        float k_odd;
+        unpack_pair(rows[r * SA_CELLS + SA_KC + i2], &k_even, &k_odd);
+        sk[r * SA_DK + 2u * i2] = k_even;
+        sk[r * SA_DK + 2u * i2 + 1u] = k_odd;
     }
     for (unsigned int r = tid; r < 64u; r += SA_COLS) {
-        sg[r] = rows[r * SA_ROW + 3u * SA_DK + SA_DV];
+        sg[r] = rows[r * SA_CELLS + SA_GC];
     }
     __syncthreads();
     for (unsigned int r = tid; r < 64u; r += SA_COLS) {
@@ -412,11 +480,15 @@ extern "C" __global__ void state_out_f32(
         unsigned int c = idx - r * 64u;
         float value = 0.f;
         if (c <= r) {
-            const float* q_row = rows + r * SA_ROW;
+            const float* q_row = rows + r * SA_CELLS;
             float dot = 0.f;
             #pragma unroll
-            for (unsigned int i = 0; i < SA_DK; ++i) {
-                dot += q_row[i] * sk[c * SA_DK + i];
+            for (unsigned int i2 = 0; i2 < SA_COLS; ++i2) {
+                float q_even;
+                float q_odd;
+                unpack_pair(q_row[SA_QC + i2], &q_even, &q_odd);
+                dot += q_even * sk[c * SA_DK + 2u * i2]
+                    + q_odd * sk[c * SA_DK + 2u * i2 + 1u];
             }
             value = dot * expf(sg[r] - sg[c]);
         }
@@ -436,11 +508,14 @@ extern "C" __global__ void state_out_f32(
     // out rows: exp(g_r) * (q[r] . S) + attn_local @ v_new
     // (full-width unroll; the upper triangle adds exact zeros).
     for (unsigned int r = 0; r < 64u; ++r) {
-        const float* q_row = rows + r * SA_ROW;
+        const float* q_row = rows + r * SA_CELLS;
         float inter = 0.f;
         #pragma unroll
-        for (unsigned int i = 0; i < SA_DK; ++i) {
-            inter += q_row[i] * s_reg[i];
+        for (unsigned int i2 = 0; i2 < SA_COLS; ++i2) {
+            float q_even;
+            float q_odd;
+            unpack_pair(q_row[SA_QC + i2], &q_even, &q_odd);
+            inter += q_even * s_reg[2u * i2] + q_odd * s_reg[2u * i2 + 1u];
         }
         float acc = inter * seg[r];
         const float* attn_row = sattn + r * 64u;
@@ -451,11 +526,48 @@ extern "C" __global__ void state_out_f32(
         out_rows[(unsigned long long)r * SA_DV + j] = acc;
     }
 }
+
+// BundleBf16: pack a gemm's f32 output rows into the bundle's bf16
+// pair cells at a fixed cell offset (the w and u columns; also the
+// lock harness's q/k packing). One thread per pair; rounding is the
+// same round-to-nearest-even every bf16 store in the family uses.
+extern "C" __global__ void pack_pairs_bf16(
+    float* bundle,
+    const float* src,
+    unsigned int cell_offset,
+    unsigned int width,
+    unsigned int rows_total
+) {
+    unsigned int pairs = width / 2u;
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= rows_total * pairs) { return; }
+    unsigned int row = idx / pairs;
+    unsigned int p = idx - row * pairs;
+    bundle[(unsigned long long)row * SA_CELLS + cell_offset + p] = pack_pair(
+        src[(unsigned long long)row * width + 2u * p],
+        src[(unsigned long long)row * width + 2u * p + 1u]
+    );
+}
 "#;
 
-/// The bundle row width (q | k | w | u | g | beta) the kernels are
-/// compiled against.
-pub(crate) const BUNDLE_ROW: usize = 3 * 96 + 192 + 2;
+/// The bundle row width in f32 CELLS the kernels are compiled
+/// against (BundleBf16): q | k | w | u ride bf16 pairs packed two
+/// per cell (48 + 48 + 48 + 96 cells), g | beta stay exact f32
+/// cells - halving the rule family's bundle traffic while the
+/// gating scalars and the recurrence state keep full precision.
+pub(crate) const BUNDLE_CELLS: usize = 48 + 48 + 48 + 96 + 2;
+/// Pair-cell offsets of the packed columns (the kernel-side
+/// SA_QC/SA_KC/SA_WC/SA_UC/SA_GC/SA_BC mirror; Q/K/B are
+/// harness-side - the lock rig packs q/k and slice_sets beta).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const CELL_Q: usize = 0;
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const CELL_K: usize = 48;
+pub(crate) const CELL_W: usize = 96;
+pub(crate) const CELL_U: usize = 144;
+pub(crate) const CELL_G: usize = 240;
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const CELL_B: usize = 241;
 
 /// Lazily nvrtc-compiled module, one per process (single-device box).
 static MODULE: std::sync::OnceLock<std::sync::Arc<cudarc::driver::CudaModule>> =
@@ -491,9 +603,10 @@ fn kernel(
 
 /// `a.inplace_op2(&bundle, &TriSolve)`: a (blocks, 64, 64) f32 -
 /// WRITTEN by the kernel (the inverted-and-identity-added intra-chunk
-/// matrix); bundle (heads, chunks, 64, BUNDLE_ROW) f32 with blocks ==
-/// heads * chunks (k, cumulative g, and beta read at their bundle
-/// columns). All contiguous, all addressed at their layout offsets.
+/// matrix); bundle (heads, chunks, 64, BUNDLE_CELLS) with blocks ==
+/// heads * chunks (k unpacked from its pair cells; cumulative g and
+/// beta at their f32 cells). All contiguous, all addressed at their
+/// layout offsets.
 pub(crate) struct TriSolve;
 
 impl candle_core::InplaceOp2 for TriSolve {
@@ -525,11 +638,11 @@ impl candle_core::InplaceOp2 for TriSolve {
         if chunk != 64
             || chunk_2 != 64
             || b_chunk != 64
-            || row_width != BUNDLE_ROW
+            || row_width != BUNDLE_CELLS
             || blocks != b_heads * b_chunks
         {
             candle_core::bail!(
-                "tri_solve wants a (h*n, 64, 64) and bundle (h, n, 64, {BUNDLE_ROW}); \
+                "tri_solve wants a (h*n, 64, 64) and bundle (h, n, 64, {BUNDLE_CELLS}); \
                  got {:?}, {:?}",
                 (blocks, chunk, chunk_2),
                 (b_heads, b_chunks, b_chunk, row_width)
@@ -568,9 +681,10 @@ impl candle_core::InplaceOp2 for TriSolve {
 }
 
 /// `bundle.inplace_op3(&dyn_rows, &v_beta, &PrepChunk { .. })`:
-/// bundle (heads, chunks, 64, BUNDLE_ROW) f32 zeros - q | k | g |
-/// beta WRITTEN by the kernel (w | u stay zero for the gemm
-/// slice_sets); dyn_rows (tokens + 7, conv_width + 2 * heads) bf16 -
+/// bundle (heads, chunks, 64, BUNDLE_CELLS) f32 zeros - q | k
+/// (packed pairs) and g | beta WRITTEN by the kernel (the w | u
+/// cells stay zero for the gemm PackPairs);
+/// dyn_rows (tokens + 7, conv_width + 2 * heads) bf16 -
 /// rows 0..3 the conv-weight taps (A_log | dt_bias in the row-0 pad
 /// columns), 4..6 the carried tail, 7.. the token rows
 /// (conv_in | a | b); v_beta (heads, chunks, 64, 192) f32 - WRITTEN
@@ -615,14 +729,14 @@ impl candle_core::InplaceOp3 for PrepChunk {
         let v_dims = v_beta_layout.shape().dims4()?;
         let conv_width = 2 * heads * 96 + heads * 192;
         if chunk != 64
-            || row_width != BUNDLE_ROW
+            || row_width != BUNDLE_CELLS
             || chunks != self.tokens.div_ceil(64)
             || dyn_height != self.tokens + 7
             || dyn_width != conv_width + 2 * heads
             || v_dims != (heads, chunks, 64, 192)
         {
             candle_core::bail!(
-                "prep_chunk wants bundle (h, n, 64, {BUNDLE_ROW}), dyn (t+7, cw+2h), \
+                "prep_chunk wants bundle (h, n, 64, {BUNDLE_CELLS}), dyn (t+7, cw+2h), \
                  v_beta (h, n, 64, 192) for t {}; got {:?}, {:?}, {v_dims:?}",
                 self.tokens,
                 (heads, chunks, chunk, row_width),
@@ -711,9 +825,9 @@ impl candle_core::InplaceOp2 for PrepKbg {
 
         let kbg_dims = kbg_layout.shape().dims4()?;
         let (heads, chunks, chunk, row_width) = bundle_layout.shape().dims4()?;
-        if chunk != 64 || row_width != BUNDLE_ROW || kbg_dims != (heads, chunks, 64, 96) {
+        if chunk != 64 || row_width != BUNDLE_CELLS || kbg_dims != (heads, chunks, 64, 96) {
             candle_core::bail!(
-                "prep_kbg wants kbg (h, n, 64, 96) and bundle (h, n, 64, {BUNDLE_ROW}); \
+                "prep_kbg wants kbg (h, n, 64, 96) and bundle (h, n, 64, {BUNDLE_CELLS}); \
                  got {kbg_dims:?}, {:?}",
                 (heads, chunks, chunk, row_width)
             );
@@ -753,7 +867,7 @@ impl candle_core::InplaceOp2 for PrepKbg {
 /// the StateAdvancePipeline - state (heads, dk, dv) f32, the carried
 /// state, advanced IN PLACE across every chunk (the serial
 /// recurrence lives here alone); bundle (heads, chunks, 64,
-/// BUNDLE_ROW) f32 rows q | k | w | u | g | beta (q and beta unused
+/// BUNDLE_CELLS) rows q | k | w | u | g | beta (q and beta unused
 /// in this pass); scratch (heads, chunks, dk + 64, dv) f32 - WRITTEN
 /// with each chunk's INITIAL state (rows 0..dk) and vnew rows (rows
 /// dk..dk+64) for the parallel output pass (candle tensors mutate
@@ -795,11 +909,11 @@ impl candle_core::InplaceOp3 for StateStage {
         let scratch_dims = scratch_layout.shape().dims4()?;
         if b_heads != heads
             || b_chunk != 64
-            || row_width != 3 * dk + dv + 2
+            || row_width != BUNDLE_CELLS
             || scratch_dims != (heads, chunks, dk + 64, dv)
         {
             candle_core::bail!(
-                "state_stage wants state (h, dk, dv), bundle (h, n, 64, 3dk+dv+2), \
+                "state_stage wants state (h, dk, dv), bundle (h, n, 64, {BUNDLE_CELLS}), \
                  scratch (h, n, dk+64, dv); got {:?}, {:?}, {scratch_dims:?}",
                 (heads, dk, dv),
                 (b_heads, chunks, b_chunk, row_width)
@@ -898,11 +1012,11 @@ impl candle_core::InplaceOp3 for StateOut {
         let bundle_dims = bundle_layout.shape().dims4()?;
         let scratch_dims = scratch_layout.shape().dims4()?;
         if o_chunk != 64
-            || bundle_dims != (heads, chunks, 64, BUNDLE_ROW)
+            || bundle_dims != (heads, chunks, 64, BUNDLE_CELLS)
             || scratch_dims != (heads, chunks, 96 + 64, dv)
         {
             candle_core::bail!(
-                "state_out wants out (h, n, 64, dv), bundle (h, n, 64, {BUNDLE_ROW}), \
+                "state_out wants out (h, n, 64, dv), bundle (h, n, 64, {BUNDLE_CELLS}), \
                  scratch (h, n, 160, dv); got {:?}, {bundle_dims:?}, {scratch_dims:?}",
                 (heads, chunks, o_chunk, dv)
             );
@@ -956,10 +1070,100 @@ impl candle_core::InplaceOp3 for StateOut {
     }
 }
 
+/// `bundle.inplace_op2(&src, &PackPairs { cell_offset })`: pack an
+/// f32 tensor's rows into the bundle's bf16 pair cells at a fixed
+/// cell offset - the w/u gemm outputs, and the lock harness's q/k.
+/// dst (h, n, 64, BUNDLE_CELLS) f32; src (h, n, 64, width) f32 with
+/// width even and the packed span inside the pair-cell region.
+pub(crate) struct PackPairs {
+    pub(crate) cell_offset: usize,
+}
+
+impl candle_core::InplaceOp2 for PackPairs {
+    fn name(&self) -> &'static str {
+        "quest_pack_pairs"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _s1: &mut candle_core::CpuStorage,
+        _l1: &candle_core::Layout,
+        _s2: &candle_core::CpuStorage,
+        _l2: &candle_core::Layout,
+    ) -> candle_core::Result<()> {
+        candle_core::bail!("pack_pairs is a cuda prefill building block")
+    }
+
+    fn cuda_fwd(
+        &self,
+        bundle: &mut candle_core::CudaStorage,
+        bundle_layout: &candle_core::Layout,
+        src: &candle_core::CudaStorage,
+        src_layout: &candle_core::Layout,
+    ) -> candle_core::Result<()> {
+        use cudarc::driver::{DevicePtr, PushKernelArg};
+
+        let (heads, chunks, chunk, row_width) = bundle_layout.shape().dims4()?;
+        let src_dims = src_layout.shape().dims4()?;
+        let width = src_dims.3;
+        if chunk != 64
+            || row_width != BUNDLE_CELLS
+            || src_dims != (heads, chunks, 64, width)
+            || width % 2 != 0
+            || self.cell_offset + width / 2 > CELL_G
+        {
+            candle_core::bail!(
+                "pack_pairs wants bundle (h, n, 64, {BUNDLE_CELLS}) and src (h, n, 64, even \
+                 width) inside the pair cells; got {:?}, {src_dims:?} at cell {}",
+                (heads, chunks, chunk, row_width),
+                self.cell_offset
+            );
+        }
+        if !bundle_layout.is_contiguous() || !src_layout.is_contiguous() {
+            candle_core::bail!("pack_pairs wants contiguous operands");
+        }
+
+        let device = bundle.device.clone();
+        let stream = device.cuda_stream();
+        let function = match kernel(&device, "pack_pairs_bf16") {
+            Ok(function) => function,
+            Err(error) => candle_core::bail!("{error}"),
+        };
+        let bundle_slice = bundle
+            .as_cuda_slice::<f32>()?
+            .slice(bundle_layout.start_offset()..);
+        let (bundle_ptr, _bundle_guard) = bundle_slice.device_ptr(&stream);
+        let src_slice = src.as_cuda_slice::<f32>()?.slice(src_layout.start_offset()..);
+        let (src_ptr, _src_guard) = src_slice.device_ptr(&stream);
+
+        let rows_total = (heads * chunks * 64) as u32;
+        let cell_offset = self.cell_offset as u32;
+        let width = width as u32;
+        let total = rows_total * (width / 2);
+        let block = 256u32;
+        let config = cudarc::driver::LaunchConfig {
+            grid_dim: (total.div_ceil(block), 1, 1),
+            block_dim: (block, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut builder = stream.launch_builder(&function);
+        builder
+            .arg(&bundle_ptr)
+            .arg(&src_ptr)
+            .arg(&cell_offset)
+            .arg(&width)
+            .arg(&rows_total);
+        if let Err(error) = unsafe { builder.launch(config) } {
+            candle_core::bail!("pack_pairs launch failed: {error}");
+        }
+        Ok(())
+    }
+}
+
 /// The rule back half over a filled bundle: TriSolve, the two cublas
-/// gemms, the PackTrim w/u slice_sets, and the StateAdvancePipeline
-/// (StateStage serial, StateOut chunk-parallel over the scratch).
-/// Returns (out [t, heads, dv] f32, final state).
+/// gemms, the BundleBf16 w/u pair packing, and the
+/// StateAdvancePipeline (StateStage serial, StateOut chunk-parallel
+/// over the scratch). Returns (out [t, heads, dv] f32, final state).
 fn rule_over_bundle(
     bundle: &candle_core::Tensor,
     v_beta: &candle_core::Tensor,
@@ -984,8 +1188,8 @@ fn rule_over_bundle(
     let attn = attn.reshape((heads, chunks, 64, 64))?;
     let value = attn.matmul(v_beta)?;
     let k_cumdecay = attn.matmul(&kbg)?;
-    bundle.slice_set(&k_cumdecay, 3, 2 * dk)?;
-    bundle.slice_set(&value, 3, 3 * dk)?;
+    bundle.inplace_op2(&k_cumdecay, &PackPairs { cell_offset: CELL_W })?;
+    bundle.inplace_op2(&value, &PackPairs { cell_offset: CELL_U })?;
     let carried = state.copy()?;
     let scratch = candle_core::Tensor::zeros(
         (heads, chunks, dk + 64, dv),
@@ -1042,8 +1246,8 @@ pub(crate) fn prep_chunk_rule(
     let (t, conv_width) = conv_in.dims2()?;
     let (heads, dk, dv) = state.dims3()?;
     snafu::ensure_whatever!(
-        3 * dk + dv + 2 == BUNDLE_ROW,
-        "prep_chunk_rule is geometry-locked to the {BUNDLE_ROW}-column bundle (dk {dk}, dv {dv})"
+        dk == 96 && dv == 192,
+        "prep_chunk_rule is geometry-locked to the {BUNDLE_CELLS}-cell bundle (dk {dk}, dv {dv})"
     );
     let chunks = t.div_ceil(64);
     let device = conv_in.device();
@@ -1059,7 +1263,7 @@ pub(crate) fn prep_chunk_rule(
     let dyn_rows = candle_core::Tensor::cat(&[static_rows, &tail_rows, &token_rows], 0)?;
 
     let bundle = candle_core::Tensor::zeros(
-        (heads, chunks, 64, BUNDLE_ROW),
+        (heads, chunks, 64, BUNDLE_CELLS),
         candle_core::DType::F32,
         device,
     )?;
@@ -1088,8 +1292,9 @@ pub(crate) fn prep_chunk_rule(
 
 /// The rule kernels driven from pre-prepped q/k/v/g/beta tensors (the
 /// classic chunk_rule contract: q/k l2-normed, q pre-scaled, all f32,
-/// initial-state carry) - the lock rig's harness: candle ops pack the
-/// bundle the way PrepChunk writes it, then the back half runs.
+/// initial-state carry) - the lock rig's harness: PackPairs and
+/// slice_set fill the bundle the way PrepChunk writes it (q/k as bf16
+/// pairs, g/beta exact f32), then the back half runs.
 #[cfg(test)]
 pub(crate) fn rule_from_parts(
     q: &candle_core::Tensor,
@@ -1127,14 +1332,14 @@ pub(crate) fn rule_from_parts(
         .reshape((heads, chunks, 64))?;
 
     let bundle = candle_core::Tensor::zeros(
-        (heads, chunks, 64, BUNDLE_ROW),
+        (heads, chunks, 64, BUNDLE_CELLS),
         candle_core::DType::F32,
         device,
     )?;
-    bundle.slice_set(&q_r.contiguous()?, 3, 0)?;
-    bundle.slice_set(&k_r.contiguous()?, 3, dk)?;
-    bundle.slice_set(&g_r.unsqueeze(3)?.contiguous()?, 3, 3 * dk + dv)?;
-    bundle.slice_set(&beta_r.unsqueeze(3)?.contiguous()?, 3, 3 * dk + dv + 1)?;
+    bundle.inplace_op2(&q_r.contiguous()?, &PackPairs { cell_offset: CELL_Q })?;
+    bundle.inplace_op2(&k_r.contiguous()?, &PackPairs { cell_offset: CELL_K })?;
+    bundle.slice_set(&g_r.unsqueeze(3)?.contiguous()?, 3, CELL_G)?;
+    bundle.slice_set(&beta_r.unsqueeze(3)?.contiguous()?, 3, CELL_B)?;
     let v_beta = v_r.broadcast_mul(&beta_r.unsqueeze(3)?)?.contiguous()?;
 
     rule_over_bundle(&bundle, &v_beta, state, t)

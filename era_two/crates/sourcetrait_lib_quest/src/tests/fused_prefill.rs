@@ -61,8 +61,11 @@ fn nmse(actual: &candle_core::Tensor, reference: &candle_core::Tensor) -> f64 {
 /// The rule kernels against the classic chain: 150 tokens (two full
 /// 64-chunks + a ragged 22), the real geometry (30 heads, dk 96, dv
 /// 192), a NONZERO initial state - whole-pass AND split-with-carry
-/// must agree to the f32 reassociation class (serial in-thread dots
-/// where cublas tiles; the blocked substitution's regrouping).
+/// agree at the BundleBf16 quantization class (RECALIBRATED from the
+/// f32-reassociation 1e-9 bar when the bundle's q/k/w/u columns went
+/// bf16-pair; g/beta and the state stay f32-exact, and the per-
+/// element accumulation orders are unchanged - the spread is pure
+/// operand quantization, the prep lock's class).
 #[test]
 #[ignore = "needs a cuda card"]
 fn fused_chunk_rule_matches_the_classic_chain() {
@@ -94,10 +97,13 @@ fn fused_chunk_rule_matches_the_classic_chain() {
     println!(
         "fused-prefill whole-pass vs classic: out nmse {out_nmse:.3e}, state nmse {state_nmse:.3e}"
     );
-    assert!(out_nmse <= 1e-9, "out {out_nmse:.3e} beyond the f32 reassociation class");
     assert!(
-        state_nmse <= 1e-9,
-        "state {state_nmse:.3e} beyond the f32 reassociation class"
+        out_nmse <= 1e-4,
+        "out {out_nmse:.3e} beyond the BundleBf16 quantization class"
+    );
+    assert!(
+        state_nmse <= 1e-4,
+        "state {state_nmse:.3e} beyond the BundleBf16 quantization class"
     );
 
     // Split 70 + 80 with carried state through the FUSED path against
@@ -120,12 +126,12 @@ fn fused_chunk_rule_matches_the_classic_chain() {
         "fused-prefill split-carry vs classic: out nmse {split_nmse:.3e}, state nmse {split_state_nmse:.3e}"
     );
     assert!(
-        split_nmse <= 1e-9,
-        "split out {split_nmse:.3e} beyond the f32 reassociation class"
+        split_nmse <= 1e-4,
+        "split out {split_nmse:.3e} beyond the BundleBf16 quantization class"
     );
     assert!(
-        split_state_nmse <= 1e-9,
-        "split state {split_state_nmse:.3e} beyond the f32 reassociation class"
+        split_state_nmse <= 1e-4,
+        "split state {split_state_nmse:.3e} beyond the BundleBf16 quantization class"
     );
 }
 
