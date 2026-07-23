@@ -5933,6 +5933,7 @@ version = "1.0.150"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
+ "indexmap",
  "itoa",
  "memchr",
  "serde",
@@ -6176,16 +6177,20 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_bquest"
-version = "0.0.0-4"
+version = "0.0.0-5"
 dependencies = [
  "burn",
  "candle-core 0.11.0",
  "clap",
+ "regex",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "snafu",
  "sourcetrait_lib_quest",
  "tokenizers 0.23.1",
+ "unicode-normalization",
+ "unicode-properties",
 ]
 
 [[package]]
@@ -6200,7 +6205,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_lib_quest"
-version = "0.0.0-37"
+version = "0.0.0-38"
 dependencies = [
  "candle-core 0.11.0",
  "candle-flash-attn",
@@ -6548,7 +6553,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix 1.1.4",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7303,6 +7308,12 @@ checksum = "43f613e4fa046e69818dd287fdc4bc78175ff20331479dab6e1b0f98d57062de"
 dependencies = [
  "smallvec",
 ]
+
+[[package]]
+name = "unicode-properties"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d"
 
 [[package]]
 name = "unicode-segmentation"

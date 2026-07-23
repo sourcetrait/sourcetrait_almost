@@ -17,7 +17,7 @@ use crate::*;
 /// The prefill chunk for context advances (the lib generate default).
 const PREFILL_CHUNK: usize = 512;
 /// The capability home relative to the XDG data home.
-const CAPABILITY_HOME_RELATIVE: &str = "sourcetrait/quest/capability";
+pub(crate) const CAPABILITY_HOME_RELATIVE: &str = "sourcetrait/quest/capability";
 
 /// A fixture request row (the olmo-eval requests JSONL shape; fields
 /// this runner does not consume are ignored by serde).
@@ -92,7 +92,7 @@ pub(crate) struct PredictionRow {
 }
 
 /// XDG data home, honoring the spec fallback (~/.local/share).
-fn data_home() -> BquestResult<PathBuf> {
+pub(crate) fn data_home() -> BquestResult<PathBuf> {
     if let Ok(dir) = std::env::var("XDG_DATA_HOME")
         && !dir.is_empty()
     {

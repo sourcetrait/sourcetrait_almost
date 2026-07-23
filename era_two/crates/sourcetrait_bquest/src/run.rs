@@ -5,6 +5,8 @@ pub fn run() {
     let outcome = match &cli.command {
         Command::Capability { command } => match command {
             CapabilityCommand::Run(args) => capability_run(&cli, args),
+            CapabilityCommand::Convert(args) => capability_convert(args),
+            CapabilityCommand::Score(args) => capability_score(args),
         },
         Command::Speculate { command } => match command {
             SpeculateCommand::Record(args) => speculate_record(&cli, args),

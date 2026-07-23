@@ -15,6 +15,11 @@ pub enum BquestError {
     Candle { source: candle_core::Error },
     #[snafu(transparent)]
     Lib { source: lib::LibQuestError },
+    #[snafu(transparent)]
+    Shell {
+        #[snafu(source(from(lib::nu::ShellError, Box::new)))]
+        source: Box<lib::nu::ShellError>,
+    },
     #[snafu(whatever, display("{message}"))]
     Whatever {
         message: String,

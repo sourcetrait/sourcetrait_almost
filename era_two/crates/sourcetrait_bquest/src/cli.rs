@@ -43,6 +43,14 @@ pub(crate) enum CapabilityCommand {
     /// emit predictions in their JSONL shape (scoring stays their
     /// code, run CPU-only in the eval env).
     Run(CapabilityRunArgs),
+    /// Convert fixture requests and standing runs' predictions from
+    /// their JSONL to whole-value .nuon mirrors (lossless,
+    /// gate-verified in place; provenance siblings written).
+    Convert(CapabilityConvertArgs),
+    /// Score a converted run in pure rust (MC logprob accuracy, gsm8k
+    /// exact-match, IFBench ifeval): per-item scores + per-task
+    /// aggregates as .nuon.
+    Score(CapabilityScoreArgs),
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -95,6 +103,48 @@ pub(crate) struct SpeculateTokensArgs {
     /// Restrict to one turn index; absent = every turn.
     #[arg(long)]
     pub(crate) turn: Option<usize>,
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct CapabilityConvertArgs {
+    /// Fixture render root (carrying requests/); absent = the
+    /// capability home's fixtures/full.
+    #[arg(long)]
+    pub(crate) fixtures: Option<PathBuf>,
+    /// Runs root whose child run directories carry predictions/;
+    /// absent = the capability home's runs.
+    #[arg(long)]
+    pub(crate) runs: Option<PathBuf>,
+    /// Nuon output root; absent = the capability home's nuon.
+    #[arg(long)]
+    pub(crate) out: Option<PathBuf>,
+    /// Comma-separated task-token filter (the sanitized spec, e.g.
+    /// mmlu_anatomy); absent = every task found.
+    #[arg(long)]
+    pub(crate) tasks: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct CapabilityScoreArgs {
+    /// Converted nuon run directory (carrying predictions/); absent =
+    /// the capability home's nuon/runs/engine_default.
+    #[arg(long)]
+    pub(crate) run: Option<PathBuf>,
+    /// Converted nuon fixtures root (carrying requests/); absent =
+    /// the capability home's nuon/fixtures.
+    #[arg(long)]
+    pub(crate) fixtures: Option<PathBuf>,
+    /// Output root (scores/ and aggregates.nuon land beneath it);
+    /// absent = the run directory itself.
+    #[arg(long)]
+    pub(crate) out: Option<PathBuf>,
+    /// Checker-data directory (the copied reference data files);
+    /// absent = the capability home's checker_data.
+    #[arg(long)]
+    pub(crate) checker_data: Option<PathBuf>,
+    /// Comma-separated task-token filter; absent = every task found.
+    #[arg(long)]
+    pub(crate) tasks: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]

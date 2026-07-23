@@ -15,6 +15,7 @@ use crate::*;
 pub use nu_protocol::{
     CompareTypes,
     Record,
+    ShellError,
     Span,
     Type,
     Value,
