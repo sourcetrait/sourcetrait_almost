@@ -118,6 +118,90 @@ fn render_tree(spec: &MixSpecRow, stamp: &str) -> BquestResult<Vec<lib::nu::Valu
     Ok(documents)
 }
 
+// The FIM family is consumed by the pack stage (next in CptLoop);
+// the allows retire with it.
+/// FIM sentinel spellings (the pipe-wrapped forms the tokenizer
+/// carries as single special tokens; the lineage's exact bytes).
+#[allow(dead_code)]
+pub(crate) const FIM_PREFIX: &str = "<|fim_prefix|>";
+#[allow(dead_code)]
+pub(crate) const FIM_MIDDLE: &str = "<|fim_middle|>";
+#[allow(dead_code)]
+pub(crate) const FIM_SUFFIX: &str = "<|fim_suffix|>";
+/// The lineage FIM rate (per document) and the PSM/SPM split.
+#[allow(dead_code)]
+pub(crate) const FIM_RATE: f64 = 0.5;
+
+/// SplitMix64: the deterministic seed-expanding rng (the era-one
+/// packing precedent; no external rng dependency).
+#[allow(dead_code)]
+pub(crate) struct SplitMix64 {
+    state: u64,
+}
+
+#[allow(dead_code)]
+impl SplitMix64 {
+    pub(crate) fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    pub(crate) fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E3779B97F4A7C15);
+        let mut mixed = self.state;
+        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D049BB133111EB);
+        mixed ^ (mixed >> 31)
+    }
+
+    /// Uniform in [0, 1).
+    pub(crate) fn next_unit(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// Uniform in [0, bound) (bound > 0).
+    pub(crate) fn next_below(&mut self, bound: usize) -> usize {
+        (self.next_unit() * bound as f64) as usize % bound
+    }
+}
+
+/// The lineage FIM transform: at FIM_RATE per document pick two char
+/// break points, then render 50/50 PSM
+/// (prefix-sentinel prefix, suffix-sentinel suffix, middle-sentinel
+/// middle) vs SPM (the suffix span leads); otherwise the text passes
+/// through untouched. Char-boundary safe; the three spans always
+/// reassemble the original text.
+#[allow(dead_code)]
+pub(crate) fn fim_transform(text: &str, rng: &mut SplitMix64) -> String {
+    if rng.next_unit() >= FIM_RATE {
+        return text.to_string();
+    }
+    let char_count = text.chars().count();
+    if char_count < 2 {
+        return text.to_string();
+    }
+    let mut first_break = rng.next_below(char_count + 1);
+    let mut second_break = rng.next_below(char_count + 1);
+    if first_break > second_break {
+        std::mem::swap(&mut first_break, &mut second_break);
+    }
+    let byte_of = |char_index: usize| -> usize {
+        text.char_indices()
+            .nth(char_index)
+            .map(|(byte, _)| byte)
+            .unwrap_or(text.len())
+    };
+    let first_byte = byte_of(first_break);
+    let second_byte = byte_of(second_break);
+    let prefix = &text[..first_byte];
+    let middle = &text[first_byte..second_byte];
+    let suffix = &text[second_byte..];
+    if rng.next_unit() < 0.5 {
+        format!("{FIM_PREFIX}{prefix}{FIM_SUFFIX}{suffix}{FIM_MIDDLE}{middle}")
+    } else {
+        format!("{FIM_SUFFIX}{suffix}{FIM_PREFIX}{prefix}{FIM_MIDDLE}{middle}")
+    }
+}
+
 /// `bquest mix render`: corpus trees (per the spec) -> one
 /// whole-value documents_<name>.nuon table per spec row, rows
 /// conform-validated against the document typedef before write.

@@ -84,3 +84,46 @@ fn mix_render_documents_are_verbatim_sorted_and_typed() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn fim_transform_is_seeded_deterministic_and_reassembles() {
+    use crate::mix::{FIM_MIDDLE, FIM_PREFIX, FIM_SUFFIX, SplitMix64, fim_transform};
+
+    let text = "fn main() {\n    let naïve = \"héllo\";\n    println!(\"{naïve}\");\n}\n";
+    let render_all = |seed: u64| -> Vec<String> {
+        let mut rng = SplitMix64::new(seed);
+        (0..64).map(|_| fim_transform(text, &mut rng)).collect()
+    };
+    let first_pass = render_all(299_792_458);
+    let second_pass = render_all(299_792_458);
+    assert_eq!(first_pass, second_pass, "same seed must render identically");
+
+    let transformed: Vec<&String> =
+        first_pass.iter().filter(|t| t.as_str() != text).collect();
+    let rate = transformed.len() as f64 / first_pass.len() as f64;
+    assert!(
+        (0.25..=0.75).contains(&rate),
+        "transform rate {rate} implausible for 0.5"
+    );
+
+    let mut psm_seen = 0usize;
+    let mut spm_seen = 0usize;
+    for rendered in &transformed {
+        if let Some(rest) = rendered.strip_prefix(FIM_PREFIX) {
+            // PSM: prefix | suffix-sentinel suffix | middle-sentinel middle.
+            psm_seen += 1;
+            let (prefix, rest) = rest.split_once(FIM_SUFFIX).expect("suffix sentinel");
+            let (suffix, middle) = rest.split_once(FIM_MIDDLE).expect("middle sentinel");
+            assert_eq!(format!("{prefix}{middle}{suffix}"), text, "PSM must reassemble");
+        } else {
+            // SPM: suffix-sentinel suffix | prefix-sentinel prefix |
+            // middle-sentinel middle.
+            spm_seen += 1;
+            let rest = rendered.strip_prefix(FIM_SUFFIX).expect("SPM leads with suffix");
+            let (suffix, rest) = rest.split_once(FIM_PREFIX).expect("prefix sentinel");
+            let (prefix, middle) = rest.split_once(FIM_MIDDLE).expect("middle sentinel");
+            assert_eq!(format!("{prefix}{middle}{suffix}"), text, "SPM must reassemble");
+        }
+    }
+    assert!(psm_seen > 0 && spm_seen > 0, "both FIM modes must occur across 64 draws");
+}
