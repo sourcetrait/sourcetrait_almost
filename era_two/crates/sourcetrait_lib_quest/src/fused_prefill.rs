@@ -15,9 +15,13 @@
 //! f32 cell (halving the rule family's bandwidth-bound bundle
 //! traffic) while g | beta and the recurrence state stay exact f32
 //! (the vllm accumulation-order lesson); PackPairs packs the gemm
-//! outputs into the w/u cells. Raw pointer args on the model's own
-//! stream, operands addressed at their layout offsets (the
-//! offset-leak lock).
+//! outputs into the w/u cells. SmallT: the module compiles once per
+//! tile via a prepended SA_TILE define - 64 the prefill default, 32
+//! the small-span variant (a <= 17-row speculation verify/readvance
+//! span computes a quarter of the tile-64 pad waste; final prefill
+//! chunks at or under 32 rows ride it too). Raw pointer args on the
+//! model's own stream, operands addressed at their layout offsets
+//! (the offset-leak lock).
 //!
 //! Numerics: the prep kernel runs the conv/silu/l2 chain in f32 where
 //! the classic chain rounds through bf16 per op (the FusedDecodeConv
@@ -28,12 +32,15 @@
 //! only the CARRIED cuda bf16 multi-token chunk branch does.
 use crate::*;
 
-/// Kernel geometry: one 64-row chunk tile per block. A bundle row is
+/// Kernel geometry: one SA_TILE-row chunk tile per block (SmallT:
+/// SA_TILE is prepended per compile - 64 or 32; SA_BLOCKS is the
+/// blocked-substitution 16-row block count). A bundle row is
 /// SA_CELLS f32 cells: q | k | w | u as bf16 pairs (BundleBf16) at
 /// SA_QC/SA_KC/SA_WC/SA_UC, then exact-f32 g | beta at SA_GC/SA_BC
 /// (beta rides for TriSolve/PrepKbg; the StateAdvancePipeline
 /// ignores it). The family is geometry-locked to dk 96 / dv 192.
 const KERNEL_SRC: &str = r#"
+#define SA_BLOCKS (SA_TILE / 16u)
 #define SA_DK 96u
 #define SA_DV 192u
 #define SA_COLS 48u
@@ -76,20 +83,20 @@ __device__ __forceinline__ float pack_pair(float even, float odd) {
 
 // The intra-chunk solve: A0 = -(k_beta k^T . decay) strictly below
 // the diagonal, then the blocked forward substitution, then + I. One
-// block per (head, chunk) tile, 64 threads; k, beta, and the
+// block per (head, chunk) tile, SA_TILE threads; k, beta, and the
 // cumulative gates read from the bundle rows.
 extern "C" __global__ void tri_solve_f32(
     float* a_out,
     const float* bundle
 ) {
     extern __shared__ float shared[];
-    float* sk = shared;                        // [64, SA_DK] beta-scaled k
-    float* sa = shared + 64u * SA_DK;          // [64, 64] working matrix
-    float* srow = sa + 64u * 64u;              // [64] row snapshot
-    float* sg = srow + 64u;                    // [64] cumulative gates
+    float* sk = shared;                        // [SA_TILE, SA_DK] beta-scaled k
+    float* sa = shared + SA_TILE * SA_DK;      // [SA_TILE, SA_TILE] working matrix
+    float* srow = sa + SA_TILE * SA_TILE;      // [SA_TILE] row snapshot
+    float* sg = srow + SA_TILE;                // [SA_TILE] cumulative gates
     unsigned long long b = blockIdx.x;
     unsigned int r = threadIdx.x;
-    const float* rows = bundle + b * 64ull * SA_CELLS;
+    const float* rows = bundle + b * (unsigned long long)SA_TILE * SA_CELLS;
     float beta_r = rows[r * SA_CELLS + SA_BC];
     sg[r] = rows[r * SA_CELLS + SA_GC];
     for (unsigned int i2 = 0; i2 < SA_COLS; ++i2) {
@@ -102,7 +109,7 @@ extern "C" __global__ void tri_solve_f32(
     __syncthreads();
     // A0[r][c] = -(k_beta[r] . k[c]) * exp(g[r] - g[c]) strictly
     // below the diagonal; zero on and above.
-    for (unsigned int c = 0; c < 64u; ++c) {
+    for (unsigned int c = 0; c < SA_TILE; ++c) {
         float value = 0.f;
         if (c < r) {
             float dot = 0.f;
@@ -115,11 +122,11 @@ extern "C" __global__ void tri_solve_f32(
             }
             value = -(dot * expf(sg[r] - sg[c]));
         }
-        sa[r * 64u + c] = value;
+        sa[r * SA_TILE + c] = value;
     }
     __syncthreads();
-    // Blocked forward substitution (BlockedSubstitution): the four
-    // 16x16 diagonal blocks solve concurrently (independent regions,
+    // Blocked forward substitution (BlockedSubstitution): the
+    // SA_BLOCKS 16x16 diagonal blocks solve concurrently (independent regions,
     // the row-serial snapshot shape per block), then each block row's
     // off-diagonal tiles update by shared-memory block products -
     // S = A[bi][bj] + sum(k in [bj, bi)) A[bi][k] . M[k][bj], then
@@ -133,37 +140,37 @@ extern "C" __global__ void tri_solve_f32(
     unsigned int dc = r & 15u;
     for (unsigned int s = 1; s < 16u; ++s) {
         if (dc < s) {
-            srow[r] = sa[(db * 16u + s) * 64u + db * 16u + dc];
+            srow[r] = sa[(db * 16u + s) * SA_TILE + db * 16u + dc];
         }
         __syncthreads();
         if (dc < s) {
             float value = srow[r];
             for (unsigned int i = 0; i < s; ++i) {
-                value += srow[db * 16u + i] * sa[(db * 16u + i) * 64u + db * 16u + dc];
+                value += srow[db * 16u + i] * sa[(db * 16u + i) * SA_TILE + db * 16u + dc];
             }
-            sa[(db * 16u + s) * 64u + db * 16u + dc] = value;
+            sa[(db * 16u + s) * SA_TILE + db * 16u + dc] = value;
         }
         __syncthreads();
     }
     float* stile = sk;
-    for (unsigned int bi = 1; bi < 4u; ++bi) {
-        for (unsigned int e = r; e < bi * 256u; e += 64u) {
+    for (unsigned int bi = 1; bi < SA_BLOCKS; ++bi) {
+        for (unsigned int e = r; e < bi * 256u; e += SA_TILE) {
             unsigned int bj = e >> 8u;
             unsigned int ti = e & 255u;
             unsigned int er = ti >> 4u;
             unsigned int ec = ti & 15u;
             unsigned int row_g = bi * 16u + er;
-            float s_val = sa[row_g * 64u + bj * 16u + ec];
+            float s_val = sa[row_g * SA_TILE + bj * 16u + ec];
             for (unsigned int k = bj; k < bi; ++k) {
                 for (unsigned int i = 0; i < 16u; ++i) {
-                    s_val += sa[row_g * 64u + k * 16u + i]
-                        * sa[(k * 16u + i) * 64u + bj * 16u + ec];
+                    s_val += sa[row_g * SA_TILE + k * 16u + i]
+                        * sa[(k * 16u + i) * SA_TILE + bj * 16u + ec];
                 }
             }
             stile[e] = s_val;
         }
         __syncthreads();
-        for (unsigned int e = r; e < bi * 256u; e += 64u) {
+        for (unsigned int e = r; e < bi * 256u; e += SA_TILE) {
             unsigned int bj = e >> 8u;
             unsigned int ti = e & 255u;
             unsigned int er = ti >> 4u;
@@ -171,17 +178,18 @@ extern "C" __global__ void tri_solve_f32(
             unsigned int row_g = bi * 16u + er;
             float t_val = stile[e];
             for (unsigned int i = 0; i < 16u; ++i) {
-                t_val += sa[row_g * 64u + bi * 16u + i]
+                t_val += sa[row_g * SA_TILE + bi * 16u + i]
                     * stile[bj * 256u + i * 16u + ec];
             }
-            sa[row_g * 64u + bj * 16u + ec] = t_val;
+            sa[row_g * SA_TILE + bj * 16u + ec] = t_val;
         }
         __syncthreads();
     }
     // + I, then the row writes back.
-    float* out_row = a_out + (b * 64ull + r) * 64ull;
-    for (unsigned int c = 0; c < 64u; ++c) {
-        float value = sa[r * 64u + c];
+    float* out_row = a_out
+        + (b * (unsigned long long)SA_TILE + r) * (unsigned long long)SA_TILE;
+    for (unsigned int c = 0; c < SA_TILE; ++c) {
+        float value = sa[r * SA_TILE + c];
         if (c == r) {
             value += 1.0f;
         }
@@ -208,11 +216,11 @@ extern "C" __global__ void prep_chunk_f32(
     float q_scale,
     float beta_scale
 ) {
-    __shared__ float sg[64];
+    __shared__ float sg[SA_TILE];
     unsigned int h = blockIdx.x;
     unsigned int chunk = blockIdx.y;
     unsigned int r = threadIdx.x;
-    unsigned int tok = chunk * 64u + r;
+    unsigned int tok = chunk * SA_TILE + r;
     unsigned int cw = 2u * heads * SA_DK + heads * SA_DV;
     unsigned int dw = cw + 2u * heads;
     float g_raw = 0.f;
@@ -230,13 +238,13 @@ extern "C" __global__ void prep_chunk_f32(
     sg[r] = g_raw;
     __syncthreads();
     if (r == 0u) {
-        for (unsigned int i = 1; i < 64u; ++i) {
+        for (unsigned int i = 1; i < SA_TILE; ++i) {
             sg[i] += sg[i - 1u];
         }
     }
     __syncthreads();
     unsigned long long brow =
-        ((unsigned long long)(h * chunks + chunk) * 64u + r) * SA_CELLS;
+        ((unsigned long long)(h * chunks + chunk) * SA_TILE + r) * SA_CELLS;
     bundle[brow + SA_GC] = sg[r];
     if (tok >= t) { return; }
     bundle[brow + SA_BC] = beta;
@@ -285,7 +293,7 @@ extern "C" __global__ void prep_chunk_f32(
         }
     }
     unsigned long long vrow =
-        ((unsigned long long)(h * chunks + chunk) * 64u + r) * SA_DV;
+        ((unsigned long long)(h * chunks + chunk) * SA_TILE + r) * SA_DV;
     for (unsigned int i = 0; i < SA_DV; ++i) {
         float acc = 0.f;
         for (unsigned int tap = 0; tap < PC_TAPS; ++tap) {
@@ -303,7 +311,7 @@ extern "C" __global__ void prep_kbg_f32(
     float* kbg,
     const float* bundle
 ) {
-    unsigned long long row = (unsigned long long)blockIdx.x * 64u + threadIdx.x;
+    unsigned long long row = (unsigned long long)blockIdx.x * SA_TILE + threadIdx.x;
     const float* src = bundle + row * SA_CELLS;
     float beta_v = src[SA_BC];
     float g_exp = expf(src[SA_GC]);
@@ -333,21 +341,21 @@ extern "C" __global__ void state_stage_f32(
     unsigned int chunks
 ) {
     extern __shared__ float shared[];
-    float* sk = shared;                        // [64, SA_DK] raw k
-    float* sg = shared + 64u * SA_DK;          // [64] cumulative gates
-    float* ses = sg + 64u;                     // [64] exp(g_last - g)
+    float* sk = shared;                        // [SA_TILE, SA_DK] raw k
+    float* sg = shared + SA_TILE * SA_DK;      // [SA_TILE] cumulative gates
+    float* ses = sg + SA_TILE;                 // [SA_TILE] exp(g_last - g)
     unsigned long long h = blockIdx.x;
     unsigned int stripe = blockIdx.y;
     unsigned int tid = threadIdx.x;
     unsigned int j = stripe * SA_COLS + tid;   // this thread's v-column
-    const unsigned long long chunk_stride = 64ull * SA_CELLS;
+    const unsigned long long chunk_stride = (unsigned long long)SA_TILE * SA_CELLS;
     const float* bundle_h = bundle + h * (unsigned long long)chunks * chunk_stride;
     float* state_h = state + h * (unsigned long long)SA_DK * SA_DV;
     float* scratch_h = scratch
-        + h * (unsigned long long)chunks * (unsigned long long)(SA_DK + 64u) * SA_DV;
+        + h * (unsigned long long)chunks * (unsigned long long)(SA_DK + SA_TILE) * SA_DV;
 
     float s_reg[SA_DK];
-    float vnew[64];
+    float vnew[SA_TILE];
     #pragma unroll
     for (unsigned int i = 0; i < SA_DK; ++i) {
         s_reg[i] = state_h[(unsigned long long)i * SA_DV + j];
@@ -356,11 +364,11 @@ extern "C" __global__ void state_stage_f32(
     for (unsigned int chunk = 0; chunk < chunks; ++chunk) {
         const float* rows = bundle_h + chunk * chunk_stride;
         float* chunk_scratch = scratch_h
-            + chunk * (unsigned long long)(SA_DK + 64u) * SA_DV;
+            + chunk * (unsigned long long)(SA_DK + SA_TILE) * SA_DV;
         __syncthreads();
         // Stage k + gates (strided over the stripe's threads; k
         // unpacks from its pair cells).
-        for (unsigned int idx = tid; idx < 64u * SA_COLS; idx += SA_COLS) {
+        for (unsigned int idx = tid; idx < SA_TILE * SA_COLS; idx += SA_COLS) {
             unsigned int r = idx / SA_COLS;
             unsigned int i2 = idx - r * SA_COLS;
             float k_even;
@@ -369,12 +377,12 @@ extern "C" __global__ void state_stage_f32(
             sk[r * SA_DK + 2u * i2] = k_even;
             sk[r * SA_DK + 2u * i2 + 1u] = k_odd;
         }
-        for (unsigned int r = tid; r < 64u; r += SA_COLS) {
+        for (unsigned int r = tid; r < SA_TILE; r += SA_COLS) {
             sg[r] = rows[r * SA_CELLS + SA_GC];
         }
         __syncthreads();
-        for (unsigned int r = tid; r < 64u; r += SA_COLS) {
-            ses[r] = expf(sg[63] - sg[r]);
+        for (unsigned int r = tid; r < SA_TILE; r += SA_COLS) {
+            ses[r] = expf(sg[SA_TILE - 1u] - sg[r]);
         }
         // The chunk's INITIAL state column, register-direct.
         #pragma unroll
@@ -386,7 +394,7 @@ extern "C" __global__ void state_stage_f32(
         // scratch's vnew rows for the output pass (w and u unpack
         // from their pair cells; per-element order is unchanged).
         #pragma unroll
-        for (unsigned int r = 0; r < 64u; ++r) {
+        for (unsigned int r = 0; r < SA_TILE; ++r) {
             const float* row = rows + r * SA_CELLS;
             float acc = 0.f;
             #pragma unroll
@@ -404,13 +412,13 @@ extern "C" __global__ void state_stage_f32(
         }
         // S = S * exp(g_last) + (k * exp(g_last - g))^T @ v_new -
         // the landed r-major order.
-        float e_last = expf(sg[63]);
+        float e_last = expf(sg[SA_TILE - 1u]);
         #pragma unroll
         for (unsigned int i = 0; i < SA_DK; ++i) {
             s_reg[i] *= e_last;
         }
         #pragma unroll
-        for (unsigned int r = 0; r < 64u; ++r) {
+        for (unsigned int r = 0; r < SA_TILE; ++r) {
             float scaled = ses[r] * vnew[r];
             const float* k_row = sk + r * SA_DK;
             #pragma unroll
@@ -439,25 +447,26 @@ extern "C" __global__ void state_out_f32(
     unsigned int chunks
 ) {
     extern __shared__ float shared[];
-    float* sk = shared;                        // [64, SA_DK] raw k
-    float* sattn = shared + 64u * SA_DK;       // [64, 64] decayed local attn
-    float* sg = sattn + 64u * 64u;             // [64] cumulative gates
-    float* seg = sg + 64u;                     // [64] exp(g)
+    float* sk = shared;                        // [SA_TILE, SA_DK] raw k
+    float* sattn = shared + SA_TILE * SA_DK;   // [SA_TILE, SA_TILE] decayed local attn
+    float* sg = sattn + SA_TILE * SA_TILE;     // [SA_TILE] cumulative gates
+    float* seg = sg + SA_TILE;                 // [SA_TILE] exp(g)
     unsigned long long h = blockIdx.x;
     unsigned int chunk = blockIdx.y;
     unsigned int stripe = blockIdx.z;
     unsigned int tid = threadIdx.x;
     unsigned int j = stripe * SA_COLS + tid;   // this thread's v-column
-    const unsigned long long chunk_stride = 64ull * SA_CELLS;
+    const unsigned long long chunk_stride = (unsigned long long)SA_TILE * SA_CELLS;
     const float* rows = bundle
         + (h * (unsigned long long)chunks + chunk) * chunk_stride;
     const float* chunk_scratch = scratch
         + (h * (unsigned long long)chunks + chunk)
-            * (unsigned long long)(SA_DK + 64u) * SA_DV;
+            * (unsigned long long)(SA_DK + SA_TILE) * SA_DV;
     float* out_rows = out
-        + (h * (unsigned long long)chunks + chunk) * 64ull * SA_DV;
+        + (h * (unsigned long long)chunks + chunk)
+            * (unsigned long long)SA_TILE * SA_DV;
 
-    for (unsigned int idx = tid; idx < 64u * SA_COLS; idx += SA_COLS) {
+    for (unsigned int idx = tid; idx < SA_TILE * SA_COLS; idx += SA_COLS) {
         unsigned int r = idx / SA_COLS;
         unsigned int i2 = idx - r * SA_COLS;
         float k_even;
@@ -466,18 +475,18 @@ extern "C" __global__ void state_out_f32(
         sk[r * SA_DK + 2u * i2] = k_even;
         sk[r * SA_DK + 2u * i2 + 1u] = k_odd;
     }
-    for (unsigned int r = tid; r < 64u; r += SA_COLS) {
+    for (unsigned int r = tid; r < SA_TILE; r += SA_COLS) {
         sg[r] = rows[r * SA_CELLS + SA_GC];
     }
     __syncthreads();
-    for (unsigned int r = tid; r < 64u; r += SA_COLS) {
+    for (unsigned int r = tid; r < SA_TILE; r += SA_COLS) {
         seg[r] = expf(sg[r]);
     }
     // The decayed local attention tile: (q[r] . k[c]) *
     // exp(g[r] - g[c]) on and below the diagonal, zero above.
-    for (unsigned int idx = tid; idx < 64u * 64u; idx += SA_COLS) {
-        unsigned int r = idx / 64u;
-        unsigned int c = idx - r * 64u;
+    for (unsigned int idx = tid; idx < SA_TILE * SA_TILE; idx += SA_COLS) {
+        unsigned int r = idx / SA_TILE;
+        unsigned int c = idx - r * SA_TILE;
         float value = 0.f;
         if (c <= r) {
             const float* q_row = rows + r * SA_CELLS;
@@ -496,18 +505,18 @@ extern "C" __global__ void state_out_f32(
     }
     __syncthreads();
     float s_reg[SA_DK];
-    float vnew[64];
+    float vnew[SA_TILE];
     #pragma unroll
     for (unsigned int i = 0; i < SA_DK; ++i) {
         s_reg[i] = chunk_scratch[(unsigned long long)i * SA_DV + j];
     }
     #pragma unroll
-    for (unsigned int r = 0; r < 64u; ++r) {
+    for (unsigned int r = 0; r < SA_TILE; ++r) {
         vnew[r] = chunk_scratch[(unsigned long long)(SA_DK + r) * SA_DV + j];
     }
     // out rows: exp(g_r) * (q[r] . S) + attn_local @ v_new
     // (full-width unroll; the upper triangle adds exact zeros).
-    for (unsigned int r = 0; r < 64u; ++r) {
+    for (unsigned int r = 0; r < SA_TILE; ++r) {
         const float* q_row = rows + r * SA_CELLS;
         float inter = 0.f;
         #pragma unroll
@@ -518,9 +527,9 @@ extern "C" __global__ void state_out_f32(
             inter += q_even * s_reg[2u * i2] + q_odd * s_reg[2u * i2 + 1u];
         }
         float acc = inter * seg[r];
-        const float* attn_row = sattn + r * 64u;
+        const float* attn_row = sattn + r * SA_TILE;
         #pragma unroll
-        for (unsigned int c = 0; c < 64u; ++c) {
+        for (unsigned int c = 0; c < SA_TILE; ++c) {
             acc += attn_row[c] * vnew[c];
         }
         out_rows[(unsigned long long)r * SA_DV + j] = acc;
@@ -569,30 +578,55 @@ pub(crate) const CELL_G: usize = 240;
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const CELL_B: usize = 241;
 
-/// Lazily nvrtc-compiled module, one per process (single-device box).
-static MODULE: std::sync::OnceLock<std::sync::Arc<cudarc::driver::CudaModule>> =
+/// The dispatch tile for a t-row span (SmallT): spans at or under 32
+/// rows ride the tile-32 module - a <= 17-row speculation verify or
+/// readvance span computes a quarter of the tile-64 pad waste -
+/// everything larger keeps the tile-64 default, so 512-token prefill
+/// chunks and 33-63-row final chunks are untouched.
+pub(crate) fn tile_for(t: usize) -> usize {
+    if t <= 32 { 32 } else { 64 }
+}
+
+/// Lazily nvrtc-compiled modules, one per tile variant (SmallT;
+/// single-device box). Both variants compile from the SAME source
+/// with SA_TILE prepended, so tile-64 codegen is byte-for-byte the
+/// pre-SmallT module.
+static MODULE_TILE_64: std::sync::OnceLock<std::sync::Arc<cudarc::driver::CudaModule>> =
+    std::sync::OnceLock::new();
+static MODULE_TILE_32: std::sync::OnceLock<std::sync::Arc<cudarc::driver::CudaModule>> =
     std::sync::OnceLock::new();
 
 fn kernel(
     device: &candle_core::CudaDevice,
     name: &str,
+    tile: usize,
 ) -> LibQuestResult<cudarc::driver::CudaFunction> {
-    let module = match MODULE.get() {
+    let cell = match tile {
+        64 => &MODULE_TILE_64,
+        32 => &MODULE_TILE_32,
+        other => snafu::whatever!("no tile-{other} prefill kernel module (32 and 64 exist)"),
+    };
+    let module = match cell.get() {
         Some(module) => module.clone(),
         None => {
-            let ptx = match cudarc::nvrtc::compile_ptx(KERNEL_SRC) {
+            let source = format!("#define SA_TILE {tile}u\n{KERNEL_SRC}");
+            let ptx = match cudarc::nvrtc::compile_ptx(source) {
                 Ok(ptx) => ptx,
                 Err(error) => {
-                    snafu::whatever!("nvrtc compile of the prefill kernels failed: {error}")
+                    snafu::whatever!(
+                        "nvrtc compile of the tile-{tile} prefill kernels failed: {error}"
+                    )
                 }
             };
             let module = match device.cuda_stream().context().load_module(ptx) {
                 Ok(module) => module,
                 Err(error) => {
-                    snafu::whatever!("loading the prefill-kernel module failed: {error}")
+                    snafu::whatever!(
+                        "loading the tile-{tile} prefill-kernel module failed: {error}"
+                    )
                 }
             };
-            MODULE.get_or_init(|| module).clone()
+            cell.get_or_init(|| module).clone()
         }
     };
     match module.load_function(name) {
@@ -601,13 +635,16 @@ fn kernel(
     }
 }
 
-/// `a.inplace_op2(&bundle, &TriSolve)`: a (blocks, 64, 64) f32 -
-/// WRITTEN by the kernel (the inverted-and-identity-added intra-chunk
-/// matrix); bundle (heads, chunks, 64, BUNDLE_CELLS) with blocks ==
-/// heads * chunks (k unpacked from its pair cells; cumulative g and
-/// beta at their f32 cells). All contiguous, all addressed at their
-/// layout offsets.
-pub(crate) struct TriSolve;
+/// `a.inplace_op2(&bundle, &TriSolve { tile })`: a (blocks, tile,
+/// tile) f32 - WRITTEN by the kernel (the inverted-and-identity-added
+/// intra-chunk matrix); bundle (heads, chunks, tile, BUNDLE_CELLS)
+/// with blocks == heads * chunks (k unpacked from its pair cells;
+/// cumulative g and beta at their f32 cells). The tile field names
+/// the compiled module (SmallT: 32 or 64). All contiguous, all
+/// addressed at their layout offsets.
+pub(crate) struct TriSolve {
+    pub(crate) tile: usize,
+}
 
 impl candle_core::InplaceOp2 for TriSolve {
     fn name(&self) -> &'static str {
@@ -635,17 +672,18 @@ impl candle_core::InplaceOp2 for TriSolve {
 
         let (blocks, chunk, chunk_2) = a_layout.shape().dims3()?;
         let (b_heads, b_chunks, b_chunk, row_width) = bundle_layout.shape().dims4()?;
-        if chunk != 64
-            || chunk_2 != 64
-            || b_chunk != 64
+        if chunk != self.tile
+            || chunk_2 != self.tile
+            || b_chunk != self.tile
             || row_width != BUNDLE_CELLS
             || blocks != b_heads * b_chunks
         {
             candle_core::bail!(
-                "tri_solve wants a (h*n, 64, 64) and bundle (h, n, 64, {BUNDLE_CELLS}); \
-                 got {:?}, {:?}",
+                "tri_solve wants a (h*n, {tile}, {tile}) and bundle (h, n, {tile}, \
+                 {BUNDLE_CELLS}); got {:?}, {:?}",
                 (blocks, chunk, chunk_2),
-                (b_heads, b_chunks, b_chunk, row_width)
+                (b_heads, b_chunks, b_chunk, row_width),
+                tile = self.tile
             );
         }
         if !a_layout.is_contiguous() || !bundle_layout.is_contiguous() {
@@ -654,7 +692,7 @@ impl candle_core::InplaceOp2 for TriSolve {
 
         let device = a.device.clone();
         let stream = device.cuda_stream();
-        let function = match kernel(&device, "tri_solve_f32") {
+        let function = match kernel(&device, "tri_solve_f32", self.tile) {
             Ok(function) => function,
             Err(error) => candle_core::bail!("{error}"),
         };
@@ -665,10 +703,11 @@ impl candle_core::InplaceOp2 for TriSolve {
             .slice(bundle_layout.start_offset()..);
         let (bundle_ptr, _bundle_guard) = bundle_slice.device_ptr(&stream);
 
-        let shared_bytes = ((64 * 96 + 64 * 64 + 64 + 64) * 4) as u32;
+        let tile = self.tile;
+        let shared_bytes = ((tile * 96 + tile * tile + tile + tile) * 4) as u32;
         let config = cudarc::driver::LaunchConfig {
             grid_dim: (blocks as u32, 1, 1),
-            block_dim: (64, 1, 1),
+            block_dim: (tile as u32, 1, 1),
             shared_mem_bytes: shared_bytes,
         };
         let mut builder = stream.launch_builder(&function);
@@ -681,19 +720,20 @@ impl candle_core::InplaceOp2 for TriSolve {
 }
 
 /// `bundle.inplace_op3(&dyn_rows, &v_beta, &PrepChunk { .. })`:
-/// bundle (heads, chunks, 64, BUNDLE_CELLS) f32 zeros - q | k
+/// bundle (heads, chunks, tile, BUNDLE_CELLS) f32 zeros - q | k
 /// (packed pairs) and g | beta WRITTEN by the kernel (the w | u
 /// cells stay zero for the gemm PackPairs);
 /// dyn_rows (tokens + 7, conv_width + 2 * heads) bf16 -
 /// rows 0..3 the conv-weight taps (A_log | dt_bias in the row-0 pad
 /// columns), 4..6 the carried tail, 7.. the token rows
-/// (conv_in | a | b); v_beta (heads, chunks, 64, 192) f32 - WRITTEN
+/// (conv_in | a | b); v_beta (heads, chunks, tile, 192) f32 - WRITTEN
 /// (candle tensors mutate through shared storage by design).
-/// Geometry-locked to dk 96 / dv 192.
+/// Geometry-locked to dk 96 / dv 192; tile names the module (SmallT).
 pub(crate) struct PrepChunk {
     pub(crate) tokens: usize,
     pub(crate) q_scale: f32,
     pub(crate) beta_scale: f32,
+    pub(crate) tile: usize,
 }
 
 impl candle_core::InplaceOp3 for PrepChunk {
@@ -728,19 +768,20 @@ impl candle_core::InplaceOp3 for PrepChunk {
         let (dyn_height, dyn_width) = dyn_layout.shape().dims2()?;
         let v_dims = v_beta_layout.shape().dims4()?;
         let conv_width = 2 * heads * 96 + heads * 192;
-        if chunk != 64
+        if chunk != self.tile
             || row_width != BUNDLE_CELLS
-            || chunks != self.tokens.div_ceil(64)
+            || chunks != self.tokens.div_ceil(self.tile)
             || dyn_height != self.tokens + 7
             || dyn_width != conv_width + 2 * heads
-            || v_dims != (heads, chunks, 64, 192)
+            || v_dims != (heads, chunks, self.tile, 192)
         {
             candle_core::bail!(
-                "prep_chunk wants bundle (h, n, 64, {BUNDLE_CELLS}), dyn (t+7, cw+2h), \
-                 v_beta (h, n, 64, 192) for t {}; got {:?}, {:?}, {v_dims:?}",
+                "prep_chunk wants bundle (h, n, {tile}, {BUNDLE_CELLS}), dyn (t+7, cw+2h), \
+                 v_beta (h, n, {tile}, 192) for t {}; got {:?}, {:?}, {v_dims:?}",
                 self.tokens,
                 (heads, chunks, chunk, row_width),
-                (dyn_height, dyn_width)
+                (dyn_height, dyn_width),
+                tile = self.tile
             );
         }
         if !bundle_layout.is_contiguous()
@@ -752,7 +793,7 @@ impl candle_core::InplaceOp3 for PrepChunk {
 
         let device = bundle.device.clone();
         let stream = device.cuda_stream();
-        let function = match kernel(&device, "prep_chunk_f32") {
+        let function = match kernel(&device, "prep_chunk_f32", self.tile) {
             Ok(function) => function,
             Err(error) => candle_core::bail!("{error}"),
         };
@@ -774,8 +815,8 @@ impl candle_core::InplaceOp3 for PrepChunk {
         let chunks_u = chunks as u32;
         let config = cudarc::driver::LaunchConfig {
             grid_dim: (heads_u, chunks_u, 1),
-            block_dim: (64, 1, 1),
-            shared_mem_bytes: 64 * 4,
+            block_dim: (self.tile as u32, 1, 1),
+            shared_mem_bytes: (self.tile * 4) as u32,
         };
         let mut builder = stream.launch_builder(&function);
         builder
@@ -794,10 +835,12 @@ impl candle_core::InplaceOp3 for PrepChunk {
     }
 }
 
-/// `kbg.inplace_op2(&bundle, &PrepKbg)`: kbg (heads, chunks, 64, 96)
-/// f32 - WRITTEN with (k * beta) * exp(g_cum) per row, read straight
-/// off the bundle.
-pub(crate) struct PrepKbg;
+/// `kbg.inplace_op2(&bundle, &PrepKbg { tile })`: kbg (heads, chunks,
+/// tile, 96) f32 - WRITTEN with (k * beta) * exp(g_cum) per row, read
+/// straight off the bundle.
+pub(crate) struct PrepKbg {
+    pub(crate) tile: usize,
+}
 
 impl candle_core::InplaceOp2 for PrepKbg {
     fn name(&self) -> &'static str {
@@ -825,11 +868,15 @@ impl candle_core::InplaceOp2 for PrepKbg {
 
         let kbg_dims = kbg_layout.shape().dims4()?;
         let (heads, chunks, chunk, row_width) = bundle_layout.shape().dims4()?;
-        if chunk != 64 || row_width != BUNDLE_CELLS || kbg_dims != (heads, chunks, 64, 96) {
+        if chunk != self.tile
+            || row_width != BUNDLE_CELLS
+            || kbg_dims != (heads, chunks, self.tile, 96)
+        {
             candle_core::bail!(
-                "prep_kbg wants kbg (h, n, 64, 96) and bundle (h, n, 64, {BUNDLE_CELLS}); \
-                 got {kbg_dims:?}, {:?}",
-                (heads, chunks, chunk, row_width)
+                "prep_kbg wants kbg (h, n, {tile}, 96) and bundle (h, n, {tile}, \
+                 {BUNDLE_CELLS}); got {kbg_dims:?}, {:?}",
+                (heads, chunks, chunk, row_width),
+                tile = self.tile
             );
         }
         if !kbg_layout.is_contiguous() || !bundle_layout.is_contiguous() {
@@ -838,7 +885,7 @@ impl candle_core::InplaceOp2 for PrepKbg {
 
         let device = kbg.device.clone();
         let stream = device.cuda_stream();
-        let function = match kernel(&device, "prep_kbg_f32") {
+        let function = match kernel(&device, "prep_kbg_f32", self.tile) {
             Ok(function) => function,
             Err(error) => candle_core::bail!("{error}"),
         };
@@ -851,7 +898,7 @@ impl candle_core::InplaceOp2 for PrepKbg {
 
         let config = cudarc::driver::LaunchConfig {
             grid_dim: ((heads * chunks) as u32, 1, 1),
-            block_dim: (64, 1, 1),
+            block_dim: (self.tile as u32, 1, 1),
             shared_mem_bytes: 0,
         };
         let mut builder = stream.launch_builder(&function);
@@ -863,18 +910,21 @@ impl candle_core::InplaceOp2 for PrepKbg {
     }
 }
 
-/// `state.inplace_op3(&bundle, &scratch, &StateStage)`: pass 1 of
-/// the StateAdvancePipeline - state (heads, dk, dv) f32, the carried
-/// state, advanced IN PLACE across every chunk (the serial
-/// recurrence lives here alone); bundle (heads, chunks, 64,
+/// `state.inplace_op3(&bundle, &scratch, &StateStage { tile })`:
+/// pass 1 of the StateAdvancePipeline - state (heads, dk, dv) f32,
+/// the carried state, advanced IN PLACE across every chunk (the
+/// serial recurrence lives here alone); bundle (heads, chunks, tile,
 /// BUNDLE_CELLS) rows q | k | w | u | g | beta (q and beta unused
-/// in this pass); scratch (heads, chunks, dk + 64, dv) f32 - WRITTEN
-/// with each chunk's INITIAL state (rows 0..dk) and vnew rows (rows
-/// dk..dk+64) for the parallel output pass (candle tensors mutate
-/// through shared storage by design). All contiguous, all addressed
-/// at their layout offsets. Geometry-locked to dk 96 / dv 192; grid
-/// (heads, 4 stripes) x 48 threads - the landed register contract.
-pub(crate) struct StateStage;
+/// in this pass); scratch (heads, chunks, dk + tile, dv) f32 -
+/// WRITTEN with each chunk's INITIAL state (rows 0..dk) and vnew
+/// rows (rows dk..dk+tile) for the parallel output pass (candle
+/// tensors mutate through shared storage by design). All contiguous,
+/// all addressed at their layout offsets. Geometry-locked to dk 96 /
+/// dv 192; grid (heads, 4 stripes) x 48 threads - the landed
+/// register contract.
+pub(crate) struct StateStage {
+    pub(crate) tile: usize,
+}
 
 impl candle_core::InplaceOp3 for StateStage {
     fn name(&self) -> &'static str {
@@ -908,15 +958,17 @@ impl candle_core::InplaceOp3 for StateStage {
         let (b_heads, chunks, b_chunk, row_width) = bundle_layout.shape().dims4()?;
         let scratch_dims = scratch_layout.shape().dims4()?;
         if b_heads != heads
-            || b_chunk != 64
+            || b_chunk != self.tile
             || row_width != BUNDLE_CELLS
-            || scratch_dims != (heads, chunks, dk + 64, dv)
+            || scratch_dims != (heads, chunks, dk + self.tile, dv)
         {
             candle_core::bail!(
-                "state_stage wants state (h, dk, dv), bundle (h, n, 64, {BUNDLE_CELLS}), \
-                 scratch (h, n, dk+64, dv); got {:?}, {:?}, {scratch_dims:?}",
+                "state_stage wants state (h, dk, dv), bundle (h, n, {tile}, \
+                 {BUNDLE_CELLS}), scratch (h, n, dk+{tile}, dv); got {:?}, {:?}, \
+                 {scratch_dims:?}",
                 (heads, dk, dv),
-                (b_heads, chunks, b_chunk, row_width)
+                (b_heads, chunks, b_chunk, row_width),
+                tile = self.tile
             );
         }
         if dk != 96 || dv != 192 {
@@ -933,7 +985,7 @@ impl candle_core::InplaceOp3 for StateStage {
 
         let device = state.device.clone();
         let stream = device.cuda_stream();
-        let function = match kernel(&device, "state_stage_f32") {
+        let function = match kernel(&device, "state_stage_f32", self.tile) {
             Ok(function) => function,
             Err(error) => candle_core::bail!("{error}"),
         };
@@ -951,7 +1003,7 @@ impl candle_core::InplaceOp3 for StateStage {
         let (scratch_ptr, _scratch_guard) = scratch_slice.device_ptr(&stream);
 
         let chunks = chunks as u32;
-        let shared_bytes: u32 = (64 * 96 + 2 * 64) * 4;
+        let shared_bytes = ((self.tile * 96 + 2 * self.tile) * 4) as u32;
         let config = cudarc::driver::LaunchConfig {
             grid_dim: (heads as u32, 4, 1),
             block_dim: (48, 1, 1),
@@ -970,15 +1022,17 @@ impl candle_core::InplaceOp3 for StateStage {
     }
 }
 
-/// `out.inplace_op3(&bundle, &scratch, &StateOut)`: pass 2 of the
-/// StateAdvancePipeline - out (heads, chunks, 64, dv) f32 WRITTEN
-/// chunk-PARALLEL (grid (heads, chunks, 4 stripes) x 48 threads):
-/// every tile reads its chunk's initial state and vnew rows from the
-/// scratch, builds the decayed local attention against its own
-/// bundle rows, and writes its output rows independently - no serial
-/// dependency remains in the heavy math. Same per-element
+/// `out.inplace_op3(&bundle, &scratch, &StateOut { tile })`: pass 2
+/// of the StateAdvancePipeline - out (heads, chunks, tile, dv) f32
+/// WRITTEN chunk-PARALLEL (grid (heads, chunks, 4 stripes) x 48
+/// threads): every tile reads its chunk's initial state and vnew
+/// rows from the scratch, builds the decayed local attention against
+/// its own bundle rows, and writes its output rows independently -
+/// no serial dependency remains in the heavy math. Same per-element
 /// accumulation orders as the fused single-pass form.
-pub(crate) struct StateOut;
+pub(crate) struct StateOut {
+    pub(crate) tile: usize,
+}
 
 impl candle_core::InplaceOp3 for StateOut {
     fn name(&self) -> &'static str {
@@ -1011,14 +1065,16 @@ impl candle_core::InplaceOp3 for StateOut {
         let (heads, chunks, o_chunk, dv) = out_layout.shape().dims4()?;
         let bundle_dims = bundle_layout.shape().dims4()?;
         let scratch_dims = scratch_layout.shape().dims4()?;
-        if o_chunk != 64
-            || bundle_dims != (heads, chunks, 64, BUNDLE_CELLS)
-            || scratch_dims != (heads, chunks, 96 + 64, dv)
+        if o_chunk != self.tile
+            || bundle_dims != (heads, chunks, self.tile, BUNDLE_CELLS)
+            || scratch_dims != (heads, chunks, 96 + self.tile, dv)
         {
             candle_core::bail!(
-                "state_out wants out (h, n, 64, dv), bundle (h, n, 64, {BUNDLE_CELLS}), \
-                 scratch (h, n, 160, dv); got {:?}, {bundle_dims:?}, {scratch_dims:?}",
-                (heads, chunks, o_chunk, dv)
+                "state_out wants out (h, n, {tile}, dv), bundle (h, n, {tile}, \
+                 {BUNDLE_CELLS}), scratch (h, n, 96+{tile}, dv); got {:?}, \
+                 {bundle_dims:?}, {scratch_dims:?}",
+                (heads, chunks, o_chunk, dv),
+                tile = self.tile
             );
         }
         if dv != 192 {
@@ -1035,7 +1091,7 @@ impl candle_core::InplaceOp3 for StateOut {
 
         let device = out.device.clone();
         let stream = device.cuda_stream();
-        let function = match kernel(&device, "state_out_f32") {
+        let function = match kernel(&device, "state_out_f32", self.tile) {
             Ok(function) => function,
             Err(error) => candle_core::bail!("{error}"),
         };
@@ -1051,7 +1107,8 @@ impl candle_core::InplaceOp3 for StateOut {
         let (scratch_ptr, _scratch_guard) = scratch_slice.device_ptr(&stream);
 
         let chunks_u = chunks as u32;
-        let shared_bytes: u32 = (64 * 96 + 64 * 64 + 2 * 64) * 4;
+        let shared_bytes =
+            ((self.tile * 96 + self.tile * self.tile + 2 * self.tile) * 4) as u32;
         let config = cudarc::driver::LaunchConfig {
             grid_dim: (heads as u32, chunks_u, 4),
             block_dim: (48, 1, 1),
@@ -1073,8 +1130,10 @@ impl candle_core::InplaceOp3 for StateOut {
 /// `bundle.inplace_op2(&src, &PackPairs { cell_offset })`: pack an
 /// f32 tensor's rows into the bundle's bf16 pair cells at a fixed
 /// cell offset - the w/u gemm outputs, and the lock harness's q/k.
-/// dst (h, n, 64, BUNDLE_CELLS) f32; src (h, n, 64, width) f32 with
-/// width even and the packed span inside the pair-cell region.
+/// dst (h, n, tile, BUNDLE_CELLS) f32; src (h, n, tile, width) f32
+/// with width even and the packed span inside the pair-cell region.
+/// Tile-agnostic (row-flat kernel; the chunk dims just have to
+/// agree).
 pub(crate) struct PackPairs {
     pub(crate) cell_offset: usize,
 }
@@ -1106,15 +1165,14 @@ impl candle_core::InplaceOp2 for PackPairs {
         let (heads, chunks, chunk, row_width) = bundle_layout.shape().dims4()?;
         let src_dims = src_layout.shape().dims4()?;
         let width = src_dims.3;
-        if chunk != 64
-            || row_width != BUNDLE_CELLS
-            || src_dims != (heads, chunks, 64, width)
+        if row_width != BUNDLE_CELLS
+            || src_dims != (heads, chunks, chunk, width)
             || width % 2 != 0
             || self.cell_offset + width / 2 > CELL_G
         {
             candle_core::bail!(
-                "pack_pairs wants bundle (h, n, 64, {BUNDLE_CELLS}) and src (h, n, 64, even \
-                 width) inside the pair cells; got {:?}, {src_dims:?} at cell {}",
+                "pack_pairs wants bundle (h, n, tile, {BUNDLE_CELLS}) and src (h, n, tile, \
+                 even width) inside the pair cells; got {:?}, {src_dims:?} at cell {}",
                 (heads, chunks, chunk, row_width),
                 self.cell_offset
             );
@@ -1125,7 +1183,9 @@ impl candle_core::InplaceOp2 for PackPairs {
 
         let device = bundle.device.clone();
         let stream = device.cuda_stream();
-        let function = match kernel(&device, "pack_pairs_bf16") {
+        // The pack kernel is row-flat, so either module serves it;
+        // the tile-64 module always exists once anything prefills.
+        let function = match kernel(&device, "pack_pairs_bf16", 64) {
             Ok(function) => function,
             Err(error) => candle_core::bail!("{error}"),
         };
@@ -1136,7 +1196,7 @@ impl candle_core::InplaceOp2 for PackPairs {
         let src_slice = src.as_cuda_slice::<f32>()?.slice(src_layout.start_offset()..);
         let (src_ptr, _src_guard) = src_slice.device_ptr(&stream);
 
-        let rows_total = (heads * chunks * 64) as u32;
+        let rows_total = (heads * chunks * chunk) as u32;
         let cell_offset = self.cell_offset as u32;
         let width = width as u32;
         let total = rows_total * (width / 2);
@@ -1163,48 +1223,50 @@ impl candle_core::InplaceOp2 for PackPairs {
 /// The rule back half over a filled bundle: TriSolve, the two cublas
 /// gemms, the BundleBf16 w/u pair packing, and the
 /// StateAdvancePipeline (StateStage serial, StateOut chunk-parallel
-/// over the scratch). Returns (out [t, heads, dv] f32, final state).
+/// over the scratch). The tile rides the bundle's chunk dim (SmallT:
+/// the caller sized it via tile_for). Returns (out [t, heads, dv]
+/// f32, final state).
 fn rule_over_bundle(
     bundle: &candle_core::Tensor,
     v_beta: &candle_core::Tensor,
     state: &candle_core::Tensor,
     t: usize,
 ) -> LibQuestResult<(candle_core::Tensor, candle_core::Tensor)> {
-    let (heads, chunks, _, _) = bundle.dims4()?;
+    let (heads, chunks, tile, _) = bundle.dims4()?;
     let (_, dk, dv) = state.dims3()?;
     let device = bundle.device();
     let kbg = candle_core::Tensor::zeros(
-        (heads, chunks, 64, dk),
+        (heads, chunks, tile, dk),
         candle_core::DType::F32,
         device,
     )?;
-    kbg.inplace_op2(bundle, &PrepKbg)?;
+    kbg.inplace_op2(bundle, &PrepKbg { tile })?;
     let attn = candle_core::Tensor::zeros(
-        (heads * chunks, 64, 64),
+        (heads * chunks, tile, tile),
         candle_core::DType::F32,
         device,
     )?;
-    attn.inplace_op2(bundle, &TriSolve)?;
-    let attn = attn.reshape((heads, chunks, 64, 64))?;
+    attn.inplace_op2(bundle, &TriSolve { tile })?;
+    let attn = attn.reshape((heads, chunks, tile, tile))?;
     let value = attn.matmul(v_beta)?;
     let k_cumdecay = attn.matmul(&kbg)?;
     bundle.inplace_op2(&k_cumdecay, &PackPairs { cell_offset: CELL_W })?;
     bundle.inplace_op2(&value, &PackPairs { cell_offset: CELL_U })?;
     let carried = state.copy()?;
     let scratch = candle_core::Tensor::zeros(
-        (heads, chunks, dk + 64, dv),
+        (heads, chunks, dk + tile, dv),
         candle_core::DType::F32,
         device,
     )?;
-    carried.inplace_op3(bundle, &scratch, &StateStage)?;
+    carried.inplace_op3(bundle, &scratch, &StateStage { tile })?;
     let out = candle_core::Tensor::zeros(
-        (heads, chunks, 64, dv),
+        (heads, chunks, tile, dv),
         candle_core::DType::F32,
         device,
     )?;
-    out.inplace_op3(bundle, &scratch, &StateOut)?;
+    out.inplace_op3(bundle, &scratch, &StateOut { tile })?;
     let out = out
-        .reshape((heads, chunks * 64, dv))?
+        .reshape((heads, chunks * tile, dv))?
         .narrow(1, 0, t)?
         .transpose(0, 1)?
         .contiguous()?;
@@ -1249,7 +1311,8 @@ pub(crate) fn prep_chunk_rule(
         dk == 96 && dv == 192,
         "prep_chunk_rule is geometry-locked to the {BUNDLE_CELLS}-cell bundle (dk {dk}, dv {dv})"
     );
-    let chunks = t.div_ceil(64);
+    let tile = tile_for(t);
+    let chunks = t.div_ceil(tile);
     let device = conv_in.device();
 
     let tail_bf = conv_tail.to_dtype(candle_core::DType::BF16)?;
@@ -1263,12 +1326,12 @@ pub(crate) fn prep_chunk_rule(
     let dyn_rows = candle_core::Tensor::cat(&[static_rows, &tail_rows, &token_rows], 0)?;
 
     let bundle = candle_core::Tensor::zeros(
-        (heads, chunks, 64, BUNDLE_CELLS),
+        (heads, chunks, tile, BUNDLE_CELLS),
         candle_core::DType::F32,
         device,
     )?;
     let v_beta = candle_core::Tensor::zeros(
-        (heads, chunks, 64, dv),
+        (heads, chunks, tile, dv),
         candle_core::DType::F32,
         device,
     )?;
@@ -1276,6 +1339,7 @@ pub(crate) fn prep_chunk_rule(
         tokens: t,
         q_scale: q_scale as f32,
         beta_scale: if allow_neg_eigval { 2.0 } else { 1.0 },
+        tile,
     })?;
 
     let (out, carried) = rule_over_bundle(&bundle, &v_beta, state, t)?;
@@ -1294,7 +1358,8 @@ pub(crate) fn prep_chunk_rule(
 /// classic chunk_rule contract: q/k l2-normed, q pre-scaled, all f32,
 /// initial-state carry) - the lock rig's harness: PackPairs and
 /// slice_set fill the bundle the way PrepChunk writes it (q/k as bf16
-/// pairs, g/beta exact f32), then the back half runs.
+/// pairs, g/beta exact f32), then the back half runs. The tile
+/// derives from t exactly like the live paths (SmallT).
 #[cfg(test)]
 pub(crate) fn rule_from_parts(
     q: &candle_core::Tensor,
@@ -1307,8 +1372,9 @@ pub(crate) fn rule_from_parts(
     let (t, heads, dk) = q.dims3()?;
     let dv = v.dim(2)?;
     let device = q.device();
-    let pad = (64 - t % 64) % 64;
-    let chunks = (t + pad) / 64;
+    let tile = tile_for(t);
+    let pad = (tile - t % tile) % tile;
+    let chunks = (t + pad) / tile;
 
     let head_major = |x: &candle_core::Tensor,
                       width: usize|
@@ -1316,7 +1382,7 @@ pub(crate) fn rule_from_parts(
         Ok(x
             .transpose(0, 1)?
             .pad_with_zeros(1, 0, pad)?
-            .reshape((heads, chunks, 64, width))?)
+            .reshape((heads, chunks, tile, width))?)
     };
     let q_r = head_major(q, dk)?;
     let k_r = head_major(k, dk)?;
@@ -1324,15 +1390,15 @@ pub(crate) fn rule_from_parts(
     let g_r = g
         .transpose(0, 1)?
         .pad_with_zeros(1, 0, pad)?
-        .reshape((heads, chunks, 64))?
+        .reshape((heads, chunks, tile))?
         .cumsum(2)?;
     let beta_r = beta
         .transpose(0, 1)?
         .pad_with_zeros(1, 0, pad)?
-        .reshape((heads, chunks, 64))?;
+        .reshape((heads, chunks, tile))?;
 
     let bundle = candle_core::Tensor::zeros(
-        (heads, chunks, 64, BUNDLE_CELLS),
+        (heads, chunks, tile, BUNDLE_CELLS),
         candle_core::DType::F32,
         device,
     )?;

@@ -2,6 +2,9 @@
 //! over the PackTrim back half) against the classic candle chain on
 //! the real recurrence rig, and the PrepChunk end-to-end pipeline
 //! against the classic conv/l2/gates chain (cuda; checkpoint-free).
+//! SmallT: the t = 32 and t = 17 legs drive the tile-32 module (the
+//! speculation verify/readvance span class); the t = 150 legs keep
+//! the tile-64 module and their standing digits.
 use crate::fused_prefill::{PrepInputs, prep_chunk_rule, rule_from_parts};
 use crate::gdn::{chunk_rule, conv_with_tail, gdn_gates, l2_norm};
 
@@ -58,20 +61,15 @@ fn nmse(actual: &candle_core::Tensor, reference: &candle_core::Tensor) -> f64 {
     numerator / denominator.max(f64::MIN_POSITIVE)
 }
 
-/// The rule kernels against the classic chain: 150 tokens (two full
-/// 64-chunks + a ragged 22), the real geometry (30 heads, dk 96, dv
-/// 192), a NONZERO initial state - whole-pass AND split-with-carry
-/// agree at the BundleBf16 quantization class (RECALIBRATED from the
-/// f32-reassociation 1e-9 bar when the bundle's q/k/w/u columns went
-/// bf16-pair; g/beta and the state stay f32-exact, and the per-
-/// element accumulation orders are unchanged - the spread is pure
-/// operand quantization, the prep lock's class).
-#[test]
-#[ignore = "needs a cuda card"]
-fn fused_chunk_rule_matches_the_classic_chain() {
+/// One rule-kernel leg at a given t: whole-pass AND split-with-carry
+/// vs the classic chain, at the BundleBf16 quantization class (the
+/// bar RECALIBRATED from the f32-reassociation 1e-9 when the
+/// bundle's q/k/w/u columns went bf16-pair; g/beta and the state
+/// stay f32-exact, and the per-element accumulation orders are
+/// unchanged - the spread is pure operand quantization).
+fn chunk_rule_leg(t: usize, split: usize, seed_base: u64) {
     let device = candle_core::Device::new_cuda(0).expect("cuda");
-    let mut seed = 0x0102_0304_0506_0708u64;
-    let t = 150;
+    let mut seed = seed_base;
     let (heads, dk, dv) = (30, 96, 192);
     let q = (l2_norm(&synth3(&mut seed, (t, heads, dk), &device)).expect("q norm")
         * (dk as f64).powf(-0.5))
@@ -95,22 +93,25 @@ fn fused_chunk_rule_matches_the_classic_chain() {
     let out_nmse = nmse(&fused_out, &classic_out);
     let state_nmse = nmse(&fused_state, &classic_state);
     println!(
-        "fused-prefill whole-pass vs classic: out nmse {out_nmse:.3e}, state nmse {state_nmse:.3e}"
+        "fused-prefill t {t} whole-pass vs classic: out nmse {out_nmse:.3e}, \
+         state nmse {state_nmse:.3e}"
     );
     assert!(
         out_nmse <= 1e-4,
-        "out {out_nmse:.3e} beyond the BundleBf16 quantization class"
+        "t {t}: out {out_nmse:.3e} beyond the BundleBf16 quantization class"
     );
     assert!(
         state_nmse <= 1e-4,
-        "state {state_nmse:.3e} beyond the BundleBf16 quantization class"
+        "t {t}: state {state_nmse:.3e} beyond the BundleBf16 quantization class"
     );
 
-    // Split 70 + 80 with carried state through the FUSED path against
-    // the classic whole pass.
-    let split = 70;
+    // Split with carried state through the FUSED path against the
+    // classic whole pass (at t <= 32 both halves ride tile-32 - the
+    // readvance shape: a carried state entering a small span).
     let head = |x: &candle_core::Tensor| x.narrow(0, 0, split).unwrap();
-    let tail = |x: &candle_core::Tensor| x.narrow(0, split, t - split).unwrap().contiguous().unwrap();
+    let tail = |x: &candle_core::Tensor| {
+        x.narrow(0, split, t - split).unwrap().contiguous().unwrap()
+    };
     let (out_a, state_a) = rule_from_parts(
         &head(&q), &head(&k), &head(&v), &head(&g), &head(&beta), &state_0,
     )
@@ -123,32 +124,42 @@ fn fused_chunk_rule_matches_the_classic_chain() {
     let split_nmse = nmse(&split_out, &classic_out);
     let split_state_nmse = nmse(&state_b, &classic_state);
     println!(
-        "fused-prefill split-carry vs classic: out nmse {split_nmse:.3e}, state nmse {split_state_nmse:.3e}"
+        "fused-prefill t {t} split-carry ({split}+{}) vs classic: out nmse \
+         {split_nmse:.3e}, state nmse {split_state_nmse:.3e}",
+        t - split
     );
     assert!(
         split_nmse <= 1e-4,
-        "split out {split_nmse:.3e} beyond the BundleBf16 quantization class"
+        "t {t}: split out {split_nmse:.3e} beyond the BundleBf16 quantization class"
     );
     assert!(
         split_state_nmse <= 1e-4,
-        "split state {split_state_nmse:.3e} beyond the BundleBf16 quantization class"
+        "t {t}: split state {split_state_nmse:.3e} beyond the BundleBf16 quantization class"
     );
 }
 
-/// The PrepChunk end-to-end lock: the fused pipeline (prep kernel +
-/// rule back half) against the classic conv_with_tail / l2 / gates /
-/// chunk_rule chain on synthetic rows at the real geometry, with a
+/// The rule kernels against the classic chain. The t = 150 leg (two
+/// full 64-chunks + a ragged 22, the standing seed) keeps tile-64;
+/// the t = 32 and t = 17 legs ride the tile-32 module (SmallT), the
+/// speculation verify/readvance span class, split legs included.
+#[test]
+#[ignore = "needs a cuda card"]
+fn fused_chunk_rule_matches_the_classic_chain() {
+    chunk_rule_leg(150, 70, 0x0102_0304_0506_0708);
+    chunk_rule_leg(32, 15, 0x0102_0304_0506_0709);
+    chunk_rule_leg(17, 8, 0x0102_0304_0506_070A);
+}
+
+/// One PrepChunk end-to-end leg at a given t: the fused pipeline
+/// (prep kernel + rule back half) against the classic
+/// conv_with_tail / l2 / gates / chunk_rule chain, with a
 /// carried-tail split leg. The prep kernel runs the conv/silu chain
 /// in f32 where the classic chain rounds through bf16 per op, so the
 /// out/state bars ride the bf16-upgrade class (the FusedDecodeConv
-/// precedent; pinned from the first measurement, 3.6e-5-class); the
-/// tail is classic-exact (the same bf16 round-trip).
-#[test]
-#[ignore = "needs a cuda card"]
-fn prep_chunk_rule_matches_the_classic_chain() {
+/// precedent); the tail is classic-exact (the same bf16 round-trip).
+fn prep_chunk_leg(t: usize, split: usize, seed_base: u64) {
     let device = candle_core::Device::new_cuda(0).expect("cuda");
-    let mut seed = 0x5EED_00AA_BB01_F00Du64;
-    let t = 150;
+    let mut seed = seed_base;
     let (heads, dk, dv) = (30usize, 96usize, 192usize);
     let key_width = heads * dk;
     let value_width = heads * dv;
@@ -245,22 +256,24 @@ fn prep_chunk_rule_matches_the_classic_chain() {
     let state_nmse = nmse(&state_out, &state_ref);
     let tail_nmse = nmse(&tail_out, &tail_ref);
     println!(
-        "prep whole-pass vs classic: out nmse {out_nmse:.3e}, state nmse {state_nmse:.3e}, \
-         tail nmse {tail_nmse:.3e}"
+        "prep t {t} whole-pass vs classic: out nmse {out_nmse:.3e}, state nmse \
+         {state_nmse:.3e}, tail nmse {tail_nmse:.3e}"
     );
     assert!(
         out_nmse <= 1e-4,
-        "out {out_nmse:.3e} beyond the bf16-upgrade class"
+        "t {t}: out {out_nmse:.3e} beyond the bf16-upgrade class"
     );
     assert!(
         state_nmse <= 1e-4,
-        "state {state_nmse:.3e} beyond the bf16-upgrade class"
+        "t {t}: state {state_nmse:.3e} beyond the bf16-upgrade class"
     );
-    assert!(tail_nmse <= 1e-12, "tail {tail_nmse:.3e} must be classic-exact");
+    assert!(
+        tail_nmse <= 1e-12,
+        "t {t}: tail {tail_nmse:.3e} must be classic-exact"
+    );
 
-    // Split 70 + 80 with tail AND state carried through the fused
-    // path against the classic whole pass.
-    let split = 70;
+    // Split with tail AND state carried through the fused path
+    // against the classic whole pass.
     let front = |x: &candle_core::Tensor| x.narrow(0, 0, split).unwrap();
     let back = |x: &candle_core::Tensor| x.narrow(0, split, t - split).unwrap();
     let front_conv = front(&conv_in);
@@ -299,14 +312,27 @@ fn prep_chunk_rule_matches_the_classic_chain() {
     let split_nmse = nmse(&split_out, &out_ref);
     let split_state_nmse = nmse(&state_b, &state_ref);
     println!(
-        "prep split-carry vs classic: out nmse {split_nmse:.3e}, state nmse {split_state_nmse:.3e}"
+        "prep t {t} split-carry ({split}+{}) vs classic: out nmse {split_nmse:.3e}, \
+         state nmse {split_state_nmse:.3e}",
+        t - split
     );
     assert!(
         split_nmse <= 1e-4,
-        "split out {split_nmse:.3e} beyond the bf16-upgrade class"
+        "t {t}: split out {split_nmse:.3e} beyond the bf16-upgrade class"
     );
     assert!(
         split_state_nmse <= 1e-4,
-        "split state {split_state_nmse:.3e} beyond the bf16-upgrade class"
+        "t {t}: split state {split_state_nmse:.3e} beyond the bf16-upgrade class"
     );
+}
+
+/// The PrepChunk end-to-end lock. The t = 150 leg keeps the standing
+/// seed and tile-64; the t = 32 and t = 17 legs ride the tile-32
+/// module (SmallT), split-carry included.
+#[test]
+#[ignore = "needs a cuda card"]
+fn prep_chunk_rule_matches_the_classic_chain() {
+    prep_chunk_leg(150, 70, 0x5EED_00AA_BB01_F00D);
+    prep_chunk_leg(32, 15, 0x5EED_00AA_BB01_F00E);
+    prep_chunk_leg(17, 8, 0x5EED_00AA_BB01_F00F);
 }
