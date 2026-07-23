@@ -144,15 +144,29 @@ pub(crate) fn capability_run(cli: &Cli, args: &CapabilityRunArgs) -> BquestResul
         Some(dir) => dir.clone(),
         None => capability_home.join("fixtures/full"),
     };
+    // Input-format detection, decided at source: a requests tree
+    // carrying *-requests.nuon runs the nuon path; JSONL otherwise.
+    let requests_root = fixtures.join("requests");
+    snafu::ensure_whatever!(
+        requests_root.is_dir(),
+        "no requests directory under {}",
+        fixtures.display()
+    );
+    let nuon_request_files = collect_suffix_files(&requests_root, "-requests.nuon")?;
+    let nuon_mode = !nuon_request_files.is_empty();
+    let settings_token = cli.settings.clone().unwrap_or_else(|| "default".to_string());
+    let settings_snake: String = settings_token
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .collect();
     let out_root = match &args.out {
         Some(dir) => dir.clone(),
         None => {
-            let token = cli.settings.clone().unwrap_or_else(|| "default".to_string());
-            let snake: String = token
-                .chars()
-                .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
-                .collect();
-            capability_home.join("runs").join(format!("engine_{snake}"))
+            if nuon_mode {
+                capability_home.join("nuon/runs").join(format!("engine_{settings_snake}"))
+            } else {
+                capability_home.join("runs").join(format!("engine_{settings_snake}"))
+            }
         }
     };
     let task_filter: Option<Vec<String>> = args
@@ -177,7 +191,88 @@ pub(crate) fn capability_run(cli: &Cli, args: &CapabilityRunArgs) -> BquestResul
         started.elapsed().as_secs_f64()
     );
 
-    let requests_root = fixtures.join("requests");
+    let mut tasks_run = 0usize;
+    let mut items_run = 0usize;
+    if nuon_mode {
+        for file in &nuon_request_files {
+            let file_name = file.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            let token = task_token(file_name, "-requests.nuon");
+            if let Some(filter) = &task_filter
+                && !filter.contains(&token)
+            {
+                continue;
+            }
+            let rows_value = lib::nu::load_value(file)?;
+            let rows_list = match rows_value.as_list() {
+                Ok(list) => list,
+                Err(e) => snafu::whatever!("{}: not a table: {e}", file.display()),
+            };
+            let mut rows: Vec<RequestRow> = Vec::with_capacity(rows_list.len());
+            for row in rows_list {
+                let json = value_to_json(row)?;
+                rows.push(serde_json::from_value(json)?);
+            }
+            let Some(first) = rows.first() else {
+                continue;
+            };
+            let task_started = std::time::Instant::now();
+            let predictions = match first.request_type.as_str() {
+                "loglikelihood" => run_loglikelihood_task(&mut model, &tokenizer, &rows)?,
+                "generate_until" => run_generation_task(&mut model, &tokenizer, &rows)?,
+                other => {
+                    snafu::whatever!("unsupported request_type {other:?} in {}", file.display())
+                }
+            };
+            let Ok(relative) = file.strip_prefix(&requests_root) else {
+                snafu::whatever!("request file escapes the requests root: {}", file.display());
+            };
+            let name = relative
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .replace("-requests.nuon", "-predictions.nuon");
+            let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+            let dest = out_root.join("predictions").join(parent).join(name);
+            let mut prediction_values = Vec::with_capacity(predictions.len());
+            for row in &predictions {
+                prediction_values.push(json_to_value(&serde_json::to_value(row)?)?);
+            }
+            lib::nu::save_value(&dest, &lib::nu::Value::list(prediction_values, span()))?;
+            tasks_run += 1;
+            items_run += predictions.len();
+            eprintln!(
+                "capability run: {token} - {} items in {:.1}s",
+                predictions.len(),
+                task_started.elapsed().as_secs_f64()
+            );
+        }
+        snafu::ensure_whatever!(tasks_run > 0, "no tasks matched");
+        let provenance = lib::nu::Value::record(
+            lib::nu::record! {
+                "fixtures" => v_str(&fixtures.display().to_string()),
+                "model" => v_str(&config.model),
+                "settings" => v_str(&settings_token),
+                "bquest_version" => v_str(env!("CARGO_PKG_VERSION")),
+                "generated_at" => v_int(epoch_seconds()),
+                "tasks" => v_int(tasks_run as i64),
+                "items" => v_int(items_run as i64),
+            },
+            span(),
+        );
+        lib::nu::save_value(&out_root.join("provenance.nuon"), &provenance)?;
+        let summary = lib::nu::Value::record(
+            lib::nu::record! {
+                "tasks" => v_int(tasks_run as i64),
+                "items" => v_int(items_run as i64),
+                "seconds" => v_float(started.elapsed().as_secs_f64()),
+                "out" => v_str(&out_root.display().to_string()),
+            },
+            span(),
+        );
+        println!("{}", lib::nu::to_nuon_text(&summary)?);
+        return Ok(());
+    }
+
     let mut request_files = Vec::new();
     collect_request_files(&requests_root, &mut request_files)?;
     request_files.sort();
@@ -187,8 +282,6 @@ pub(crate) fn capability_run(cli: &Cli, args: &CapabilityRunArgs) -> BquestResul
         requests_root.display()
     );
 
-    let mut tasks_run = 0usize;
-    let mut items_run = 0usize;
     for file in &request_files {
         let rows = read_rows(file)?;
         let Some(first) = rows.first() else {
@@ -234,6 +327,63 @@ pub(crate) fn capability_run(cli: &Cli, args: &CapabilityRunArgs) -> BquestResul
             "out": out_root,
         })
     );
+    Ok(())
+}
+
+/// The reverse adapter: a nuon run's predictions rendered back to the
+/// reference's JSONL tree (the live bridge for rescore.py
+/// comparisons).
+pub(crate) fn capability_bridge(args: &CapabilityBridgeArgs) -> BquestResult<()> {
+    let started = std::time::Instant::now();
+    let out_root = match &args.out {
+        Some(dir) => dir.clone(),
+        None => args.run.join("jsonl"),
+    };
+    let predictions_root = args.run.join("predictions");
+    let files = collect_suffix_files(&predictions_root, "-predictions.nuon")?;
+    snafu::ensure_whatever!(
+        !files.is_empty(),
+        "no *-predictions.nuon under {}",
+        predictions_root.display()
+    );
+    let mut items = 0usize;
+    for file in &files {
+        let rows_value = lib::nu::load_value(file)?;
+        let rows = match rows_value.as_list() {
+            Ok(list) => list,
+            Err(e) => snafu::whatever!("{}: not a table: {e}", file.display()),
+        };
+        let Ok(relative) = file.strip_prefix(&predictions_root) else {
+            snafu::whatever!("prediction file escapes the run: {}", file.display());
+        };
+        let name = relative
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .replace("-predictions.nuon", "-predictions.jsonl");
+        let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+        let dest = out_root.join("predictions").join(parent).join(name);
+        if let Some(dest_parent) = dest.parent() {
+            fs::create_dir_all(dest_parent)?;
+        }
+        let mut payload = String::new();
+        for row in rows {
+            payload.push_str(&serde_json::to_string(&value_to_json(row)?)?);
+            payload.push('\n');
+        }
+        fs::write(&dest, payload)?;
+        items += rows.len();
+    }
+    let summary = lib::nu::Value::record(
+        lib::nu::record! {
+            "files" => v_int(files.len() as i64),
+            "items" => v_int(items as i64),
+            "seconds" => v_float(started.elapsed().as_secs_f64()),
+            "out" => v_str(&out_root.display().to_string()),
+        },
+        span(),
+    );
+    println!("{}", lib::nu::to_nuon_text(&summary)?);
     Ok(())
 }
 

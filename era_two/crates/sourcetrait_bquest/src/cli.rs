@@ -51,6 +51,19 @@ pub(crate) enum CapabilityCommand {
     /// exact-match, IFBench ifeval): per-item scores + per-task
     /// aggregates as .nuon.
     Score(CapabilityScoreArgs),
+    /// Render a nuon run's predictions back to the reference JSONL
+    /// tree (the reverse adapter for rescore.py comparisons).
+    Bridge(CapabilityBridgeArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct CapabilityBridgeArgs {
+    /// The nuon run directory (carrying predictions/).
+    #[arg(long)]
+    pub(crate) run: PathBuf,
+    /// JSONL output root; absent = <run>/jsonl.
+    #[arg(long)]
+    pub(crate) out: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Subcommand)]

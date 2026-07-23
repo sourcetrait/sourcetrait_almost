@@ -140,6 +140,37 @@ pub(crate) fn field_strings(
     Ok(strings)
 }
 
+/// nu Value -> JSON, the exact inverse of json_to_value (the reverse
+/// bridge direction: nuon artifacts rendered back into the
+/// reference's JSONL for its own tools to consume).
+pub(crate) fn value_to_json(value: &lib::nu::Value) -> BquestResult<serde_json::Value> {
+    Ok(match value {
+        lib::nu::Value::Nothing { .. } => serde_json::Value::Null,
+        lib::nu::Value::Bool { val, .. } => serde_json::Value::Bool(*val),
+        lib::nu::Value::Int { val, .. } => serde_json::Value::Number((*val).into()),
+        lib::nu::Value::Float { val, .. } => match serde_json::Number::from_f64(*val) {
+            Some(number) => serde_json::Value::Number(number),
+            None => snafu::whatever!("non-finite float cannot render to JSON"),
+        },
+        lib::nu::Value::String { val, .. } => serde_json::Value::String(val.clone()),
+        lib::nu::Value::List { vals, .. } => {
+            let mut items = Vec::with_capacity(vals.len());
+            for item in vals {
+                items.push(value_to_json(item)?);
+            }
+            serde_json::Value::Array(items)
+        }
+        lib::nu::Value::Record { val, .. } => {
+            let mut map = serde_json::Map::new();
+            for (key, item) in val.iter() {
+                map.insert(key.clone(), value_to_json(item)?);
+            }
+            serde_json::Value::Object(map)
+        }
+        other => snafu::whatever!("unsupported value type for JSON: {}", other.get_type()),
+    })
+}
+
 /// JSON -> nu Value, lossless field-for-field. Object order is
 /// preserved; an integer beyond i64 is a hard error (the lossless
 /// off-ramp), never a float approximation.
@@ -235,7 +266,7 @@ fn sha256_hex(path: &Path) -> BquestResult<String> {
     Ok(hex)
 }
 
-fn epoch_seconds() -> i64 {
+pub(crate) fn epoch_seconds() -> i64 {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(elapsed) => elapsed.as_secs() as i64,
         Err(_) => 0,

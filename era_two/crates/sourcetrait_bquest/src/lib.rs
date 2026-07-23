@@ -31,10 +31,12 @@ pub(crate) use sourcetrait_lib_quest as lib;
 
 pub(crate) use crate::capability::{
     CAPABILITY_HOME_RELATIVE,
+    capability_bridge,
     capability_run,
     data_home,
 };
 pub(crate) use crate::cli::{
+    CapabilityBridgeArgs,
     CapabilityCommand,
     CapabilityConvertArgs,
     CapabilityRunArgs,
@@ -50,6 +52,7 @@ pub(crate) use crate::cli::{
 pub(crate) use crate::convert::{
     capability_convert,
     collect_suffix_files,
+    epoch_seconds,
     field,
     field_ids,
     field_int,
@@ -64,6 +67,7 @@ pub(crate) use crate::convert::{
     v_int,
     v_int_list,
     v_str,
+    value_to_json,
 };
 #[allow(unused_imports)]
 pub(crate) use crate::pytext::{

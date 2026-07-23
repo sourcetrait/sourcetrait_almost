@@ -7,6 +7,7 @@ pub fn run() {
             CapabilityCommand::Run(args) => capability_run(&cli, args),
             CapabilityCommand::Convert(args) => capability_convert(args),
             CapabilityCommand::Score(args) => capability_score(args),
+            CapabilityCommand::Bridge(args) => capability_bridge(args),
         },
         Command::Speculate { command } => match command {
             SpeculateCommand::Record(args) => speculate_record(&cli, args),

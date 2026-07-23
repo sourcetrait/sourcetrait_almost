@@ -104,6 +104,62 @@ fn tagger_matches_the_nltk_doctest_first_tokens() {
     assert_eq!(data.tagger.tag_first(&red).expect("tags"), "DT");
 }
 
+/// GATE 2: the nuon-path rerun's predictions must equal S1's
+/// conversion of the standing engine_default run - exact Value
+/// equality, every row, every task. Run after `bquest capability run`
+/// over the nuon fixtures with the default posture.
+#[test]
+#[ignore]
+fn gate2_nuon_run_matches_the_standing_conversion() {
+    let home = capability_home();
+    let standing_root = home.join("nuon/runs/engine_default/predictions");
+    let rerun_root = home.join("nuon/runs/engine_default_nuonpath/predictions");
+    let standing_files =
+        collect_suffix_files(&standing_root, "-predictions.nuon").expect("standing files");
+    let rerun_files =
+        collect_suffix_files(&rerun_root, "-predictions.nuon").expect("rerun files");
+    assert_eq!(standing_files.len(), 60, "expected the full 60-task standing run");
+    assert_eq!(
+        standing_files.len(),
+        rerun_files.len(),
+        "task file counts differ"
+    );
+    let mut items = 0usize;
+    let mut mismatches: Vec<String> = Vec::new();
+    for (standing_file, rerun_file) in standing_files.iter().zip(rerun_files.iter()) {
+        let standing_name =
+            standing_file.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let rerun_name = rerun_file.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        assert_eq!(standing_name, rerun_name, "task file names differ");
+        let standing_rows = load_sorted_rows(standing_file).expect("standing rows");
+        let rerun_rows = load_sorted_rows(rerun_file).expect("rerun rows");
+        if standing_rows.len() != rerun_rows.len() {
+            mismatches.push(format!(
+                "{standing_name}: {} standing rows vs {} rerun rows",
+                standing_rows.len(),
+                rerun_rows.len()
+            ));
+            continue;
+        }
+        items += standing_rows.len();
+        for (index, (standing_row, rerun_row)) in
+            standing_rows.iter().zip(rerun_rows.iter()).enumerate()
+        {
+            if standing_row != rerun_row {
+                mismatches.push(format!("{standing_name} row {index} differs"));
+            }
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "GATE 2 FAILED with {} mismatches over {items} items:\n{}",
+        mismatches.len(),
+        mismatches.join("\n")
+    );
+    assert_eq!(items, 1413, "expected the full 1413-item grid");
+    println!("GATE 2: 60 tasks, {items} items, exact Value equality");
+}
+
 /// GATE 3: per-item and aggregate exact equality against the standing
 /// rescore outputs, over every standing run.
 #[test]

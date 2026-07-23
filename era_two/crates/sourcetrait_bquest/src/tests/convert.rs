@@ -44,6 +44,15 @@ fn object_key_order_is_preserved() {
 }
 
 #[test]
+fn value_to_json_inverts_the_bridge() {
+    let json_text = r#"{"a": null, "b": [1, -2.5, "x"], "c": {"nested": true}, "d": 9223372036854775807}"#;
+    let json: serde_json::Value = serde_json::from_str(json_text).expect("parses");
+    let value = json_to_value(&json).expect("converts");
+    let back = value_to_json(&value).expect("inverts");
+    assert_eq!(json, back, "value_to_json must invert json_to_value");
+}
+
+#[test]
 fn u64_overflow_is_refused() {
     let json: serde_json::Value =
         serde_json::from_str(r#"{"too_big": 9223372036854775808}"#).expect("parses");
