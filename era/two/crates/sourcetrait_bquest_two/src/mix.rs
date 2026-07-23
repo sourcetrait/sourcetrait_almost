@@ -202,6 +202,66 @@ pub(crate) fn fim_transform(text: &str, rng: &mut SplitMix64) -> String {
     }
 }
 
+/// One document's pack-relevant fields (text + the FIM gate).
+#[allow(dead_code)]
+pub(crate) struct PackDocument {
+    pub(crate) text: String,
+    pub(crate) code: bool,
+}
+
+/// Tokenize documents in order into one EOS-joined id stream: FIM
+/// (when armed) transforms CODE documents pre-tokenization - the
+/// sentinels are added tokens, so they land as single ids - and
+/// every document ends with the EOS id.
+#[allow(dead_code)]
+pub(crate) fn tokenize_documents(
+    tokenizer: &tokenizers::Tokenizer,
+    documents: &[PackDocument],
+    fim: bool,
+    rng: &mut SplitMix64,
+) -> BquestResult<Vec<u32>> {
+    let Some(eos_id) = tokenizer.token_to_id("<|endoftext|>") else {
+        snafu::whatever!("the tokenizer carries no <|endoftext|>");
+    };
+    let mut stream: Vec<u32> = Vec::new();
+    for document in documents {
+        let presented = if fim && document.code {
+            fim_transform(&document.text, rng)
+        } else {
+            document.text.clone()
+        };
+        let encoding = match tokenizer.encode(presented.as_str(), false) {
+            Ok(encoding) => encoding,
+            Err(e) => snafu::whatever!("document encode failed: {e}"),
+        };
+        stream.extend_from_slice(encoding.get_ids());
+        stream.push(eos_id);
+    }
+    Ok(stream)
+}
+
+/// Cut the joined stream into (seq_len + 1) chunks and shuffle them
+/// (Fisher-Yates over the chunk order, SplitMix64-seeded); the
+/// ragged tail is dropped and reported as the second return.
+#[allow(dead_code)]
+pub(crate) fn chunk_and_shuffle(
+    stream: &[u32],
+    seq_len: usize,
+    rng: &mut SplitMix64,
+) -> (Vec<Vec<u32>>, usize) {
+    let width = seq_len + 1;
+    let chunk_count = stream.len() / width;
+    let dropped_tail = stream.len() - chunk_count * width;
+    let mut chunks: Vec<Vec<u32>> = (0..chunk_count)
+        .map(|index| stream[index * width..(index + 1) * width].to_vec())
+        .collect();
+    for index in (1..chunks.len()).rev() {
+        let swap_with = rng.next_below(index + 1);
+        chunks.swap(index, swap_with);
+    }
+    (chunks, dropped_tail)
+}
+
 /// `bquest mix render`: corpus trees (per the spec) -> one
 /// whole-value documents_<name>.nuon table per spec row, rows
 /// conform-validated against the document typedef before write.

@@ -127,3 +127,79 @@ fn fim_transform_is_seeded_deterministic_and_reassembles() {
     }
     assert!(psm_seen > 0 && spm_seen > 0, "both FIM modes must occur across 64 draws");
 }
+
+#[test]
+fn chunk_and_shuffle_is_seeded_lossless_and_tail_dropping() {
+    use crate::mix::{SplitMix64, chunk_and_shuffle};
+
+    let stream: Vec<u32> = (0..107).collect();
+    let seq_len = 9usize;
+    let (first_chunks, dropped) = chunk_and_shuffle(&stream, seq_len, &mut SplitMix64::new(7));
+    let (second_chunks, _) = chunk_and_shuffle(&stream, seq_len, &mut SplitMix64::new(7));
+    assert_eq!(first_chunks, second_chunks, "same seed must shuffle identically");
+    assert_eq!(first_chunks.len(), 10);
+    assert_eq!(dropped, 7, "107 = 10 * 10 + 7 tail");
+    assert!(first_chunks.iter().all(|chunk| chunk.len() == seq_len + 1));
+
+    // Lossless over the kept region: the shuffled chunks re-sort to
+    // the original stream prefix.
+    let mut recovered: Vec<u32> = first_chunks.iter().flatten().copied().collect();
+    recovered.sort_unstable();
+    assert_eq!(recovered, (0..100).collect::<Vec<u32>>());
+
+    // The order genuinely shuffles (10 chunks in original order has
+    // probability ~1/3.6M per seed).
+    let in_order = first_chunks
+        .windows(2)
+        .all(|pair| pair[0][0] < pair[1][0]);
+    assert!(!in_order, "chunk order must not stay sorted under the shuffle");
+}
+
+#[test]
+fn tokenize_documents_joins_with_eos_and_fims_code_only() {
+    use crate::mix::{PackDocument, SplitMix64, tokenize_documents};
+
+    let model_dir = lib::model_dir(lib::consts::DPO_MODEL_NAME).expect("model home");
+    let tokenizer = lib::load_tokenizer(&model_dir).expect("tokenizer (checkpoint-backed)");
+    let eos_id = tokenizer.token_to_id("<|endoftext|>").expect("eos id");
+    let fim_prefix_id = tokenizer.token_to_id("<|fim_prefix|>").expect("fim prefix id");
+    let fim_middle_id = tokenizer.token_to_id("<|fim_middle|>").expect("fim middle id");
+
+    let documents = vec![
+        PackDocument { text: String::from("let total = 40 + 2\n"), code: true },
+        PackDocument { text: String::from("Prose stays untouched.\n"), code: false },
+    ];
+
+    // FIM off: two documents, each EOS-terminated, no sentinels.
+    let mut rng = SplitMix64::new(1);
+    let plain = tokenize_documents(&tokenizer, &documents, false, &mut rng).expect("plain");
+    assert_eq!(plain.iter().filter(|id| **id == eos_id).count(), 2);
+    assert_eq!(*plain.last().expect("stream"), eos_id);
+    assert!(!plain.contains(&fim_prefix_id));
+
+    // FIM on: across many seeded draws the CODE document transforms
+    // (sentinel ids appear as single tokens) while repeating the
+    // prose-only set never yields a sentinel.
+    let mut fim_seen = false;
+    for seed in 0..16 {
+        let mut rng = SplitMix64::new(seed);
+        let stream =
+            tokenize_documents(&tokenizer, &documents, true, &mut rng).expect("fim stream");
+        if stream.contains(&fim_prefix_id) {
+            fim_seen = true;
+            assert!(stream.contains(&fim_middle_id), "a FIM render carries all sentinels");
+        }
+    }
+    assert!(fim_seen, "16 seeds at rate 0.5 must transform at least once");
+
+    let prose_only = vec![PackDocument {
+        text: String::from("Only prose here.\n"),
+        code: false,
+    }];
+    for seed in 0..16 {
+        let mut rng = SplitMix64::new(seed);
+        let stream =
+            tokenize_documents(&tokenizer, &prose_only, true, &mut rng).expect("prose stream");
+        assert!(!stream.contains(&fim_prefix_id), "docs documents never FIM");
+    }
+}
