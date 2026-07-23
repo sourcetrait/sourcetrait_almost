@@ -6,8 +6,11 @@
 //! DIRECTLY (PackTrim: no transpose/pad/cat pipeline exists at all);
 //! TriSolve folds the intra-chunk decay-mask build, beta-scaled kkt
 //! matmul, and the blocked-substitution triangular inversion into one
-//! launch reading the same bundle; StateAdvance runs the serial
-//! inter-chunk recurrence with the chunk outputs fused. Raw pointer
+//! launch reading the same bundle; the StateAdvancePipeline splits
+//! the inter-chunk recurrence in two - StateStage runs the SERIAL
+//! state math alone, materializing each chunk's initial state and
+//! vnew rows to a scratch, and StateOut computes every chunk's
+//! output rows chunk-PARALLEL from that scratch. Raw pointer
 //! args on the model's own stream, operands addressed at their layout
 //! offsets (the offset-leak lock).
 //!
@@ -21,9 +24,9 @@
 use crate::*;
 
 /// Kernel geometry: one 64-row chunk tile per block. SA_ROW carries
-/// q | k | w | u | g | beta (beta rides for TriSolve/PrepKbg;
-/// StateAdvance ignores it). PC_KH/PC_VH are the GDN head dims the
-/// family is geometry-locked to (dk 96 / dv 192).
+/// q | k | w | u | g | beta (beta rides for TriSolve/PrepKbg; the
+/// StateAdvancePipeline ignores it). PC_KH/PC_VH are the GDN head
+/// dims the family is geometry-locked to (dk 96 / dv 192).
 const KERNEL_SRC: &str = r#"
 #define SA_DK 96u
 #define SA_DV 192u
@@ -261,36 +264,34 @@ extern "C" __global__ void prep_kbg_f32(
     }
 }
 
-// StateAdvance v2: the inter-chunk serial recurrence with the chunk
-// outputs fused (fla fwd_h + fwd_o folded; no HBM state scratch).
-// OCCUPANCY SPLIT: grid (heads, 4 stripes) = 120 blocks, 48 threads
-// each - one thread per v-column of its stripe; the shared staging
-// (k tile, gates, decayed attn tile) is duplicated per stripe and
-// the per-column math is IDENTICAL to the single-block form, so the
-// split is value-transparent. Compile-time tiles (SA_DK/SA_DV) keep
-// the state column in registers - runtime-bound register arrays
-// spill to local memory and serialize every MAC (the measured v1
-// failure).
-extern "C" __global__ void state_advance_f32(
+// StateAdvancePipeline pass 1 (StateStage): the serial inter-chunk
+// recurrence ALONE - per chunk, write the chunk's INITIAL state
+// (scratch rows 0..SA_DK) and its vnew rows (scratch rows
+// SA_DK..SA_DK+64) then advance the carried state; no attention
+// tile, no output rows (pass 2 computes them chunk-parallel). Grid
+// (heads, 4 stripes) = 120 blocks, 48 threads - one thread per
+// v-column of its stripe; the vnew and update math is the fused
+// single-pass form verbatim (same per-element accumulation orders;
+// the VnewUnroll register contract carries).
+extern "C" __global__ void state_stage_f32(
     float* state,
     const float* bundle,
-    float* out,
+    float* scratch,
     unsigned int chunks
 ) {
     extern __shared__ float shared[];
     float* sk = shared;                        // [64, SA_DK] raw k
-    float* sattn = shared + 64u * SA_DK;       // [64, 64] decayed local attn
-    float* sg = sattn + 64u * 64u;             // [64] cumulative gates
-    float* seg = sg + 64u;                     // [64] exp(g)
-    float* ses = seg + 64u;                    // [64] exp(g_last - g)
+    float* sg = shared + 64u * SA_DK;          // [64] cumulative gates
+    float* ses = sg + 64u;                     // [64] exp(g_last - g)
     unsigned long long h = blockIdx.x;
     unsigned int stripe = blockIdx.y;
     unsigned int tid = threadIdx.x;
     unsigned int j = stripe * SA_COLS + tid;   // this thread's v-column
     const unsigned long long chunk_stride = 64ull * SA_ROW;
     const float* bundle_h = bundle + h * (unsigned long long)chunks * chunk_stride;
-    float* out_h = out + h * (unsigned long long)chunks * 64ull * SA_DV;
     float* state_h = state + h * (unsigned long long)SA_DK * SA_DV;
+    float* scratch_h = scratch
+        + h * (unsigned long long)chunks * (unsigned long long)(SA_DK + 64u) * SA_DV;
 
     float s_reg[SA_DK];
     float vnew[64];
@@ -301,6 +302,8 @@ extern "C" __global__ void state_advance_f32(
 
     for (unsigned int chunk = 0; chunk < chunks; ++chunk) {
         const float* rows = bundle_h + chunk * chunk_stride;
+        float* chunk_scratch = scratch_h
+            + chunk * (unsigned long long)(SA_DK + 64u) * SA_DV;
         __syncthreads();
         // Stage k + gates (strided over the stripe's threads).
         for (unsigned int idx = tid; idx < 64u * SA_DK; idx += SA_COLS) {
@@ -313,31 +316,16 @@ extern "C" __global__ void state_advance_f32(
         }
         __syncthreads();
         for (unsigned int r = tid; r < 64u; r += SA_COLS) {
-            seg[r] = expf(sg[r]);
             ses[r] = expf(sg[63] - sg[r]);
         }
-        __syncthreads();
-        // The decayed local attention tile: (q[r] . k[c]) *
-        // exp(g[r] - g[c]) on and below the diagonal, zero above.
-        for (unsigned int idx = tid; idx < 64u * 64u; idx += SA_COLS) {
-            unsigned int r = idx / 64u;
-            unsigned int c = idx - r * 64u;
-            float value = 0.f;
-            if (c <= r) {
-                const float* q_row = rows + r * SA_ROW;
-                float dot = 0.f;
-                #pragma unroll
-                for (unsigned int i = 0; i < SA_DK; ++i) {
-                    dot += q_row[i] * sk[c * SA_DK + i];
-                }
-                value = dot * expf(sg[r] - sg[c]);
-            }
-            sattn[idx] = value;
+        // The chunk's INITIAL state column, register-direct.
+        #pragma unroll
+        for (unsigned int i = 0; i < SA_DK; ++i) {
+            chunk_scratch[(unsigned long long)i * SA_DV + j] = s_reg[i];
         }
         __syncthreads();
-        // v_new = u - w @ S over the carried column. Unrolled so every
-        // vnew index is compile-time - the register-residency contract
-        // shared by all three vnew loops (VnewUnroll).
+        // v_new = u - w @ S over the carried column, written to the
+        // scratch's vnew rows for the output pass.
         #pragma unroll
         for (unsigned int r = 0; r < 64u; ++r) {
             const float* row = rows + r * SA_ROW;
@@ -348,33 +336,10 @@ extern "C" __global__ void state_advance_f32(
                 acc += w_row[i] * s_reg[i];
             }
             vnew[r] = row[3u * SA_DK + j] - acc;
-        }
-        // out rows: exp(g_r) * (q[r] . S) + attn_local @ v_new.
-        for (unsigned int r = 0; r < 64u; ++r) {
-            const float* q_row = rows + r * SA_ROW;
-            float inter = 0.f;
-            #pragma unroll
-            for (unsigned int i = 0; i < SA_DK; ++i) {
-                inter += q_row[i] * s_reg[i];
-            }
-            float acc = inter * seg[r];
-            // Full-width unroll: sattn's upper triangle is 0.f by
-            // construction, so c > r adds exact zeros - and every vnew
-            // index becomes compile-time -> registers (VnewUnroll; the
-            // runtime c <= r bound kept vnew in local memory and its
-            // triangular reads dominated the residual).
-            const float* attn_row = sattn + r * 64u;
-            #pragma unroll
-            for (unsigned int c = 0; c < 64u; ++c) {
-                acc += attn_row[c] * vnew[c];
-            }
-            out_h[(chunk * 64ull + r) * SA_DV + j] = acc;
+            chunk_scratch[(unsigned long long)(SA_DK + r) * SA_DV + j] = vnew[r];
         }
         // S = S * exp(g_last) + (k * exp(g_last - g))^T @ v_new -
-        // r-major (each vnew row read once) and unrolled so the vnew
-        // access stays compile-time-indexed (the VnewUnroll register
-        // contract). Reassociation-class vs the i-major sum; the lock
-        // re-pins.
+        // the landed r-major order.
         float e_last = expf(sg[63]);
         #pragma unroll
         for (unsigned int i = 0; i < SA_DK; ++i) {
@@ -393,6 +358,97 @@ extern "C" __global__ void state_advance_f32(
     #pragma unroll
     for (unsigned int i = 0; i < SA_DK; ++i) {
         state_h[(unsigned long long)i * SA_DV + j] = s_reg[i];
+    }
+}
+
+// StateAdvancePipeline pass 2 (StateOut): the chunk-PARALLEL output
+// pass - grid (heads, chunks, 4 stripes): every tile reads its
+// chunk's initial state and vnew rows from the scratch, builds the
+// decayed local attention against its own bundle rows, and writes
+// its output rows independently - the serial chain is gone from the
+// heavy math. Same per-element accumulation orders as the fused
+// single-pass form (attn tile, inter, full-width out loop).
+extern "C" __global__ void state_out_f32(
+    float* out,
+    const float* bundle,
+    const float* scratch,
+    unsigned int chunks
+) {
+    extern __shared__ float shared[];
+    float* sk = shared;                        // [64, SA_DK] raw k
+    float* sattn = shared + 64u * SA_DK;       // [64, 64] decayed local attn
+    float* sg = sattn + 64u * 64u;             // [64] cumulative gates
+    float* seg = sg + 64u;                     // [64] exp(g)
+    unsigned long long h = blockIdx.x;
+    unsigned int chunk = blockIdx.y;
+    unsigned int stripe = blockIdx.z;
+    unsigned int tid = threadIdx.x;
+    unsigned int j = stripe * SA_COLS + tid;   // this thread's v-column
+    const unsigned long long chunk_stride = 64ull * SA_ROW;
+    const float* rows = bundle
+        + (h * (unsigned long long)chunks + chunk) * chunk_stride;
+    const float* chunk_scratch = scratch
+        + (h * (unsigned long long)chunks + chunk)
+            * (unsigned long long)(SA_DK + 64u) * SA_DV;
+    float* out_rows = out
+        + (h * (unsigned long long)chunks + chunk) * 64ull * SA_DV;
+
+    for (unsigned int idx = tid; idx < 64u * SA_DK; idx += SA_COLS) {
+        unsigned int r = idx / SA_DK;
+        unsigned int i = idx - r * SA_DK;
+        sk[r * SA_DK + i] = rows[r * SA_ROW + SA_DK + i];
+    }
+    for (unsigned int r = tid; r < 64u; r += SA_COLS) {
+        sg[r] = rows[r * SA_ROW + 3u * SA_DK + SA_DV];
+    }
+    __syncthreads();
+    for (unsigned int r = tid; r < 64u; r += SA_COLS) {
+        seg[r] = expf(sg[r]);
+    }
+    // The decayed local attention tile: (q[r] . k[c]) *
+    // exp(g[r] - g[c]) on and below the diagonal, zero above.
+    for (unsigned int idx = tid; idx < 64u * 64u; idx += SA_COLS) {
+        unsigned int r = idx / 64u;
+        unsigned int c = idx - r * 64u;
+        float value = 0.f;
+        if (c <= r) {
+            const float* q_row = rows + r * SA_ROW;
+            float dot = 0.f;
+            #pragma unroll
+            for (unsigned int i = 0; i < SA_DK; ++i) {
+                dot += q_row[i] * sk[c * SA_DK + i];
+            }
+            value = dot * expf(sg[r] - sg[c]);
+        }
+        sattn[idx] = value;
+    }
+    __syncthreads();
+    float s_reg[SA_DK];
+    float vnew[64];
+    #pragma unroll
+    for (unsigned int i = 0; i < SA_DK; ++i) {
+        s_reg[i] = chunk_scratch[(unsigned long long)i * SA_DV + j];
+    }
+    #pragma unroll
+    for (unsigned int r = 0; r < 64u; ++r) {
+        vnew[r] = chunk_scratch[(unsigned long long)(SA_DK + r) * SA_DV + j];
+    }
+    // out rows: exp(g_r) * (q[r] . S) + attn_local @ v_new
+    // (full-width unroll; the upper triangle adds exact zeros).
+    for (unsigned int r = 0; r < 64u; ++r) {
+        const float* q_row = rows + r * SA_ROW;
+        float inter = 0.f;
+        #pragma unroll
+        for (unsigned int i = 0; i < SA_DK; ++i) {
+            inter += q_row[i] * s_reg[i];
+        }
+        float acc = inter * seg[r];
+        const float* attn_row = sattn + r * 64u;
+        #pragma unroll
+        for (unsigned int c = 0; c < 64u; ++c) {
+            acc += attn_row[c] * vnew[c];
+        }
+        out_rows[(unsigned long long)r * SA_DV + j] = acc;
     }
 }
 "#;
@@ -693,24 +749,22 @@ impl candle_core::InplaceOp2 for PrepKbg {
     }
 }
 
-/// `state.inplace_op3(&bundle, &out, &StateAdvance)`: state
-/// (heads, dk, dv) f32 - the carried state, advanced IN PLACE across
-/// every chunk (the kernel loops chunks serially inside); bundle
-/// (heads, chunks, 64, BUNDLE_ROW) f32 rows q | k | w | u | g | beta
-/// (beta rides for TriSolve/PrepKbg; this kernel ignores it); out
-/// (heads, chunks, 64, dv) f32 - WRITTEN by the kernel (the mixer
-/// outputs; candle tensors mutate through shared storage by design).
-/// All contiguous, all addressed at their layout offsets.
-/// Geometry-locked to dk 96 / dv 192 (compile-time tiles keep the
-/// state column in registers); the grid splits each head's
-/// v-columns across four 48-column stripes for occupancy (120
-/// blocks; the shared staging is duplicated per stripe, the
-/// per-column math is identical).
-pub(crate) struct StateAdvance;
+/// `state.inplace_op3(&bundle, &scratch, &StateStage)`: pass 1 of
+/// the StateAdvancePipeline - state (heads, dk, dv) f32, the carried
+/// state, advanced IN PLACE across every chunk (the serial
+/// recurrence lives here alone); bundle (heads, chunks, 64,
+/// BUNDLE_ROW) f32 rows q | k | w | u | g | beta (q and beta unused
+/// in this pass); scratch (heads, chunks, dk + 64, dv) f32 - WRITTEN
+/// with each chunk's INITIAL state (rows 0..dk) and vnew rows (rows
+/// dk..dk+64) for the parallel output pass (candle tensors mutate
+/// through shared storage by design). All contiguous, all addressed
+/// at their layout offsets. Geometry-locked to dk 96 / dv 192; grid
+/// (heads, 4 stripes) x 48 threads - the landed register contract.
+pub(crate) struct StateStage;
 
-impl candle_core::InplaceOp3 for StateAdvance {
+impl candle_core::InplaceOp3 for StateStage {
     fn name(&self) -> &'static str {
-        "quest_state_advance"
+        "quest_state_stage"
     }
 
     fn cpu_fwd(
@@ -722,7 +776,7 @@ impl candle_core::InplaceOp3 for StateAdvance {
         _s3: &candle_core::CpuStorage,
         _l3: &candle_core::Layout,
     ) -> candle_core::Result<()> {
-        candle_core::bail!("state_advance is a cuda prefill building block")
+        candle_core::bail!("state_stage is a cuda prefill building block")
     }
 
     fn cuda_fwd(
@@ -731,41 +785,41 @@ impl candle_core::InplaceOp3 for StateAdvance {
         state_layout: &candle_core::Layout,
         bundle: &candle_core::CudaStorage,
         bundle_layout: &candle_core::Layout,
-        out: &candle_core::CudaStorage,
-        out_layout: &candle_core::Layout,
+        scratch: &candle_core::CudaStorage,
+        scratch_layout: &candle_core::Layout,
     ) -> candle_core::Result<()> {
         use cudarc::driver::{DevicePtr, PushKernelArg};
 
         let (heads, dk, dv) = state_layout.shape().dims3()?;
         let (b_heads, chunks, b_chunk, row_width) = bundle_layout.shape().dims4()?;
-        let out_dims = out_layout.shape().dims4()?;
+        let scratch_dims = scratch_layout.shape().dims4()?;
         if b_heads != heads
             || b_chunk != 64
             || row_width != 3 * dk + dv + 2
-            || out_dims != (heads, chunks, 64, dv)
+            || scratch_dims != (heads, chunks, dk + 64, dv)
         {
             candle_core::bail!(
-                "state_advance wants state (h, dk, dv), bundle (h, n, 64, 3dk+dv+2), \
-                 out (h, n, 64, dv); got {:?}, {:?}, {out_dims:?}",
+                "state_stage wants state (h, dk, dv), bundle (h, n, 64, 3dk+dv+2), \
+                 scratch (h, n, dk+64, dv); got {:?}, {:?}, {scratch_dims:?}",
                 (heads, dk, dv),
                 (b_heads, chunks, b_chunk, row_width)
             );
         }
         if dk != 96 || dv != 192 {
             candle_core::bail!(
-                "state_advance is geometry-locked to dk == 96 and dv == 192 (got {dk}, {dv})"
+                "state_stage is geometry-locked to dk == 96 and dv == 192 (got {dk}, {dv})"
             );
         }
         if !state_layout.is_contiguous()
             || !bundle_layout.is_contiguous()
-            || !out_layout.is_contiguous()
+            || !scratch_layout.is_contiguous()
         {
-            candle_core::bail!("state_advance wants contiguous operands");
+            candle_core::bail!("state_stage wants contiguous operands");
         }
 
         let device = state.device.clone();
         let stream = device.cuda_stream();
-        let function = match kernel(&device, "state_advance_f32") {
+        let function = match kernel(&device, "state_stage_f32") {
             Ok(function) => function,
             Err(error) => candle_core::bail!("{error}"),
         };
@@ -777,11 +831,13 @@ impl candle_core::InplaceOp3 for StateAdvance {
             .as_cuda_slice::<f32>()?
             .slice(bundle_layout.start_offset()..);
         let (bundle_ptr, _bundle_guard) = bundle_slice.device_ptr(&stream);
-        let out_slice = out.as_cuda_slice::<f32>()?.slice(out_layout.start_offset()..);
-        let (out_ptr, _out_guard) = out_slice.device_ptr(&stream);
+        let scratch_slice = scratch
+            .as_cuda_slice::<f32>()?
+            .slice(scratch_layout.start_offset()..);
+        let (scratch_ptr, _scratch_guard) = scratch_slice.device_ptr(&stream);
 
         let chunks = chunks as u32;
-        let shared_bytes: u32 = (64 * 96 + 64 * 64 + 3 * 64) * 4;
+        let shared_bytes: u32 = (64 * 96 + 2 * 64) * 4;
         let config = cudarc::driver::LaunchConfig {
             grid_dim: (heads as u32, 4, 1),
             block_dim: (48, 1, 1),
@@ -791,18 +847,119 @@ impl candle_core::InplaceOp3 for StateAdvance {
         builder
             .arg(&state_ptr)
             .arg(&bundle_ptr)
-            .arg(&out_ptr)
+            .arg(&scratch_ptr)
             .arg(&chunks);
         if let Err(error) = unsafe { builder.launch(config) } {
-            candle_core::bail!("state_advance launch failed: {error}");
+            candle_core::bail!("state_stage launch failed: {error}");
+        }
+        Ok(())
+    }
+}
+
+/// `out.inplace_op3(&bundle, &scratch, &StateOut)`: pass 2 of the
+/// StateAdvancePipeline - out (heads, chunks, 64, dv) f32 WRITTEN
+/// chunk-PARALLEL (grid (heads, chunks, 4 stripes) x 48 threads):
+/// every tile reads its chunk's initial state and vnew rows from the
+/// scratch, builds the decayed local attention against its own
+/// bundle rows, and writes its output rows independently - no serial
+/// dependency remains in the heavy math. Same per-element
+/// accumulation orders as the fused single-pass form.
+pub(crate) struct StateOut;
+
+impl candle_core::InplaceOp3 for StateOut {
+    fn name(&self) -> &'static str {
+        "quest_state_out"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _s1: &mut candle_core::CpuStorage,
+        _l1: &candle_core::Layout,
+        _s2: &candle_core::CpuStorage,
+        _l2: &candle_core::Layout,
+        _s3: &candle_core::CpuStorage,
+        _l3: &candle_core::Layout,
+    ) -> candle_core::Result<()> {
+        candle_core::bail!("state_out is a cuda prefill building block")
+    }
+
+    fn cuda_fwd(
+        &self,
+        out: &mut candle_core::CudaStorage,
+        out_layout: &candle_core::Layout,
+        bundle: &candle_core::CudaStorage,
+        bundle_layout: &candle_core::Layout,
+        scratch: &candle_core::CudaStorage,
+        scratch_layout: &candle_core::Layout,
+    ) -> candle_core::Result<()> {
+        use cudarc::driver::{DevicePtr, PushKernelArg};
+
+        let (heads, chunks, o_chunk, dv) = out_layout.shape().dims4()?;
+        let bundle_dims = bundle_layout.shape().dims4()?;
+        let scratch_dims = scratch_layout.shape().dims4()?;
+        if o_chunk != 64
+            || bundle_dims != (heads, chunks, 64, BUNDLE_ROW)
+            || scratch_dims != (heads, chunks, 96 + 64, dv)
+        {
+            candle_core::bail!(
+                "state_out wants out (h, n, 64, dv), bundle (h, n, 64, {BUNDLE_ROW}), \
+                 scratch (h, n, 160, dv); got {:?}, {bundle_dims:?}, {scratch_dims:?}",
+                (heads, chunks, o_chunk, dv)
+            );
+        }
+        if dv != 192 {
+            candle_core::bail!(
+                "state_out is geometry-locked to dk == 96 and dv == 192 (got dv {dv})"
+            );
+        }
+        if !out_layout.is_contiguous()
+            || !bundle_layout.is_contiguous()
+            || !scratch_layout.is_contiguous()
+        {
+            candle_core::bail!("state_out wants contiguous operands");
+        }
+
+        let device = out.device.clone();
+        let stream = device.cuda_stream();
+        let function = match kernel(&device, "state_out_f32") {
+            Ok(function) => function,
+            Err(error) => candle_core::bail!("{error}"),
+        };
+        let out_slice = out.as_cuda_slice::<f32>()?.slice(out_layout.start_offset()..);
+        let (out_ptr, _out_guard) = out_slice.device_ptr(&stream);
+        let bundle_slice = bundle
+            .as_cuda_slice::<f32>()?
+            .slice(bundle_layout.start_offset()..);
+        let (bundle_ptr, _bundle_guard) = bundle_slice.device_ptr(&stream);
+        let scratch_slice = scratch
+            .as_cuda_slice::<f32>()?
+            .slice(scratch_layout.start_offset()..);
+        let (scratch_ptr, _scratch_guard) = scratch_slice.device_ptr(&stream);
+
+        let chunks_u = chunks as u32;
+        let shared_bytes: u32 = (64 * 96 + 64 * 64 + 2 * 64) * 4;
+        let config = cudarc::driver::LaunchConfig {
+            grid_dim: (heads as u32, chunks_u, 4),
+            block_dim: (48, 1, 1),
+            shared_mem_bytes: shared_bytes,
+        };
+        let mut builder = stream.launch_builder(&function);
+        builder
+            .arg(&out_ptr)
+            .arg(&bundle_ptr)
+            .arg(&scratch_ptr)
+            .arg(&chunks_u);
+        if let Err(error) = unsafe { builder.launch(config) } {
+            candle_core::bail!("state_out launch failed: {error}");
         }
         Ok(())
     }
 }
 
 /// The rule back half over a filled bundle: TriSolve, the two cublas
-/// gemms, the PackTrim w/u slice_sets, and StateAdvance. Returns
-/// (out [t, heads, dv] f32, final state).
+/// gemms, the PackTrim w/u slice_sets, and the StateAdvancePipeline
+/// (StateStage serial, StateOut chunk-parallel over the scratch).
+/// Returns (out [t, heads, dv] f32, final state).
 fn rule_over_bundle(
     bundle: &candle_core::Tensor,
     v_beta: &candle_core::Tensor,
@@ -830,12 +987,18 @@ fn rule_over_bundle(
     bundle.slice_set(&k_cumdecay, 3, 2 * dk)?;
     bundle.slice_set(&value, 3, 3 * dk)?;
     let carried = state.copy()?;
+    let scratch = candle_core::Tensor::zeros(
+        (heads, chunks, dk + 64, dv),
+        candle_core::DType::F32,
+        device,
+    )?;
+    carried.inplace_op3(bundle, &scratch, &StateStage)?;
     let out = candle_core::Tensor::zeros(
         (heads, chunks, 64, dv),
         candle_core::DType::F32,
         device,
     )?;
-    carried.inplace_op3(bundle, &out, &StateAdvance)?;
+    out.inplace_op3(bundle, &scratch, &StateOut)?;
     let out = out
         .reshape((heads, chunks * 64, dv))?
         .narrow(1, 0, t)?
