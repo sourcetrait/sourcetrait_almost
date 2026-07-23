@@ -1,9 +1,11 @@
 //! SpeculationPort locks: the lookup-index + draft-policy unit pins
 //! (era-one semantics carried verbatim), the cpu f32 spec-vs-plain
-//! byte-equal gate (the standing exactness contract), and the cuda
-//! echo smoke (report-only rates; bf16 trajectories may fork on
-//! argmax ties - the settled kernel-path drift class).
+//! byte-equal gate (the standing exactness contract), the KernelAccept
+//! replay-equivalence lock (spec_accept vs the v1 rollback + replay),
+//! and the cuda echo smoke (report-only rates; bf16 trajectories may
+//! fork on argmax ties - the settled kernel-path drift class).
 use crate::*;
+use crate::snapshot::read_snapshot;
 use crate::speculate::{DraftPolicy, LookupIndex, MAX_DRAFT};
 
 #[test]
@@ -229,4 +231,178 @@ fn spec_smoke_rates_cuda() {
             );
         }
     }
+}
+
+fn argmax(row: &[f32]) -> u32 {
+    let mut best = 0usize;
+    for (index, value) in row.iter().enumerate() {
+        if *value > row[best] {
+            best = index;
+        }
+    }
+    best as u32
+}
+
+fn tensor_nmse(actual: &candle_core::Tensor, reference: &candle_core::Tensor) -> f64 {
+    let a = actual
+        .to_dtype(candle_core::DType::F32)
+        .expect("f32")
+        .flatten_all()
+        .expect("flat")
+        .to_vec1::<f32>()
+        .expect("host");
+    let r = reference
+        .to_dtype(candle_core::DType::F32)
+        .expect("f32")
+        .flatten_all()
+        .expect("flat")
+        .to_vec1::<f32>()
+        .expect("host");
+    assert_eq!(a.len(), r.len());
+    let mut numerator = 0f64;
+    let mut denominator = 0f64;
+    for (x, y) in a.iter().zip(&r) {
+        let difference = (*x as f64) - (*y as f64);
+        numerator += difference * difference;
+        denominator += (*y as f64) * (*y as f64);
+    }
+    numerator / denominator.max(f64::MIN_POSITIVE)
+}
+
+/// The KernelAccept replay-equivalence lock (cpu f32): over identical
+/// prefill + verify-chunk inputs, a partial accept via spec_accept
+/// (keep the verify's attention rows, re-advance the GDN caches from
+/// the captured rule inputs) lands the same carried caches as the v1
+/// rollback + replay mechanism - snapshot tensors to f32 rounding,
+/// greedy continuations id-identical. Forced partial rounds at
+/// consumed 1 / 3 / 5 of a 6-row verify block.
+#[test]
+#[ignore = "needs the DPO checkpoint; ~3-5 min cpu"]
+fn spec_accept_matches_rollback_replay_cpu_f32() {
+    const CONTINUATION_STEPS: usize = 4;
+    let root = env::temp_dir().join(format!(
+        "lib_quest_spec_accept_{}",
+        std::process::id()
+    ));
+    if root.exists() {
+        fs::remove_dir_all(&root).expect("clean temp root");
+    }
+    fs::create_dir_all(&root).expect("create temp root");
+
+    let dir = model_dir(consts::DPO_MODEL_NAME).expect("dpo dir");
+    let config = load_config(&dir).expect("config");
+    let tokenizer = load_tokenizer(&dir).expect("tokenizer");
+    let weights = mmap_weights(&dir, candle_core::DType::F32, &candle_core::Device::Cpu)
+        .expect("mmap");
+    let mut model = OlmoHybrid::new(&config, LibSettings::default(), weights).expect("model");
+    let device = model.device().clone();
+
+    let prompt_ids = tokenizer
+        .encode("the cat sat on the mat and the dog sat on the log", false)
+        .expect("encodes")
+        .get_ids()
+        .to_vec();
+    // The verify block: a pending token + five drafts (the lock
+    // chooses `consumed` itself, so any plausible ids serve).
+    let block: Vec<u32> = prompt_ids[1..7].to_vec();
+    let span = block.len();
+
+    let mut run_leg = |kernel_accept: bool, consumed: usize, name: &str| -> Vec<u32> {
+        model.clear_cache().expect("clear");
+        let prompt =
+            candle_core::Tensor::from_vec(prompt_ids.clone(), prompt_ids.len(), &device)
+                .expect("prompt ids");
+        model.forward_chunk_carry(&prompt).expect("prefill");
+        let mark = model.spec_mark().expect("mark");
+        let verify =
+            candle_core::Tensor::from_vec(block.clone(), span, &device).expect("block ids");
+        let _ = model.forward_chunk(&verify).expect("verify chunk");
+        if kernel_accept {
+            model.spec_accept(&mark, consumed).expect("spec accept");
+        } else {
+            model.spec_rollback(&mark).expect("rollback");
+            let replay = candle_core::Tensor::from_vec(
+                block[..consumed].to_vec(),
+                consumed,
+                &device,
+            )
+            .expect("replay ids");
+            model.forward_chunk_carry(&replay).expect("replay");
+        }
+        assert_eq!(
+            model.context_len(),
+            prompt_ids.len() + consumed,
+            "{name}: context length"
+        );
+        let mut trail = prompt_ids.clone();
+        trail.extend_from_slice(&block[..consumed]);
+        model
+            .snapshot_caches(&root, name, "lock-model", &trail)
+            .expect("snapshot");
+        // Greedy continuation from a fixed feed token.
+        let mut next = block[consumed.min(span - 1)];
+        let mut ids = Vec::with_capacity(CONTINUATION_STEPS);
+        for _ in 0..CONTINUATION_STEPS {
+            let step =
+                candle_core::Tensor::from_vec(vec![next], 1, &device).expect("step id");
+            let row = model
+                .forward_chunk(&step)
+                .expect("decode step")
+                .flatten_all()
+                .expect("flat")
+                .to_vec1::<f32>()
+                .expect("host");
+            next = argmax(&row);
+            ids.push(next);
+        }
+        ids
+    };
+
+    for consumed in [1usize, 3, 5] {
+        let accept_name = format!("accept_{consumed}");
+        let replay_name = format!("replay_{consumed}");
+        let accept_ids = run_leg(true, consumed, &accept_name);
+        let replay_ids = run_leg(false, consumed, &replay_name);
+        assert_eq!(
+            accept_ids, replay_ids,
+            "consumed {consumed}: continuation ids must match"
+        );
+        let accept_file = read_snapshot(
+            &root.join(format!("{accept_name}.safetensors")),
+            "lock-model",
+            &candle_core::Device::Cpu,
+        )
+        .expect("accept snapshot reads");
+        let replay_file = read_snapshot(
+            &root.join(format!("{replay_name}.safetensors")),
+            "lock-model",
+            &candle_core::Device::Cpu,
+        )
+        .expect("replay snapshot reads");
+        let mut worst = 0f64;
+        for (index, kind) in config.layer_types.iter().enumerate() {
+            let names = match kind {
+                LayerKind::LinearAttention => {
+                    vec![format!("gdn_state_{index}"), format!("conv_tail_{index}")]
+                }
+                LayerKind::FullAttention => {
+                    vec![format!("attn_k_{index}"), format!("attn_v_{index}")]
+                }
+            };
+            for name in &names {
+                let spread = tensor_nmse(
+                    accept_file.tensor(name).expect("accept tensor"),
+                    replay_file.tensor(name).expect("replay tensor"),
+                );
+                worst = worst.max(spread);
+                assert!(
+                    spread <= 1e-10,
+                    "consumed {consumed}, {name}: nmse {spread:.3e} beyond the f32 \
+                     reassociation class"
+                );
+            }
+        }
+        println!("replay-equivalence consumed {consumed}: worst cache nmse {worst:.3e}");
+    }
+    fs::remove_dir_all(&root).expect("cleanup");
 }

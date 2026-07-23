@@ -399,10 +399,10 @@ impl Generation<'_> {
     /// One SpeculationPort round for the emitted token: index it,
     /// probe the ladder, and either verify [token ++ draft] in one
     /// batched carried forward or fall to the plain single step. On a
-    /// partial accept the caches roll back to the mark and the
-    /// accepted rows re-advance logits-free (the GDN caches are
-    /// cumulative - the shadow restore + replay replaces era-one's
-    /// exact ring rewind); a full accept keeps the caches as-is.
+    /// partial accept the verify's accepted-prefix attention rows are
+    /// KEPT (a length reset) and the GDN caches re-advance from the
+    /// rule inputs captured during the verify - one weight pass per
+    /// round (KernelAccept); a full accept keeps the caches as-is.
     /// Token-exact vs plain greedy: every row rides the same argmax
     /// sampler.
     fn stage_or_speculate(&mut self, token_id: u32) -> LibQuestResult<()> {
@@ -467,16 +467,15 @@ impl Generation<'_> {
         let bonus = greedy_next[consumed - 1];
 
         if consumed < span {
-            // Partial accept: restore the mark and re-advance the
-            // accepted rows logits-free (the bonus row is already in
-            // hand from the verification logits).
-            self.model.spec_rollback(&mark)?;
-            let replay = candle_core::Tensor::from_vec(
-                accepted.clone(),
-                consumed,
-                self.model.device(),
-            )?;
-            self.model.forward_chunk_carry(&replay)?;
+            // KernelAccept partial: keep the verify's accepted-prefix
+            // attention rows, re-advance the GDN caches from the
+            // captured rule inputs (the bonus row is already in hand
+            // from the verification logits).
+            self.model.spec_accept(&mark, consumed)?;
+        } else {
+            // Full accept: every cache row is already correct; the
+            // round's captures release.
+            self.model.spec_release();
         }
         self.context_ids.extend_from_slice(&accepted);
         // token_id is already indexed; the verified continuation

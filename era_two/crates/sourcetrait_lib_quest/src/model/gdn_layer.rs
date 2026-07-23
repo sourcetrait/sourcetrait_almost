@@ -65,6 +65,14 @@ pub(crate) struct GdnLayer {
     /// the first spec mark; plain device copies - speculation rides
     /// the classic path only, so no capture/address constraints bind.
     spec_shadow: Option<(candle_core::Tensor, candle_core::Tensor)>,
+    /// KernelAccept capture arm, set by shadow_save (the spec mark):
+    /// the next multi-token carried chunk stashes its rule inputs.
+    spec_capture: bool,
+    /// The captured rule-input rows (conv_in [span, 2*key + value],
+    /// a_rows / b_rows [span, heads], model dtype) - what a partial
+    /// accept re-advances the recurrence from without a replay
+    /// forward.
+    spec_rows: Option<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)>,
 }
 
 impl GdnLayer {
@@ -134,6 +142,8 @@ impl GdnLayer {
             )?,
             conv_tail: f32_zeros((kernel - 1, key_dim + key_dim + value_dim))?,
             spec_shadow: None,
+            spec_capture: false,
+            spec_rows: None,
             input_layernorm: vb.pp("input_layernorm").get(hidden, "weight")?,
             post_attention_layernorm: vb.pp("post_attention_layernorm").get(hidden, "weight")?,
             qkvg_proj: candle_nn::Linear::new(
@@ -234,14 +244,17 @@ impl GdnLayer {
 
     /// Post-conv prep shared by both mixer paths: head reshape, the
     /// recurrence's f32 upcast discipline, l2 norms, the q scale, and
-    /// the gating scalars. Returns (q, k, v, g, beta) rule-ready.
+    /// the gating scalars from the hoisted a/b gemv rows (callers
+    /// project them - the KernelAccept capture stashes the same rows).
+    /// Returns (q, k, v, g, beta) rule-ready.
     #[allow(clippy::type_complexity)]
     fn heads_and_gates(
         &self,
         q: candle_core::Tensor,
         k: candle_core::Tensor,
         v: candle_core::Tensor,
-        x: &candle_core::Tensor,
+        a_rows: &candle_core::Tensor,
+        b_rows: &candle_core::Tensor,
         seq_len: usize,
     ) -> LibQuestResult<(
         candle_core::Tensor,
@@ -263,8 +276,8 @@ impl GdnLayer {
         let k = gdn::l2_norm(&k)?;
         let q = (q * (self.head_k_dim as f64).powf(-0.5))?;
         let (g, beta) = gdn::gdn_gates(
-            &self.a_proj.forward(x)?,
-            &self.b_proj.forward(x)?,
+            a_rows,
+            b_rows,
             &self.a_log,
             &self.dt_bias,
             self.allow_neg_eigval,
@@ -329,9 +342,11 @@ impl GdnLayer {
     fn mixer_stateless(&self, x: &candle_core::Tensor) -> LibQuestResult<candle_core::Tensor> {
         let (seq_len, _) = x.dims2()?;
         let (conv_in, gate) = self.project_fused(x)?;
+        let a_rows = self.a_proj.forward(x)?;
+        let b_rows = self.b_proj.forward(x)?;
         let conv_out = gdn::causal_conv_silu(&conv_in, &self.conv_weight)?;
         let (q, k, v) = self.split_conv(&conv_out)?;
-        let (q, k, v, g, beta) = self.heads_and_gates(q, k, v, x, seq_len)?;
+        let (q, k, v, g, beta) = self.heads_and_gates(q, k, v, &a_rows, &b_rows, seq_len)?;
         let decay = g.exp()?;
         let mut state = self.state.zeros_like()?;
         let mut rows = Vec::with_capacity(seq_len);
@@ -380,9 +395,14 @@ impl GdnLayer {
             return self.mixer_carried_fused_chunk(x, seq_len);
         }
         let (conv_in, gate) = self.project_fused(x)?;
+        let a_rows = self.a_proj.forward(x)?;
+        let b_rows = self.b_proj.forward(x)?;
+        if seq_len > 1 && self.spec_capture {
+            self.spec_rows = Some((conv_in.clone(), a_rows.clone(), b_rows.clone()));
+        }
         let conv_out = self.conv_carried(&conv_in, seq_len)?;
         let (q, k, v) = self.split_conv(&conv_out)?;
-        let (q, k, v, g, beta) = self.heads_and_gates(q, k, v, x, seq_len)?;
+        let (q, k, v, g, beta) = self.heads_and_gates(q, k, v, &a_rows, &b_rows, seq_len)?;
         let y = if seq_len == 1 {
             self.carried_decode_step(&q, &k, &v, &g, &beta)?
         } else {
@@ -410,6 +430,9 @@ impl GdnLayer {
         let gate = qkvg.narrow(1, conv_width, self.value_width)?.contiguous()?;
         let a_rows = self.a_proj.forward(x)?;
         let b_rows = self.b_proj.forward(x)?;
+        if self.spec_capture {
+            self.spec_rows = Some((conv_in.clone(), a_rows.clone(), b_rows.clone()));
+        }
         let static_rows = self
             .prefill_static
             .as_ref()
@@ -589,8 +612,11 @@ impl GdnLayer {
 
     /// SpeculationPort: snapshot the carried caches into the shadow
     /// buffers (lazily allocated fresh storage - slice_set refuses
-    /// shared storage).
+    /// shared storage), drop any stale captured rows, and arm the
+    /// KernelAccept capture for the coming verify chunk.
     pub(crate) fn shadow_save(&mut self) -> LibQuestResult<()> {
+        self.spec_rows = None;
+        self.spec_capture = true;
         if self.spec_shadow.is_none() {
             self.spec_shadow =
                 Some((self.state.zeros_like()?, self.conv_tail.zeros_like()?));
@@ -610,6 +636,66 @@ impl GdnLayer {
         };
         self.state.slice_set(state_shadow, 0, 0)?;
         self.conv_tail.slice_set(tail_shadow, 0, 0)?;
+        Ok(())
+    }
+
+    /// KernelAccept: drop the captured rule inputs and disarm the
+    /// capture (a full accept or a full rewind ends the round).
+    pub(crate) fn spec_release(&mut self) {
+        self.spec_rows = None;
+        self.spec_capture = false;
+    }
+
+    /// KernelAccept: re-advance the carried caches over the first
+    /// `accepted` captured rule-input rows from the SHADOW-RESTORED
+    /// state and tail (the caller runs shadow_restore first) - pure
+    /// recurrence math over cached post-projection operands, no
+    /// projections and no weight traffic. Rides the verify chunk's
+    /// own grade dispatch (the fused prefill pipeline on armed cuda
+    /// bf16, the classic chain otherwise); y/gate/finish are skipped
+    /// entirely - only the caches matter.
+    pub(crate) fn spec_readvance(&mut self, accepted: usize) -> LibQuestResult<()> {
+        let Some((conv_in, a_rows, b_rows)) = self.spec_rows.take() else {
+            snafu::whatever!("spec re-advance without captured rule inputs");
+        };
+        self.spec_capture = false;
+        let span = conv_in.dim(0)?;
+        snafu::ensure_whatever!(
+            (1..=span).contains(&accepted),
+            "spec re-advance wants 1..={span} accepted rows, got {accepted}"
+        );
+        let conv_in = conv_in.narrow(0, 0, accepted)?;
+        let a_rows = a_rows.narrow(0, 0, accepted)?;
+        let b_rows = b_rows.narrow(0, 0, accepted)?;
+        #[cfg(feature = "cuda")]
+        if self.fused_prefill
+            && conv_in.device().is_cuda()
+            && conv_in.dtype() == candle_core::DType::BF16
+            && let Some(static_rows) = &self.prefill_static
+        {
+            let (_, next_state, new_tail) = fused_prefill::prep_chunk_rule(
+                fused_prefill::PrepInputs {
+                    conv_in: &conv_in,
+                    a_rows: &a_rows,
+                    b_rows: &b_rows,
+                    static_rows,
+                    conv_tail: &self.conv_tail,
+                    state: &self.state,
+                },
+                (self.head_k_dim as f64).powf(-0.5),
+                self.allow_neg_eigval,
+            )?;
+            self.state.slice_set(&next_state, 0, 0)?;
+            self.conv_tail.slice_set(&new_tail, 0, 0)?;
+            return Ok(());
+        }
+        let (conv_out, new_tail) =
+            gdn::conv_with_tail(&conv_in, &self.conv_weight, &self.conv_tail)?;
+        let (q, k, v) = self.split_conv(&conv_out)?;
+        let (q, k, v, g, beta) = self.heads_and_gates(q, k, v, &a_rows, &b_rows, accepted)?;
+        let (_, next_state) = gdn::chunk_rule(&q, &k, &v, &g, &beta, &self.state)?;
+        self.state.slice_set(&next_state, 0, 0)?;
+        self.conv_tail.slice_set(&new_tail, 0, 0)?;
         Ok(())
     }
 }

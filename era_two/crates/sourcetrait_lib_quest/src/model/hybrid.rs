@@ -16,10 +16,10 @@ enum Layer {
 }
 
 /// SpeculationPort: the pre-verification cache mark. Attention rows
-/// are prefix-correct, so their rewind is a length reset recorded
+/// are prefix-correct, so acceptance is a length reset recorded
 /// here; the GDN caches are cumulative, so the mark shadows them per
-/// layer and a partial accept restores the shadows while the caller
-/// re-advances the accepted rows (forward_chunk_carry).
+/// layer and arms the rule-input capture - a partial accept restores
+/// the shadows and re-advances from the captured rows (spec_accept).
 pub(crate) struct SpecMark {
     pub(crate) context_len: usize,
 }
@@ -400,9 +400,9 @@ impl OlmoHybrid {
         self.spec_rollback(&mark.0)
     }
 
-    /// SpeculationPort: shadow every GDN layer's carried caches and
-    /// record the live lengths - the mark a verification forward can
-    /// roll back to.
+    /// SpeculationPort: shadow every GDN layer's carried caches, arm
+    /// their rule-input captures (shadow_save), and record the live
+    /// length - the mark a verification forward accepts against.
     pub(crate) fn spec_mark(&mut self) -> LibQuestResult<SpecMark> {
         for layer in &mut self.layers {
             if let Layer::Gdn(gdn) = layer {
@@ -414,16 +414,19 @@ impl OlmoHybrid {
         })
     }
 
-    /// SpeculationPort: roll every carried cache back to the mark -
-    /// GDN shadows restore in place, attention KV lengths and the
-    /// context length reset (rows past the mark become invisible; the
-    /// caller re-advances the accepted rows through
-    /// forward_chunk_carry). Classic-path only by construction
-    /// (speculation never arms graphs and refuses eviction).
+    /// SpeculationPort: the FULL rewind to the mark - GDN shadows
+    /// restore in place (their captures release), attention KV
+    /// lengths and the context length reset (rows past the mark
+    /// become invisible). Partial accepts ride spec_accept instead.
+    /// Classic-path only by construction (speculation never arms
+    /// graphs and refuses eviction).
     pub(crate) fn spec_rollback(&mut self, mark: &SpecMark) -> LibQuestResult<()> {
         for layer in &mut self.layers {
             match layer {
-                Layer::Gdn(gdn) => gdn.shadow_restore()?,
+                Layer::Gdn(gdn) => {
+                    gdn.shadow_restore()?;
+                    gdn.spec_release();
+                }
                 Layer::Attn(attn) => {
                     if let Some(kv) = &mut attn.kv {
                         kv.len = mark.context_len;
@@ -433,6 +436,48 @@ impl OlmoHybrid {
         }
         self.context_len = mark.context_len;
         Ok(())
+    }
+
+    /// KernelAccept: the 1-pass partial accept - keep the verify
+    /// chunk's accepted-prefix work instead of replaying it. The
+    /// accepted-prefix rows of a verify chunk compute identically to
+    /// a plain advance (causal attention + recurrence order), so the
+    /// attention KV rows written during the verify ARE the accepted
+    /// rows - acceptance is a length reset to mark + consumed with
+    /// zero recompute - while the cumulative GDN caches restore
+    /// their shadows and re-advance over the captured rule inputs
+    /// (no projections, no weight traffic). Classic-path only, like
+    /// every speculation surface.
+    pub(crate) fn spec_accept(
+        &mut self,
+        mark: &SpecMark,
+        consumed: usize,
+    ) -> LibQuestResult<()> {
+        for layer in &mut self.layers {
+            match layer {
+                Layer::Gdn(gdn) => {
+                    gdn.shadow_restore()?;
+                    gdn.spec_readvance(consumed)?;
+                }
+                Layer::Attn(attn) => {
+                    if let Some(kv) = &mut attn.kv {
+                        kv.len = mark.context_len + consumed;
+                    }
+                }
+            }
+        }
+        self.context_len = mark.context_len + consumed;
+        Ok(())
+    }
+
+    /// KernelAccept: a full accept keeps every cache row as-is; the
+    /// round's captured rule inputs release.
+    pub(crate) fn spec_release(&mut self) {
+        for layer in &mut self.layers {
+            if let Layer::Gdn(gdn) = layer {
+                gdn.spec_release();
+            }
+        }
     }
 
     /// KvEviction keep-sets from the live last-pass scores, one per
