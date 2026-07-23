@@ -7,6 +7,7 @@ pub(crate) mod error;
 pub(crate) mod hybrid;
 pub(crate) mod hybrid_load;
 pub(crate) mod ifeval;
+pub(crate) mod lora;
 pub(crate) mod mix;
 pub(crate) mod punkt;
 pub(crate) mod pytext;
@@ -77,6 +78,7 @@ pub(crate) use crate::cli::{
     SpeculateTokensArgs,
 };
 pub(crate) use crate::mix::{
+    SplitMix64,
     mix_pack,
     mix_render,
 };
@@ -144,6 +146,7 @@ mod tests {
     mod convert;
     mod doc;
     mod hybrid;
+    mod lora;
     mod mix;
     mod score;
     mod speculate;
