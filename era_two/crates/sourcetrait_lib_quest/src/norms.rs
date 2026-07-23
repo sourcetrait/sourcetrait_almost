@@ -20,10 +20,15 @@ pub(crate) fn rms_norm(
     Ok(weight.broadcast_mul(&normed.to_dtype(dtype)?)?)
 }
 
-/// rms_norm with the GdnChainFusion decode dispatch: the fused
-/// single-launch kernel on a one-row bf16 cuda input when the caller
-/// is a CARRIED path with fusion armed; the classic chain otherwise.
-/// Stateless/parity callers pass fused = false by construction.
+/// rms_norm with the GdnChainFusion/PrefillNormFusion dispatch: the
+/// fused single-launch kernel (one block per row) on CONTIGUOUS 2-D
+/// bf16 cuda input when the caller is a CARRIED path with fusion
+/// armed - decode rows and multi-row prefill chunks alike; the
+/// classic chain otherwise. The contiguity gate is load-bearing: the
+/// attention q/k norms feed multi-row NARROWS of the fused qkv
+/// projection (contiguous only at t = 1), and those legs stay
+/// classic rather than paying a pack copy. Stateless/parity callers
+/// pass fused = false by construction, so their digits never move.
 pub(crate) fn rms_norm_auto(
     x: &candle_core::Tensor,
     weight: &candle_core::Tensor,
@@ -32,7 +37,8 @@ pub(crate) fn rms_norm_auto(
 ) -> LibQuestResult<candle_core::Tensor> {
     #[cfg(feature = "cuda")]
     if fused
-        && x.dims().first() == Some(&1)
+        && x.dims().len() == 2
+        && x.is_contiguous()
         && x.device().is_cuda()
         && x.dtype() == candle_core::DType::BF16
     {
