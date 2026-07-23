@@ -89,6 +89,18 @@ impl OlmoHybrid {
                 )?),
             });
         }
+        // PrefillScratchReuse: one shared pool serves every GDN
+        // layer's fused prefill chunks (they run sequentially).
+        #[cfg(feature = "cuda")]
+        if settings.fused_prefill {
+            let shared: fused_prefill::SharedPrefillScratch =
+                std::rc::Rc::new(std::cell::RefCell::new(None));
+            for layer in &mut layers {
+                if let Layer::Gdn(gdn) = layer {
+                    gdn.install_prefill_scratch(shared.clone());
+                }
+            }
+        }
         Ok(Self {
             embed_tokens,
             layers,

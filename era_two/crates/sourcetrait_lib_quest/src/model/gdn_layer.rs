@@ -59,6 +59,12 @@ pub(crate) struct GdnLayer {
     /// parity form always run the classic chain).
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     fused_prefill: bool,
+    /// PrefillScratchReuse: the pool shared by every GDN layer (the
+    /// model installs one handle post-construction when
+    /// fused_prefill is armed; layers run sequentially, so one set
+    /// serves all 24).
+    #[cfg(feature = "cuda")]
+    prefill_scratch: Option<fused_prefill::SharedPrefillScratch>,
     state: candle_core::Tensor,
     conv_tail: candle_core::Tensor,
     /// SpeculationPort shadow buffers (state + conv tail), built at
@@ -135,6 +141,8 @@ impl GdnLayer {
             None
         };
         Ok(Self {
+            #[cfg(feature = "cuda")]
+            prefill_scratch: None,
             state: candle_core::Tensor::zeros(
                 (heads, config.linear_key_head_dim, config.linear_value_head_dim),
                 candle_core::DType::F32,
@@ -179,6 +187,16 @@ impl GdnLayer {
             fused_gdn,
             fused_prefill,
         })
+    }
+
+    /// PrefillScratchReuse: install the model's shared pool handle
+    /// (post-construction; only when fused_prefill is armed).
+    #[cfg(feature = "cuda")]
+    pub(crate) fn install_prefill_scratch(
+        &mut self,
+        shared: fused_prefill::SharedPrefillScratch,
+    ) {
+        self.prefill_scratch = Some(shared);
     }
 
     /// One fused gemv, split by the load-time row order: the packed
@@ -448,6 +466,7 @@ impl GdnLayer {
             },
             (self.head_k_dim as f64).powf(-0.5),
             self.allow_neg_eigval,
+            self.prefill_scratch.as_ref(),
         )?;
         self.state.slice_set(&next_state, 0, 0)?;
         self.conv_tail.slice_set(&new_tail, 0, 0)?;
@@ -684,6 +703,9 @@ impl GdnLayer {
                 },
                 (self.head_k_dim as f64).powf(-0.5),
                 self.allow_neg_eigval,
+                // A readvance span (<= 16 rows) is never a full
+                // span; keep it off the pool for clarity.
+                None,
             )?;
             self.state.slice_set(&next_state, 0, 0)?;
             self.conv_tail.slice_set(&new_tail, 0, 0)?;

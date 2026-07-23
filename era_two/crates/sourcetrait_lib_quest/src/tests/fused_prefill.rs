@@ -250,6 +250,7 @@ fn prep_chunk_leg(t: usize, split: usize, seed_base: u64) {
         },
         (dk as f64).powf(-0.5),
         true,
+        None,
     )
     .expect("fused");
     let out_nmse = nmse(&out, &out_ref);
@@ -290,6 +291,7 @@ fn prep_chunk_leg(t: usize, split: usize, seed_base: u64) {
         },
         (dk as f64).powf(-0.5),
         true,
+        None,
     )
     .expect("fused split a");
     let back_conv = back(&conv_in);
@@ -306,6 +308,7 @@ fn prep_chunk_leg(t: usize, split: usize, seed_base: u64) {
         },
         (dk as f64).powf(-0.5),
         true,
+        None,
     )
     .expect("fused split b");
     let split_out = candle_core::Tensor::cat(&[&out_a, &out_b], 0).expect("cat");

@@ -1224,28 +1224,53 @@ impl candle_core::InplaceOp2 for PackPairs {
 /// gemms, the BundleBf16 w/u pair packing, and the
 /// StateAdvancePipeline (StateStage serial, StateOut chunk-parallel
 /// over the scratch). The tile rides the bundle's chunk dim (SmallT:
-/// the caller sized it via tile_for). Returns (out [t, heads, dv]
-/// f32, final state).
+/// the caller sized it via tile_for); `pooled` carries the reused
+/// kbg/attn/scratch/out set on a full span
+/// (PrefillScratchReuse - every cell rewrites below, TriSolve and
+/// the writers covering their whole outputs, so pooled and fresh
+/// zeros are value-identical). Returns (out [t, heads, dv] f32,
+/// final state).
 fn rule_over_bundle(
     bundle: &candle_core::Tensor,
     v_beta: &candle_core::Tensor,
     state: &candle_core::Tensor,
     t: usize,
+    pooled: Option<(
+        candle_core::Tensor,
+        candle_core::Tensor,
+        candle_core::Tensor,
+        candle_core::Tensor,
+    )>,
 ) -> LibQuestResult<(candle_core::Tensor, candle_core::Tensor)> {
     let (heads, chunks, tile, _) = bundle.dims4()?;
     let (_, dk, dv) = state.dims3()?;
     let device = bundle.device();
-    let kbg = candle_core::Tensor::zeros(
-        (heads, chunks, tile, dk),
-        candle_core::DType::F32,
-        device,
-    )?;
+    let (kbg, attn, scratch, out) = match pooled {
+        Some(set) => set,
+        None => (
+            candle_core::Tensor::zeros(
+                (heads, chunks, tile, dk),
+                candle_core::DType::F32,
+                device,
+            )?,
+            candle_core::Tensor::zeros(
+                (heads * chunks, tile, tile),
+                candle_core::DType::F32,
+                device,
+            )?,
+            candle_core::Tensor::zeros(
+                (heads, chunks, dk + tile, dv),
+                candle_core::DType::F32,
+                device,
+            )?,
+            candle_core::Tensor::zeros(
+                (heads, chunks, tile, dv),
+                candle_core::DType::F32,
+                device,
+            )?,
+        ),
+    };
     kbg.inplace_op2(bundle, &PrepKbg { tile })?;
-    let attn = candle_core::Tensor::zeros(
-        (heads * chunks, tile, tile),
-        candle_core::DType::F32,
-        device,
-    )?;
     attn.inplace_op2(bundle, &TriSolve { tile })?;
     let attn = attn.reshape((heads, chunks, tile, tile))?;
     let value = attn.matmul(v_beta)?;
@@ -1253,17 +1278,7 @@ fn rule_over_bundle(
     bundle.inplace_op2(&k_cumdecay, &PackPairs { cell_offset: CELL_W })?;
     bundle.inplace_op2(&value, &PackPairs { cell_offset: CELL_U })?;
     let carried = state.copy()?;
-    let scratch = candle_core::Tensor::zeros(
-        (heads, chunks, dk + tile, dv),
-        candle_core::DType::F32,
-        device,
-    )?;
     carried.inplace_op3(bundle, &scratch, &StateStage { tile })?;
-    let out = candle_core::Tensor::zeros(
-        (heads, chunks, tile, dv),
-        candle_core::DType::F32,
-        device,
-    )?;
     out.inplace_op3(bundle, &scratch, &StateOut { tile })?;
     let out = out
         .reshape((heads, chunks * tile, dv))?
@@ -1271,6 +1286,107 @@ fn rule_over_bundle(
         .transpose(0, 1)?
         .contiguous()?;
     Ok((out, carried))
+}
+
+/// PrefillScratchReuse: the six per-layer-call prefill tensors for
+/// ONE standing chunk shape, allocated once and shared by every GDN
+/// layer (they run sequentially; Rc single-thread by the same
+/// contract as the graph cache). Only FULL spans reuse
+/// (t == chunks * tile): there every cell of every tensor is
+/// rewritten each pass - PrepChunk covers q/k/g/beta and v_beta,
+/// PackPairs the w/u cells, TriSolve/PrepKbg/StateStage/StateOut
+/// their whole outputs - so reuse is value-identical to fresh zeros
+/// by construction, and no re-zeroing exists at all. Ragged and
+/// small spans keep per-call allocation (the pad-row discipline
+/// stays the allocator's). A shape change (a different chunks/tile)
+/// reallocates the set; prefill tensors are never graph-captured,
+/// so the replaced set frees legally.
+pub(crate) struct PrefillScratch {
+    shape: ScratchShape,
+    bundle: candle_core::Tensor,
+    v_beta: candle_core::Tensor,
+    kbg: candle_core::Tensor,
+    attn: candle_core::Tensor,
+    scratch: candle_core::Tensor,
+    out: candle_core::Tensor,
+}
+
+/// One standing pool geometry (the full-span shape a checkout
+/// serves).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ScratchShape {
+    heads: usize,
+    chunks: usize,
+    tile: usize,
+    dk: usize,
+    dv: usize,
+}
+
+/// The checked-out pooled set: bundle, v_beta, kbg, attn, scratch,
+/// out (clones sharing the pool's storage).
+type PooledSet = (
+    candle_core::Tensor,
+    candle_core::Tensor,
+    candle_core::Tensor,
+    candle_core::Tensor,
+    candle_core::Tensor,
+    candle_core::Tensor,
+);
+
+pub(crate) type SharedPrefillScratch =
+    std::rc::Rc<std::cell::RefCell<Option<PrefillScratch>>>;
+
+impl PrefillScratch {
+    fn allocate(shape: ScratchShape, device: &candle_core::Device) -> LibQuestResult<Self> {
+        let ScratchShape { heads, chunks, tile, dk, dv } = shape;
+        let zeros = |dims: (usize, usize, usize, usize)| {
+            candle_core::Tensor::zeros(dims, candle_core::DType::F32, device)
+        };
+        Ok(Self {
+            shape,
+            bundle: zeros((heads, chunks, tile, BUNDLE_CELLS))?,
+            v_beta: zeros((heads, chunks, tile, dv))?,
+            kbg: zeros((heads, chunks, tile, dk))?,
+            attn: candle_core::Tensor::zeros(
+                (heads * chunks, tile, tile),
+                candle_core::DType::F32,
+                device,
+            )?,
+            scratch: zeros((heads, chunks, dk + tile, dv))?,
+            out: zeros((heads, chunks, tile, dv))?,
+        })
+    }
+
+    /// The pooled set for a FULL span, (re)allocated on a shape
+    /// change; None for any span the pool does not serve. The clones
+    /// share storage (the kernels write in place), so no RefCell
+    /// borrow outlives this call.
+    fn checkout(
+        pool: Option<&SharedPrefillScratch>,
+        shape: ScratchShape,
+        t: usize,
+        device: &candle_core::Device,
+    ) -> LibQuestResult<Option<PooledSet>> {
+        let Some(shared) = pool else {
+            return Ok(None);
+        };
+        if t != shape.chunks * shape.tile {
+            return Ok(None);
+        }
+        let mut slot = shared.borrow_mut();
+        if slot.as_ref().is_none_or(|held| held.shape != shape) {
+            *slot = Some(Self::allocate(shape, device)?);
+        }
+        let held = slot.as_ref().expect("just ensured");
+        Ok(Some((
+            held.bundle.clone(),
+            held.v_beta.clone(),
+            held.kbg.clone(),
+            held.attn.clone(),
+            held.scratch.clone(),
+            held.out.clone(),
+        )))
+    }
 }
 
 /// The PrepFusion pipeline's tensor operands: conv_in [t, 2*key +
@@ -1296,6 +1412,7 @@ pub(crate) fn prep_chunk_rule(
     parts: PrepInputs<'_>,
     q_scale: f64,
     allow_neg_eigval: bool,
+    pool: Option<&SharedPrefillScratch>,
 ) -> LibQuestResult<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
     let PrepInputs {
         conv_in,
@@ -1325,16 +1442,30 @@ pub(crate) fn prep_chunk_rule(
     let token_rows = candle_core::Tensor::cat(&[conv_in, a_rows, b_rows], 1)?;
     let dyn_rows = candle_core::Tensor::cat(&[static_rows, &tail_rows, &token_rows], 0)?;
 
-    let bundle = candle_core::Tensor::zeros(
-        (heads, chunks, tile, BUNDLE_CELLS),
-        candle_core::DType::F32,
+    let pooled_set = PrefillScratch::checkout(
+        pool,
+        ScratchShape { heads, chunks, tile, dk, dv },
+        t,
         device,
     )?;
-    let v_beta = candle_core::Tensor::zeros(
-        (heads, chunks, tile, dv),
-        candle_core::DType::F32,
-        device,
-    )?;
+    let (bundle, v_beta, pooled_rest) = match pooled_set {
+        Some((bundle, v_beta, kbg, attn, scratch, out)) => {
+            (bundle, v_beta, Some((kbg, attn, scratch, out)))
+        }
+        None => (
+            candle_core::Tensor::zeros(
+                (heads, chunks, tile, BUNDLE_CELLS),
+                candle_core::DType::F32,
+                device,
+            )?,
+            candle_core::Tensor::zeros(
+                (heads, chunks, tile, dv),
+                candle_core::DType::F32,
+                device,
+            )?,
+            None,
+        ),
+    };
     bundle.inplace_op3(&dyn_rows, &v_beta, &PrepChunk {
         tokens: t,
         q_scale: q_scale as f32,
@@ -1342,7 +1473,7 @@ pub(crate) fn prep_chunk_rule(
         tile,
     })?;
 
-    let (out, carried) = rule_over_bundle(&bundle, &v_beta, state, t)?;
+    let (out, carried) = rule_over_bundle(&bundle, &v_beta, state, t, pooled_rest)?;
     // The new tail: the last kernel-1 rows of [tail; tokens] - dyn
     // rows [4 + t, 7 + t), conv columns only (classic-exact: the
     // same bf16 round-trip conv_with_tail's history takes).
@@ -1408,5 +1539,5 @@ pub(crate) fn rule_from_parts(
     bundle.slice_set(&beta_r.unsqueeze(3)?.contiguous()?, 3, CELL_B)?;
     let v_beta = v_r.broadcast_mul(&beta_r.unsqueeze(3)?)?.contiguous()?;
 
-    rule_over_bundle(&bundle, &v_beta, state, t)
+    rule_over_bundle(&bundle, &v_beta, state, t, None)
 }
