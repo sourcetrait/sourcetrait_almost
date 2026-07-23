@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_bquest_two"
-version = "0.0.0-7"
+version = "0.0.0-8"
 edition = "2024"
 description = "bquest: the training, development, and testing tool"
 authors = ["SourceTrait <development@sourcetrait.com>"]
@@ -15,6 +15,9 @@ name = "bquest"
 path = "src/main.rs"
 
 [features]
+# The burn oracle's fast grade (comparison-grade bf16; autotune per
+# the era-one oracle posture - training builds will gate it off).
+burn-cuda = ["burn/cuda", "burn/autotune"]
 cuda = ["sourcetrait_lib_quest_two/cuda"]
 flash-attn = ["cuda", "sourcetrait_lib_quest_two/flash-attn"]
 
@@ -22,7 +25,9 @@ flash-attn = ["cuda", "sourcetrait_lib_quest_two/flash-attn"]
 burn.workspace = true
 candle-core.workspace = true
 clap.workspace = true
+half.workspace = true
 regex.workspace = true
+safetensors.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

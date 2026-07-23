@@ -4,6 +4,8 @@ pub(crate) mod cli;
 pub(crate) mod convert;
 pub(crate) mod doc;
 pub(crate) mod error;
+pub(crate) mod hybrid;
+pub(crate) mod hybrid_load;
 pub(crate) mod ifeval;
 pub(crate) mod punkt;
 pub(crate) mod pytext;
@@ -29,6 +31,26 @@ pub(crate) use std::{
 };
 
 pub(crate) use sourcetrait_lib_quest_two as lib;
+
+/// Reference backend for the burn hybrid oracle: deterministic host
+/// f32, isolated from the CUDA stack under test.
+#[allow(dead_code)]
+pub(crate) type CpuBack = burn::backend::NdArray<f32>;
+/// Fast-oracle backend (comparison-grade bf16: burn carries one
+/// float element type per backend, so the recurrence runs bf16 too).
+#[cfg(feature = "burn-cuda")]
+#[allow(dead_code)]
+pub(crate) type CudaBack = burn::backend::Cuda<burn::tensor::bf16>;
+
+#[allow(unused_imports)]
+pub(crate) use crate::hybrid::HybridModel;
+#[allow(unused_imports)]
+pub(crate) use crate::hybrid_load::{
+    HybridCheckpointConfig,
+    HybridWeights,
+    dump_read_f32_matrix,
+    dump_read_u32,
+};
 
 pub(crate) use crate::capability::{
     CAPABILITY_HOME_RELATIVE,
@@ -113,6 +135,7 @@ pub(crate) use crate::error::{
 mod tests {
     mod convert;
     mod doc;
+    mod hybrid;
     mod score;
     mod speculate;
 }
