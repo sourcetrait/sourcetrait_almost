@@ -438,6 +438,11 @@ impl AttnLayer {
             return self.attend_flash(q, k, v);
         }
         let seq_len = q.dim(1)?;
+        snafu::ensure_whatever!(
+            seq_len == 1 || mask.is_some(),
+            "eager multi-token attention without a mask (the flash dispatch is the only \
+             mask-free prefill; a FlashMaskSkip leak must never attend full-visibility)"
+        );
         let dtype = q.dtype();
         let mut scores = (q.matmul(&k.transpose(1, 2)?)? * (self.head_dim as f64).powf(-0.5))?;
         if let Some(mask) = mask {
@@ -466,6 +471,11 @@ impl AttnLayer {
         mask: Option<&candle_core::Tensor>,
     ) -> LibQuestResult<candle_core::Tensor> {
         let seq_len = q.dim(1)?;
+        snafu::ensure_whatever!(
+            seq_len == 1 || mask.is_some(),
+            "profiled multi-token attention without a mask (the profile arm keeps the \
+             mask build on - a skip reaching here is a FlashMaskSkip leak)"
+        );
         let width = k.dim(1)?;
         let past = width - seq_len;
         let dtype = q.dtype();

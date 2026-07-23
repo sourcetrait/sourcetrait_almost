@@ -141,7 +141,7 @@ impl OlmoHybrid {
     ) -> LibQuestResult<candle_core::Tensor> {
         let seq_len = input_ids.dim(0)?;
         let mut hidden = self.embed_tokens.index_select(input_ids, 0)?;
-        let mask = if seq_len > 1 {
+        let mask = if seq_len > 1 && self.needs_prefill_mask() {
             Some(offset_causal_mask(
                 seq_len,
                 self.context_len,
@@ -160,6 +160,35 @@ impl OlmoHybrid {
         self.context_len += seq_len;
         self.contain_parked_grows();
         Ok(hidden)
+    }
+
+    /// FlashMaskSkip: whether a multi-token carried chunk needs the
+    /// additive mask tensor. The flash prefill dispatch takes
+    /// causality as a kernel parameter and never reads the tensor,
+    /// so an all-flash forward skips the host-side mask build (~2 GB
+    /// of fills, uploads, and casts across a 32K prefill). Eager
+    /// grades (cpu, f32, feature-off, flash disarmed) and a
+    /// profile-armed pass keep it; the eager path hard-errors on a
+    /// missing multi-token mask rather than attending
+    /// full-visibility.
+    fn needs_prefill_mask(&self) -> bool {
+        #[cfg(feature = "attn-profile")]
+        {
+            let profiled = self.layers.iter().any(|layer| {
+                matches!(layer, Layer::Attn(attn) if attn.profile.borrow().is_some())
+            });
+            if profiled {
+                return true;
+            }
+        }
+        let flash_covers = cfg!(feature = "flash-attn")
+            && self.settings.use_flash_attn
+            && self.device().is_cuda()
+            && matches!(
+                self.embed_tokens.dtype(),
+                candle_core::DType::BF16 | candle_core::DType::F16
+            );
+        !flash_covers
     }
 
     /// One CARRIED forward over the next chunk of the context: [t] u32
