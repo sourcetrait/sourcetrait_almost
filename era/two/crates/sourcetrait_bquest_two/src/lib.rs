@@ -7,6 +7,7 @@ pub(crate) mod error;
 pub(crate) mod hybrid;
 pub(crate) mod hybrid_load;
 pub(crate) mod ifeval;
+pub(crate) mod mix;
 pub(crate) mod punkt;
 pub(crate) mod pytext;
 pub mod run;
@@ -67,11 +68,14 @@ pub(crate) use crate::cli::{
     Cli,
     Command,
     DocCommand,
+    MixCommand,
+    MixRenderArgs,
     SpeculateCommand,
     SpeculateRecordArgs,
     SpeculateSimulateArgs,
     SpeculateTokensArgs,
 };
+pub(crate) use crate::mix::mix_render;
 pub(crate) use crate::doc::doc_cli;
 #[allow(unused_imports)]
 pub(crate) use crate::convert::{
@@ -136,6 +140,7 @@ mod tests {
     mod convert;
     mod doc;
     mod hybrid;
+    mod mix;
     mod score;
     mod speculate;
 }

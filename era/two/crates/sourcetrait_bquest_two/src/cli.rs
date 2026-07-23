@@ -34,12 +34,40 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: DocCommand,
     },
+    /// The training-mix pipeline (corpus trees -> documents ->
+    /// packed chunks).
+    Mix {
+        #[command(subcommand)]
+        command: MixCommand,
+    },
     /// The Speculation:DepthProbe instrument (recorded greedy streams
     /// + the offline policy/cost-model simulator).
     Speculate {
         #[command(subcommand)]
         command: SpeculateCommand,
     },
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub(crate) enum MixCommand {
+    /// Render corpus trees into dolma-field document tables (one
+    /// file per document, verbatim text, identity in metadata).
+    Render(MixRenderArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct MixRenderArgs {
+    /// The render spec (.nuon table: name / corpus_dir / repo /
+    /// license / kind per corpus tree).
+    #[arg(long)]
+    pub(crate) spec: PathBuf,
+    /// Output directory (documents_<name>.nuon lands per spec row).
+    #[arg(long)]
+    pub(crate) out: PathBuf,
+    /// Verbatim added/created stamp carried into every document
+    /// (deterministic; absent = empty).
+    #[arg(long)]
+    pub(crate) stamp: Option<String>,
 }
 
 #[derive(Debug, clap::Subcommand)]

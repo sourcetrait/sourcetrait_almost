@@ -12,6 +12,9 @@ pub fn run() {
         Command::Doc { command } => match command {
             DocCommand::Cli => doc_cli(),
         },
+        Command::Mix { command } => match command {
+            MixCommand::Render(args) => mix_render(args),
+        },
         Command::Speculate { command } => match command {
             SpeculateCommand::Record(args) => speculate_record(&cli, args),
             SpeculateCommand::Simulate(args) => speculate_simulate(args),
