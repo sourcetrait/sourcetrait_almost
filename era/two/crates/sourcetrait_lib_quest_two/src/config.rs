@@ -288,20 +288,27 @@ pub struct LibConfigToml {
     pub model: Option<String>,
     pub models_dir: Option<String>,
     pub snapshots_dir: Option<String>,
+    pub adapters_dir: Option<String>,
+    pub adapter: Option<String>,
 }
 
 /// The lib component's GENERAL OPERATION - the stable choices: the
 /// checkpoint as an author-qualified coordinate (`author/name`,
 /// joined beneath models_dir), where models live (models_dir defaults
-/// to the XDG data-home models root), and where snapshots live
+/// to the XDG data-home models root), where snapshots live
 /// (snapshots_dir defaults to the XDG cache-home snapshots root -
-/// snapshots are regenerable). Nuance and tweaks (flash, graphs, the
-/// generation posture) are LibSettings.
+/// snapshots are regenerable), and the optional ADAPTER (a trained
+/// artifact token under adapters_dir, the snapshot-token tiers;
+/// None = the plain base load, bit-exact by omission - AdapterLoad).
+/// Nuance and tweaks (flash, graphs, the generation posture) are
+/// LibSettings.
 #[derive(Debug, Clone)]
 pub struct LibConfig {
     pub model: String,
     pub models_dir: PathBuf,
     pub snapshots_dir: PathBuf,
+    pub adapters_dir: PathBuf,
+    pub adapter: Option<String>,
 }
 
 impl TryFrom<LibConfigToml> for LibConfig {
@@ -315,6 +322,9 @@ impl TryFrom<LibConfigToml> for LibConfig {
         let Some(snapshots_dir_raw) = user.snapshots_dir.or(base.snapshots_dir) else {
             snafu::whatever!("the embedded defaults carry no snapshots_dir");
         };
+        let Some(adapters_dir_raw) = user.adapters_dir.or(base.adapters_dir) else {
+            snafu::whatever!("the embedded defaults carry no adapters_dir");
+        };
         let Some(model) = user.model.or(base.model) else {
             snafu::whatever!("the embedded defaults carry no model coordinate");
         };
@@ -322,6 +332,8 @@ impl TryFrom<LibConfigToml> for LibConfig {
             model,
             models_dir: expand_path(&models_dir_raw)?,
             snapshots_dir: expand_path(&snapshots_dir_raw)?,
+            adapters_dir: expand_path(&adapters_dir_raw)?,
+            adapter: user.adapter,
         })
     }
 }

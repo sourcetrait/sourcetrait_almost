@@ -1,3 +1,4 @@
+pub(crate) mod adapter;
 pub(crate) mod chat;
 pub(crate) mod checkpoint;
 pub(crate) mod config;
@@ -77,6 +78,10 @@ pub(crate) mod r {
     }
 }
 
+pub use crate::adapter::{
+    adapter_path,
+    load_weights,
+};
 pub use crate::chat::{
     chat_continue,
     chat_wrap,
@@ -148,6 +153,7 @@ pub use crate::tokenizer::{
 
 #[cfg(test)]
 mod tests {
+    mod adapter;
     mod chat;
     mod checkpoint;
     mod config;

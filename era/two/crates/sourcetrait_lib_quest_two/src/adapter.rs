@@ -1,0 +1,363 @@
+//! AdapterLoad: engine-side adapter consumption. A trained adapter
+//! safetensors (the bquest train cpt artifact) merges into the
+//! RESIDENT weights at load - zero decode-path change; adapter-off
+//! is a plain load, bit-exact by omission. Placement validates
+//! against the direction-3 rule at load time: only the readout
+//! surface (GDN q_proj / q_conv1d / g_proj / o_proj, attn q/o, MLP
+//! gate/up/down) may carry a delta; a state-carrying target is a
+//! hard error. The merge rides the VarBuilder seam: a wrapping
+//! backend patches each unfused checkpoint tensor as the model's
+//! constructors get() it (base -> f32 -> + delta -> model dtype),
+//! so the fused-projection cats downstream see merged rows with no
+//! constructor changes anywhere.
+use crate::*;
+
+/// The adapter artifact format version (metadata "version").
+const ADAPTER_VERSION: &str = "1";
+
+/// The three-tier adapter token resolution (the snapshot-token
+/// pattern): a pure snake resolves to <adapters_dir>/<snake>
+/// .safetensors; a bare relative path resolves relative to the
+/// adapters dir; anything else is a normal path with `~`/`$VAR`
+/// expansion.
+pub fn adapter_path(adapters_dir: &Path, token: &str) -> LibQuestResult<PathBuf> {
+    if config::is_profile_name(Path::new(token)) {
+        return Ok(adapters_dir.join(format!("{token}.safetensors")));
+    }
+    if !(token.starts_with('/')
+        || token.starts_with("./")
+        || token.starts_with("../")
+        || token.starts_with('~')
+        || token.starts_with('$'))
+    {
+        return Ok(adapters_dir.join(token));
+    }
+    config::expand_path(token)
+}
+
+/// One target weight's delta: a low-rank pair over the TRANSPOSED
+/// weight (delta for W = (a.b * scale) transposed) or the dense
+/// conv-delta tensor, held f32 on the target device and materialized
+/// per get().
+#[derive(Debug)]
+pub(crate) enum AdapterDelta {
+    LowRank {
+        a: candle_core::Tensor,
+        b: candle_core::Tensor,
+        scale: f64,
+    },
+    Dense {
+        delta: candle_core::Tensor,
+    },
+}
+
+impl AdapterDelta {
+    /// The dense f32 delta in the checkpoint weight's own layout.
+    fn materialize(&self) -> candle_core::Result<candle_core::Tensor> {
+        match self {
+            AdapterDelta::LowRank { a, b, scale } => {
+                (a.matmul(b)? * *scale)?.t()?.contiguous()
+            }
+            AdapterDelta::Dense { delta } => Ok(delta.clone()),
+        }
+    }
+
+    /// The checkpoint shape this delta expects ([out, in] for a
+    /// pair; the conv's own dims for a dense delta).
+    fn expected_shape(&self) -> Vec<usize> {
+        match self {
+            AdapterDelta::LowRank { a, b, .. } => {
+                vec![b.dims()[1], a.dims()[0]]
+            }
+            AdapterDelta::Dense { delta } => delta.dims().to_vec(),
+        }
+    }
+}
+
+/// The direction-3 surface check: an adapter tensor name maps to its
+/// checkpoint weight name, or errors for anything off the sanctioned
+/// readout surface (state-carrying weights never adapt).
+fn target_weight_name(delta_name: &str) -> LibQuestResult<(String, &'static str)> {
+    let Some(rest) = delta_name.strip_prefix("model.layers.") else {
+        snafu::whatever!("adapter tensor {delta_name} is outside model.layers");
+    };
+    let mut segments = rest.split('.');
+    let Some(index) = segments.next().filter(|s| s.parse::<usize>().is_ok()) else {
+        snafu::whatever!("adapter tensor {delta_name} carries no layer index");
+    };
+    let module = segments.next().unwrap_or_default();
+    let target = segments.next().unwrap_or_default();
+    let kind = segments.next().unwrap_or_default();
+    snafu::ensure_whatever!(
+        segments.next().is_none(),
+        "adapter tensor {delta_name} has trailing segments"
+    );
+    let sanctioned = matches!(
+        (module, target),
+        ("linear_attn", "q_proj" | "g_proj" | "o_proj")
+            | ("self_attn", "q_proj" | "o_proj")
+            | ("mlp", "gate_proj" | "up_proj" | "down_proj")
+    );
+    let conv = (module, target) == ("linear_attn", "q_conv1d");
+    match kind {
+        "lora_a" | "lora_b" if sanctioned => Ok((
+            format!("model.layers.{index}.{module}.{target}.weight"),
+            kind_str(kind),
+        )),
+        "delta" if conv => Ok((
+            format!("model.layers.{index}.{module}.{target}.weight"),
+            "delta",
+        )),
+        _ => snafu::whatever!(
+            "adapter tensor {delta_name} targets outside the direction-3 surface \
+             (state-carrying weights never adapt)"
+        ),
+    }
+}
+
+fn kind_str(kind: &str) -> &'static str {
+    match kind {
+        "lora_a" => "lora_a",
+        _ => "lora_b",
+    }
+}
+
+/// A parsed, placement-validated adapter file: deltas keyed by the
+/// checkpoint weight names they merge into.
+#[derive(Debug)]
+pub(crate) struct AdapterFile {
+    pub(crate) deltas: HashMap<String, AdapterDelta>,
+}
+
+/// Read a rank-checked f32 tensor from the adapter file onto the
+/// target device.
+fn adapter_tensor(
+    view: &safetensors::tensor::TensorView,
+    name: &str,
+    device: &candle_core::Device,
+) -> LibQuestResult<candle_core::Tensor> {
+    snafu::ensure_whatever!(
+        view.dtype() == safetensors::Dtype::F32,
+        "adapter tensor {name}: expected f32, got {:?}",
+        view.dtype()
+    );
+    let values: Vec<f32> = view
+        .data()
+        .chunks_exact(4)
+        .map(|quad| f32::from_le_bytes([quad[0], quad[1], quad[2], quad[3]]))
+        .collect();
+    Ok(candle_core::Tensor::from_vec(
+        values,
+        view.shape().to_vec(),
+        device,
+    )?)
+}
+
+impl AdapterFile {
+    /// Parse + validate an adapter artifact: format version, model
+    /// identity, direction-3 placement, pair completeness, and rank
+    /// consistency; tensors land f32 on the target device.
+    pub(crate) fn load(
+        path: &Path,
+        expected_model_id: &str,
+        device: &candle_core::Device,
+    ) -> LibQuestResult<Self> {
+        let bytes = fs::read(path)?;
+        let (_, header) = match safetensors::SafeTensors::read_metadata(&bytes) {
+            Ok(header) => header,
+            Err(e) => snafu::whatever!("adapter {} header parse failed: {e}", path.display()),
+        };
+        let Some(metadata) = header.metadata().as_ref() else {
+            snafu::whatever!("adapter {} carries no metadata", path.display());
+        };
+        snafu::ensure_whatever!(
+            metadata.get("version").map(String::as_str) == Some(ADAPTER_VERSION),
+            "adapter {} version {:?} is not {ADAPTER_VERSION}",
+            path.display(),
+            metadata.get("version")
+        );
+        let model_id = metadata.get("model_id").cloned().unwrap_or_default();
+        snafu::ensure_whatever!(
+            model_id == expected_model_id,
+            "adapter {} was trained for {model_id}, not {expected_model_id}",
+            path.display()
+        );
+        let rank: usize = match metadata.get("lora_rank").and_then(|r| r.parse().ok()) {
+            Some(rank) => rank,
+            None => snafu::whatever!("adapter {} carries no lora_rank", path.display()),
+        };
+        let alpha: f64 = match metadata.get("lora_alpha").and_then(|a| a.parse().ok()) {
+            Some(alpha) => alpha,
+            None => snafu::whatever!("adapter {} carries no lora_alpha", path.display()),
+        };
+        let scale = alpha / rank as f64;
+
+        let parsed = match safetensors::SafeTensors::deserialize(&bytes) {
+            Ok(parsed) => parsed,
+            Err(e) => snafu::whatever!("adapter {} parse failed: {e}", path.display()),
+        };
+        struct Pending {
+            a: Option<candle_core::Tensor>,
+            b: Option<candle_core::Tensor>,
+            conv: Option<candle_core::Tensor>,
+        }
+        let mut pending: HashMap<String, Pending> = HashMap::new();
+        for (name, view) in parsed.tensors() {
+            let (weight_name, kind) = target_weight_name(&name)?;
+            let tensor = adapter_tensor(&view, &name, device)?;
+            let entry = pending.entry(weight_name).or_insert(Pending {
+                a: None,
+                b: None,
+                conv: None,
+            });
+            match kind {
+                "lora_a" => {
+                    snafu::ensure_whatever!(
+                        tensor.dims().len() == 2 && tensor.dims()[1] == rank,
+                        "adapter tensor {name}: lora_a must be [in, rank {rank}]"
+                    );
+                    entry.a = Some(tensor);
+                }
+                "lora_b" => {
+                    snafu::ensure_whatever!(
+                        tensor.dims().len() == 2 && tensor.dims()[0] == rank,
+                        "adapter tensor {name}: lora_b must be [rank {rank}, out]"
+                    );
+                    entry.b = Some(tensor);
+                }
+                _ => {
+                    snafu::ensure_whatever!(
+                        tensor.dims().len() == 3,
+                        "adapter tensor {name}: conv delta must be rank 3"
+                    );
+                    entry.conv = Some(tensor);
+                }
+            }
+        }
+
+        let mut deltas = HashMap::new();
+        for (weight_name, entry) in pending {
+            let delta = match (entry.a, entry.b, entry.conv) {
+                (Some(a), Some(b), None) => AdapterDelta::LowRank { a, b, scale },
+                (None, None, Some(delta)) => AdapterDelta::Dense { delta },
+                _ => snafu::whatever!(
+                    "adapter target {weight_name} is incomplete (needs lora_a + lora_b, \
+                     or one conv delta)"
+                ),
+            };
+            deltas.insert(weight_name, delta);
+        }
+        snafu::ensure_whatever!(!deltas.is_empty(), "adapter {} is empty", path.display());
+        Ok(Self { deltas })
+    }
+
+    /// Every delta target must exist in the checkpoint header at the
+    /// delta's expected shape (the wrong-model geometry guard).
+    pub(crate) fn validate_geometry(
+        &self,
+        inventory: &[TensorInfo],
+    ) -> LibQuestResult<()> {
+        let shapes: HashMap<&str, &Vec<usize>> = inventory
+            .iter()
+            .map(|info| (info.name.as_str(), &info.shape))
+            .collect();
+        for (weight_name, delta) in &self.deltas {
+            let Some(shape) = shapes.get(weight_name.as_str()) else {
+                snafu::whatever!("adapter target {weight_name} is not in the checkpoint");
+            };
+            let expected = delta.expected_shape();
+            snafu::ensure_whatever!(
+                **shape == expected,
+                "adapter target {weight_name}: checkpoint shape {shape:?} vs delta {expected:?}"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// The merging VarBuilder backend: every get() serves the mmaped
+/// checkpoint tensor, plus-delta where the adapter carries one (f32
+/// merge, one cast back to the requested dtype).
+struct DeltaBackend {
+    inner: candle_core::safetensors::MmapedSafetensors,
+    deltas: HashMap<String, AdapterDelta>,
+}
+
+impl DeltaBackend {
+    fn apply(
+        &self,
+        base: candle_core::Tensor,
+        name: &str,
+        dtype: candle_core::DType,
+    ) -> candle_core::Result<candle_core::Tensor> {
+        let Some(delta) = self.deltas.get(name) else {
+            return Ok(base);
+        };
+        let merged = (base.to_dtype(candle_core::DType::F32)? + delta.materialize()?)?;
+        merged.to_dtype(dtype)
+    }
+}
+
+impl candle_nn::var_builder::SimpleBackend for DeltaBackend {
+    fn get(
+        &self,
+        s: candle_core::Shape,
+        name: &str,
+        h: candle_nn::Init,
+        dtype: candle_core::DType,
+        dev: &candle_core::Device,
+    ) -> candle_core::Result<candle_core::Tensor> {
+        let base =
+            candle_nn::var_builder::SimpleBackend::get(&self.inner, s, name, h, dtype, dev)?;
+        self.apply(base, name, dtype)
+    }
+
+    fn get_unchecked(
+        &self,
+        name: &str,
+        dtype: candle_core::DType,
+        dev: &candle_core::Device,
+    ) -> candle_core::Result<candle_core::Tensor> {
+        let base = candle_nn::var_builder::SimpleBackend::get_unchecked(
+            &self.inner,
+            name,
+            dtype,
+            dev,
+        )?;
+        self.apply(base, name, dtype)
+    }
+
+    fn contains_tensor(&self, name: &str) -> bool {
+        self.inner.contains_tensor(name)
+    }
+}
+
+/// The adapter-aware weight loader: resolve the config's adapter
+/// token (None = the plain mmap path, byte-identical to
+/// mmap_weights), validate the artifact against the model identity
+/// and checkpoint geometry, and hand back a VarBuilder whose get()s
+/// serve merged weights.
+pub fn load_weights(
+    config: &LibConfig,
+    dtype: candle_core::DType,
+    device: &candle_core::Device,
+) -> LibQuestResult<candle_nn::VarBuilder<'static>> {
+    let model_dir = config.model_dir();
+    let Some(token) = &config.adapter else {
+        return mmap_weights(&model_dir, dtype, device);
+    };
+    let path = adapter_path(&config.adapters_dir, token)?;
+    let file = AdapterFile::load(&path, &config.model, device)?;
+    file.validate_geometry(&tensor_inventory(&model_dir)?)?;
+    let shard = model_dir.join("model.safetensors");
+    let inner = unsafe { candle_core::safetensors::MmapedSafetensors::new(&shard)? };
+    let backend = DeltaBackend {
+        inner,
+        deltas: file.deltas,
+    };
+    Ok(candle_nn::VarBuilder::from_backend(
+        Box::new(backend),
+        dtype,
+        device.clone(),
+    ))
+}

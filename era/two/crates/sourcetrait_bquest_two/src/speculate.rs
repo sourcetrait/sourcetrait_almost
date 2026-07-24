@@ -98,7 +98,7 @@ pub(crate) fn speculate_record(cli: &Cli, args: &SpeculateRecordArgs) -> BquestR
     let checkpoint = lib::load_config(&model_dir)?;
     let tokenizer = lib::load_tokenizer(&model_dir)?;
     lib::verify_token_map(&tokenizer)?;
-    let weights = lib::mmap_weights(&model_dir, dtype, &device)?;
+    let weights = lib::load_weights(&config, dtype, &device)?;
     let mut model = lib::OlmoHybrid::new(&checkpoint, settings, weights)?;
     eprintln!(
         "speculate record: model {} loaded ({:.1}s, {device_label})",
