@@ -114,6 +114,28 @@ pub(crate) enum MixCommand {
     /// Render corpus trees into dolma-field document tables (one
     /// file per document, verbatim text, identity in metadata).
     Render(MixRenderArgs),
+    /// Sample documents from tables (one seeded shuffle across the
+    /// union) until a text-byte budget is crossed - the admixture
+    /// leg sampler.
+    Sample(MixSampleArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct MixSampleArgs {
+    /// documents_<name>.nuon tables; rows sample across the union.
+    #[arg(long, required = true, num_args = 1..)]
+    pub(crate) documents: Vec<PathBuf>,
+    /// The sampled documents table (.nuon; a provenance sidecar
+    /// lands beside it).
+    #[arg(long)]
+    pub(crate) out: PathBuf,
+    /// Stop once cumulative text bytes cross this budget (the last
+    /// document overshoots; the overshoot is reported).
+    #[arg(long)]
+    pub(crate) budget_bytes: usize,
+    /// The deterministic sample seed.
+    #[arg(long, default_value_t = 299_792_458)]
+    pub(crate) seed: u64,
 }
 
 #[derive(Debug, clap::Args)]

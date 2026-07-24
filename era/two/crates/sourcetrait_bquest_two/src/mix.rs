@@ -377,6 +377,89 @@ pub(crate) fn mix_pack(cli: &Cli, args: &MixPackArgs) -> BquestResult<()> {
     Ok(())
 }
 
+/// `bquest mix sample`: document tables -> one sampled table. One
+/// seeded Fisher-Yates shuffle across the UNION of all input rows,
+/// taken in shuffled order until the text-byte budget is crossed
+/// (the final document overshoots; the overshoot is visible in the
+/// reported text_bytes). The admixture-leg sampler: deterministic
+/// per seed, provenance beside the artifact.
+pub(crate) fn mix_sample(args: &MixSampleArgs) -> BquestResult<()> {
+    let started = std::time::Instant::now();
+    let document_type = lib::nu::parse_typedef(MIX_DOCUMENT_TYPEDEF)?;
+    let mut rows: Vec<lib::nu::Value> = Vec::new();
+    for path in &args.documents {
+        let table = lib::nu::load_value(path)?;
+        let list = match table.as_list() {
+            Ok(list) => list,
+            Err(e) => snafu::whatever!("{}: not a document table: {e}", path.display()),
+        };
+        for row in list {
+            lib::nu::conform(row, &document_type)?;
+            rows.push(row.clone());
+        }
+    }
+    snafu::ensure_whatever!(!rows.is_empty(), "no documents to sample");
+
+    let mut rng = SplitMix64::new(args.seed);
+    for index in (1..rows.len()).rev() {
+        let swap_with = rng.next_below(index + 1);
+        rows.swap(index, swap_with);
+    }
+
+    let total_available = rows.len();
+    let mut taken: Vec<lib::nu::Value> = Vec::new();
+    let mut text_bytes = 0usize;
+    for row in rows {
+        if text_bytes >= args.budget_bytes {
+            break;
+        }
+        let row_bytes = row
+            .as_record()
+            .ok()
+            .and_then(|record| record.get("text"))
+            .and_then(|text| text.as_str().ok())
+            .map(str::len)
+            .unwrap_or(0);
+        text_bytes += row_bytes;
+        taken.push(row);
+    }
+    let document_count = taken.len();
+    lib::nu::save_value(&args.out, &lib::nu::Value::list(taken, span()))?;
+
+    let provenance = lib::nu::Value::record(
+        lib::nu::record! {
+            "documents" => lib::nu::Value::list(
+                args.documents
+                    .iter()
+                    .map(|p| v_str(&p.display().to_string()))
+                    .collect(),
+                span(),
+            ),
+            "budget_bytes" => v_int(args.budget_bytes as i64),
+            "seed" => v_int(args.seed as i64),
+            "documents_available" => v_int(total_available as i64),
+            "documents_taken" => v_int(document_count as i64),
+            "text_bytes" => v_int(text_bytes as i64),
+            "bquest_version" => v_str(env!("CARGO_PKG_VERSION")),
+        },
+        span(),
+    );
+    lib::nu::save_value(&args.out.with_extension("provenance.nuon"), &provenance)?;
+
+    let summary = lib::nu::Value::record(
+        lib::nu::record! {
+            "documents_taken" => v_int(document_count as i64),
+            "documents_available" => v_int(total_available as i64),
+            "text_bytes" => v_int(text_bytes as i64),
+            "out" => v_str(&args.out.display().to_string()),
+            "seconds" => v_float(started.elapsed().as_secs_f64()),
+        },
+        span(),
+    );
+    println!("{}", lib::nu::to_nuon_text(&summary)?);
+    Ok(())
+}
+
 /// `bquest mix render`: corpus trees (per the spec) -> one
 /// whole-value documents_<name>.nuon table per spec row, rows
 /// conform-validated against the document typedef before write.

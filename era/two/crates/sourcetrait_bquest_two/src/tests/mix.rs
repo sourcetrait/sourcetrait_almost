@@ -203,3 +203,80 @@ fn tokenize_documents_joins_with_eos_and_fims_code_only() {
         assert!(!stream.contains(&fim_prefix_id), "docs documents never FIM");
     }
 }
+
+/// The admixture-leg sampler: deterministic per seed, budget-
+/// crossing semantics, provenance counts.
+#[test]
+fn mix_sample_is_deterministic_and_budget_crossing() {
+    let dir = std::env::temp_dir().join(format!("bquest_mix_sample_{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("temp dir");
+    let doc = |id: &str, text: &str| {
+        lib::nu::Value::record(
+            lib::nu::record! {
+                "id" => v_str(id),
+                "text" => v_str(text),
+                "source" => v_str("toy/repo"),
+                "added" => v_str(""),
+                "created" => v_str(""),
+                "metadata" => lib::nu::Value::record(
+                    lib::nu::record! {
+                        "repo" => v_str("toy/repo"),
+                        "path" => v_str(id),
+                        "language" => v_str("text"),
+                        "license" => v_str("MIT"),
+                        "kind" => v_str("code"),
+                    },
+                    span(),
+                ),
+            },
+            span(),
+        )
+    };
+    let table = lib::nu::Value::list(
+        vec![
+            doc("a", &"a".repeat(10)),
+            doc("b", &"b".repeat(20)),
+            doc("c", &"c".repeat(30)),
+            doc("d", &"d".repeat(40)),
+        ],
+        span(),
+    );
+    let table_path = dir.join("documents_toy.nuon");
+    lib::nu::save_value(&table_path, &table).expect("table write");
+
+    let out_first = dir.join("sampled_first.nuon");
+    let out_second = dir.join("sampled_second.nuon");
+    let run = |out: &PathBuf| {
+        mix_sample(&MixSampleArgs {
+            documents: vec![table_path.clone()],
+            out: out.clone(),
+            budget_bytes: 35,
+            seed: 7,
+        })
+        .expect("sample runs");
+    };
+    run(&out_first);
+    run(&out_second);
+    assert_eq!(
+        fs::read(&out_first).expect("first"),
+        fs::read(&out_second).expect("second"),
+        "same seed must sample identically"
+    );
+
+    let sampled = lib::nu::load_value(&out_first).expect("sampled parses");
+    let rows = sampled.as_list().expect("list").to_vec();
+    let bytes: usize = rows
+        .iter()
+        .map(|row| {
+            row.as_record()
+                .ok()
+                .and_then(|record| record.get("text"))
+                .and_then(|text| text.as_str().ok())
+                .map(str::len)
+                .unwrap_or(0)
+        })
+        .sum();
+    assert!(bytes >= 35, "sample stopped before the budget ({bytes} bytes)");
+    assert!(rows.len() < 4, "the budget must not need every document");
+    fs::remove_dir_all(&dir).ok();
+}

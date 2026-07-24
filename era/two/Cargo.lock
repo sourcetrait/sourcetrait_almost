@@ -6488,7 +6488,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_bquest_two"
-version = "0.0.0-9"
+version = "0.0.0-10"
 dependencies = [
  "burn",
  "candle-core 0.11.0",

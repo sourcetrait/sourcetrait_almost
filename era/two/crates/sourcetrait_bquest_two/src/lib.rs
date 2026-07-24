@@ -96,6 +96,7 @@ pub(crate) use crate::cli::{
     MixCommand,
     MixPackArgs,
     MixRenderArgs,
+    MixSampleArgs,
     SpeculateCommand,
     SpeculateRecordArgs,
     SpeculateSimulateArgs,
@@ -108,6 +109,7 @@ pub(crate) use crate::mix::{
     SplitMix64,
     mix_pack,
     mix_render,
+    mix_sample,
 };
 pub(crate) use crate::doc::doc_cli;
 #[allow(unused_imports)]

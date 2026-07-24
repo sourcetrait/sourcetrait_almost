@@ -15,6 +15,7 @@ pub fn run() {
         Command::Mix { command } => match command {
             MixCommand::Pack(args) => mix_pack(&cli, args),
             MixCommand::Render(args) => mix_render(args),
+            MixCommand::Sample(args) => mix_sample(args),
         },
         Command::Speculate { command } => match command {
             SpeculateCommand::Record(args) => speculate_record(&cli, args),
