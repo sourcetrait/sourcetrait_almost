@@ -21,9 +21,23 @@ pub fn run() {
             SpeculateCommand::Simulate(args) => speculate_simulate(args),
             SpeculateCommand::Tokens(args) => speculate_tokens(&cli, args),
         },
+        Command::Train { command } => train_dispatch(&cli, command),
     };
     if let Err(error) = outcome {
         eprintln!("bquest: {error}");
         std::process::exit(1);
     }
+}
+
+#[cfg(feature = "train")]
+fn train_dispatch(cli: &Cli, command: &TrainCommand) -> BquestResult<()> {
+    match command {
+        TrainCommand::Gate => train_gate_verb(),
+        TrainCommand::Cpt(args) => train_cpt(cli, args),
+    }
+}
+
+#[cfg(not(feature = "train"))]
+fn train_dispatch(_cli: &Cli, _command: &TrainCommand) -> BquestResult<()> {
+    snafu::whatever!("the train verbs need a train build (--features train / train-cuda)")
 }

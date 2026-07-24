@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_bquest_two"
-version = "0.0.0-8"
+version = "0.0.0-9"
 edition = "2024"
 description = "bquest: the training, development, and testing tool"
 authors = ["SourceTrait <development@sourcetrait.com>"]
@@ -16,10 +16,16 @@ path = "src/main.rs"
 
 [features]
 # The burn oracle's fast grade (comparison-grade bf16; autotune per
-# the era-one oracle posture - training builds will gate it off).
+# the era-one oracle posture - training builds gate it off).
 burn-cuda = ["burn/cuda", "burn/autotune"]
 cuda = ["sourcetrait_lib_quest_two/cuda"]
 flash-attn = ["cuda", "sourcetrait_lib_quest_two/flash-attn"]
+# The CptLoop trainer stage (burn autodiff over the oracle stack).
+train = ["burn/autodiff"]
+# Training on cuda WITHOUT autotune - the era-one lesson: autotune's
+# benchmark churn at high residency kills the cubecl allocator;
+# default kernel selection trades speed for a bounded pool.
+train-cuda = ["train", "burn/cuda"]
 
 [dependencies]
 burn.workspace = true

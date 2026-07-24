@@ -4,13 +4,14 @@
 //! positions, implemented from the pinned checkpoint semantics
 //! (parent understood 09), deliberately not translated from the
 //! candle implementation. Generic over the backend: CpuBack (ndarray
-//! f32) is the reference grade; CudaBack (bf16) is the fast,
-//! comparison-grade oracle - burn carries ONE float element type per
-//! backend, so the bf16 grade runs the recurrence in bf16 too (the
-//! f32-state discipline holds only on the f32 grades; the parity
-//! bars account for it).
-// Consumed by the parity gates alone until the CptLoop trainer verbs
-// land on top; the allow retires with them.
+//! f32) is the reference grade; CudaBack (bf16 default float) is the
+//! fast grade. The GDN gate/norm/recurrence region computes in f32
+//! on EVERY grade (per-tensor casts; no-op at f32) - the reference
+//! stacks' f32-state discipline, which the 1024-deep training
+//! backward made mandatory rather than optional.
+// The parity gates consume the None-adapter path; the trainer stage
+// (cfg train) consumes the injected path plus the exposed structure,
+// so non-train builds still need the allow.
 #![allow(dead_code)]
 use crate::*;
 
@@ -19,58 +20,58 @@ use burn::tensor::backend::Backend;
 type FloatTensor<B, const D: usize> = burn::tensor::Tensor<B, D>;
 
 pub(crate) struct HybridModel<B: Backend> {
-    embed_rows: Vec<f32>,
-    hidden: usize,
-    layers: Vec<HybridBlock<B>>,
-    final_norm: FloatTensor<B, 1>,
-    lm_head_transposed: FloatTensor<B, 2>,
-    attn_heads: usize,
-    attn_head_dim: usize,
-    gdn_heads: usize,
-    gdn_key_dim: usize,
-    gdn_value_dim: usize,
-    eps: f64,
-    device: B::Device,
+    pub(crate) embed_rows: Vec<f32>,
+    pub(crate) hidden: usize,
+    pub(crate) layers: Vec<HybridBlock<B>>,
+    pub(crate) final_norm: FloatTensor<B, 1>,
+    pub(crate) lm_head_transposed: FloatTensor<B, 2>,
+    pub(crate) attn_heads: usize,
+    pub(crate) attn_head_dim: usize,
+    pub(crate) gdn_heads: usize,
+    pub(crate) gdn_key_dim: usize,
+    pub(crate) gdn_value_dim: usize,
+    pub(crate) eps: f64,
+    pub(crate) device: B::Device,
 }
 
-enum HybridBlock<B: Backend> {
+pub(crate) enum HybridBlock<B: Backend> {
     Gdn(GdnBlock<B>),
     Attn(AttnBlock<B>),
 }
 
-struct GdnBlock<B: Backend> {
-    input_norm: FloatTensor<B, 1>,
-    post_attention_norm: FloatTensor<B, 1>,
-    q_transposed: FloatTensor<B, 2>,
-    k_transposed: FloatTensor<B, 2>,
-    v_transposed: FloatTensor<B, 2>,
-    g_transposed: FloatTensor<B, 2>,
-    o_transposed: FloatTensor<B, 2>,
-    a_transposed: FloatTensor<B, 2>,
-    b_transposed: FloatTensor<B, 2>,
-    q_conv_taps: Vec<FloatTensor<B, 2>>,
-    k_conv_taps: Vec<FloatTensor<B, 2>>,
-    v_conv_taps: Vec<FloatTensor<B, 2>>,
-    a_log_row: FloatTensor<B, 2>,
-    dt_bias_row: FloatTensor<B, 2>,
-    o_norm: FloatTensor<B, 1>,
-    gate_transposed: FloatTensor<B, 2>,
-    up_transposed: FloatTensor<B, 2>,
-    down_transposed: FloatTensor<B, 2>,
+pub(crate) struct GdnBlock<B: Backend> {
+    pub(crate) input_norm: FloatTensor<B, 1>,
+    pub(crate) post_attention_norm: FloatTensor<B, 1>,
+    pub(crate) q_transposed: FloatTensor<B, 2>,
+    pub(crate) k_transposed: FloatTensor<B, 2>,
+    pub(crate) v_transposed: FloatTensor<B, 2>,
+    pub(crate) g_transposed: FloatTensor<B, 2>,
+    pub(crate) o_transposed: FloatTensor<B, 2>,
+    pub(crate) a_transposed: FloatTensor<B, 2>,
+    pub(crate) b_transposed: FloatTensor<B, 2>,
+    pub(crate) q_conv_taps: Vec<FloatTensor<B, 2>>,
+    pub(crate) k_conv_taps: Vec<FloatTensor<B, 2>>,
+    pub(crate) v_conv_taps: Vec<FloatTensor<B, 2>>,
+    pub(crate) a_log_row: FloatTensor<B, 2>,
+    pub(crate) dt_bias_row: FloatTensor<B, 2>,
+    pub(crate) o_norm: FloatTensor<B, 1>,
+    pub(crate) gate_transposed: FloatTensor<B, 2>,
+    pub(crate) up_transposed: FloatTensor<B, 2>,
+    pub(crate) down_transposed: FloatTensor<B, 2>,
 }
 
-struct AttnBlock<B: Backend> {
-    q_transposed: FloatTensor<B, 2>,
-    k_transposed: FloatTensor<B, 2>,
-    v_transposed: FloatTensor<B, 2>,
-    o_transposed: FloatTensor<B, 2>,
-    q_norm: FloatTensor<B, 1>,
-    k_norm: FloatTensor<B, 1>,
-    post_attention_norm: FloatTensor<B, 1>,
-    post_feedforward_norm: FloatTensor<B, 1>,
-    gate_transposed: FloatTensor<B, 2>,
-    up_transposed: FloatTensor<B, 2>,
-    down_transposed: FloatTensor<B, 2>,
+pub(crate) struct AttnBlock<B: Backend> {
+    pub(crate) q_transposed: FloatTensor<B, 2>,
+    pub(crate) k_transposed: FloatTensor<B, 2>,
+    pub(crate) v_transposed: FloatTensor<B, 2>,
+    pub(crate) o_transposed: FloatTensor<B, 2>,
+    pub(crate) q_norm: FloatTensor<B, 1>,
+    pub(crate) k_norm: FloatTensor<B, 1>,
+    pub(crate) post_attention_norm: FloatTensor<B, 1>,
+    pub(crate) post_feedforward_norm: FloatTensor<B, 1>,
+    pub(crate) gate_transposed: FloatTensor<B, 2>,
+    pub(crate) up_transposed: FloatTensor<B, 2>,
+    pub(crate) down_transposed: FloatTensor<B, 2>,
 }
 
 /// The gated output RMSNorm's eps (the fla FusedRMSNormGated default;
@@ -126,21 +127,27 @@ impl<B: Backend> HybridModel<B> {
         })
     }
 
-    /// Logits for every position as a flat row-major (n, vocab) f32
-    /// buffer (row r predicts token r+1 - the C2 dump contract).
-    pub(crate) fn forward_all(&self, ids: &[u32]) -> BquestResult<(usize, Vec<f32>)> {
+    /// Host-side embedding gather for an id sequence (the table is
+    /// frozen and host-resident).
+    pub(crate) fn embed(&self, ids: &[u32]) -> FloatTensor<B, 2> {
         let n = ids.len();
-        snafu::ensure_whatever!(n > 0, "empty id sequence");
-
         let mut gathered = Vec::with_capacity(n * self.hidden);
         for id in ids {
             let start = (*id as usize) * self.hidden;
             gathered.extend_from_slice(&self.embed_rows[start..start + self.hidden]);
         }
-        let mut x = FloatTensor::<B, 2>::from_data(
+        FloatTensor::<B, 2>::from_data(
             burn::tensor::TensorData::new(gathered, [n, self.hidden]),
             &self.device,
-        );
+        )
+    }
+
+    /// Logits for every position as a flat row-major (n, vocab) f32
+    /// buffer (row r predicts token r+1 - the C2 dump contract).
+    pub(crate) fn forward_all(&self, ids: &[u32]) -> BquestResult<(usize, Vec<f32>)> {
+        let n = ids.len();
+        snafu::ensure_whatever!(n > 0, "empty id sequence");
+        let mut x = self.embed(ids);
 
         let mask = causal_mask::<B>(n, &self.device);
         for block in &self.layers {
@@ -152,10 +159,16 @@ impl<B: Backend> HybridModel<B> {
                     self.gdn_value_dim,
                     self.eps,
                     &self.device,
+                    None,
                 ),
-                HybridBlock::Attn(block) => {
-                    block.forward(x, &mask, self.attn_heads, self.attn_head_dim, self.eps)
-                }
+                HybridBlock::Attn(block) => block.forward(
+                    x,
+                    &mask,
+                    self.attn_heads,
+                    self.attn_head_dim,
+                    self.eps,
+                    None,
+                ),
             };
         }
 
@@ -228,8 +241,12 @@ impl<B: Backend> GdnBlock<B> {
     }
 
     /// Fully PRE-norm block: x + mixer(input_norm(x)), then
-    /// h + mlp(post_attention_norm(h)).
-    fn forward(
+    /// h + mlp(post_attention_norm(h)). Adapters (when present) add
+    /// their contributions on the direction-3 readout surface only -
+    /// q/q_conv/g/o + MLP; the k/v/a/b state path never adapts - and
+    /// the None path is op-identical to the frozen oracle.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn forward(
         &self,
         x: FloatTensor<B, 2>,
         heads: usize,
@@ -237,6 +254,7 @@ impl<B: Backend> GdnBlock<B> {
         value_dim: usize,
         eps: f64,
         device: &B::Device,
+        adapters: Option<&GdnAdapters<B>>,
     ) -> FloatTensor<B, 2> {
         let n = x.dims()[0];
         let residual = x.clone();
@@ -244,22 +262,52 @@ impl<B: Backend> GdnBlock<B> {
 
         // Projections, each through its causal depthwise conv + silu
         // (the gate projection takes no conv).
-        let q = causal_conv_silu(normed.clone().matmul(self.q_transposed.clone()), &self.q_conv_taps, device);
+        let mut q_rows = normed.clone().matmul(self.q_transposed.clone());
+        if let Some(adapters) = adapters {
+            q_rows = q_rows + adapters.q.contribution(normed.clone());
+        }
+        let q = match adapters {
+            Some(adapters) => causal_conv_silu(
+                q_rows,
+                &adapters.q_conv.effective_taps(&self.q_conv_taps),
+                device,
+            ),
+            None => causal_conv_silu(q_rows, &self.q_conv_taps, device),
+        };
         let k = causal_conv_silu(normed.clone().matmul(self.k_transposed.clone()), &self.k_conv_taps, device);
         let v = causal_conv_silu(normed.clone().matmul(self.v_transposed.clone()), &self.v_conv_taps, device);
-        let gate_rows = normed.clone().matmul(self.g_transposed.clone());
+        let mut gate_rows = normed.clone().matmul(self.g_transposed.clone());
+        if let Some(adapters) = adapters {
+            gate_rows = gate_rows + adapters.g.contribution(normed.clone());
+        }
+
+        // The f32 recurrence discipline (the reference stacks upcast
+        // q/k/v/beta/g AND the state to f32 regardless of model
+        // dtype; the paper's repeated-downcast warning is the
+        // mechanism, and at bf16 the 1024-deep BACKWARD through the
+        // recurrence NaNs - live-fired): the gate math, qk norms,
+        // recurrence, and gated output norm compute in f32; the
+        // mixer output casts back for o_proj. No-op on f32 grades.
+        let compute = burn::tensor::FloatDType::F32;
+        let q = q.cast(compute);
+        let k = k.cast(compute);
+        let v = v.cast(compute);
+        let gate_rows = gate_rows.cast(compute);
 
         // Gating scalars: g = -exp(A_log) * softplus(a + dt_bias);
         // beta = 2 * sigmoid(b) (the negative-eigenvalue variant).
-        let a_rows = normed.clone().matmul(self.a_transposed.clone());
-        let b_rows = normed.matmul(self.b_transposed.clone());
+        let a_rows = normed.clone().matmul(self.a_transposed.clone()).cast(compute);
+        let b_rows = normed.matmul(self.b_transposed.clone()).cast(compute);
         let decay = self
             .a_log_row
             .clone()
+            .cast(compute)
             .exp()
             .expand([n, heads])
             .neg()
-            .mul(softplus(a_rows + self.dt_bias_row.clone().expand([n, heads])));
+            .mul(softplus(
+                a_rows + self.dt_bias_row.clone().cast(compute).expand([n, heads]),
+            ));
         let beta = burn::tensor::activation::sigmoid(b_rows).mul_scalar(2.0);
 
         // Heads: q/k (n, heads, key_dim) L2-normed, q pre-scaled;
@@ -271,7 +319,8 @@ impl<B: Backend> GdnBlock<B> {
         // The gated-delta recurrence, sequential per token (the
         // correctness grade): decay the state BEFORE the delta
         // correction.
-        let mut state = FloatTensor::<B, 3>::zeros([heads, key_dim, value_dim], device);
+        let mut state =
+            FloatTensor::<B, 3>::zeros([heads, key_dim, value_dim], device).cast(compute);
         let mut outputs: Vec<FloatTensor<B, 3>> = Vec::with_capacity(n);
         for t in 0..n {
             let q_t = q.clone().narrow(0, t, 1).reshape([heads, key_dim, 1]);
@@ -302,20 +351,33 @@ impl<B: Backend> GdnBlock<B> {
         let y = burn::tensor::Tensor::cat(outputs, 1).swap_dims(0, 1);
 
         // Gated output RMSNorm over the value-head dim (eps 1e-5),
-        // norm THEN gate; gate = silu(g_proj(x)).
-        let y = rms_norm_last(y, &self.o_norm, O_NORM_EPS);
+        // norm THEN gate; gate = silu(g_proj(x)) - all in f32, then
+        // one cast back to the projection dtype.
+        let o_norm_compute = self.o_norm.clone().cast(compute);
+        let y = rms_norm_last(y, &o_norm_compute, O_NORM_EPS);
         let gate = burn::tensor::activation::silu(gate_rows).reshape([n, heads, value_dim]);
-        let mixed = (y * gate)
+        let gated_flat = (y * gate)
             .reshape([n, heads * value_dim])
-            .matmul(self.o_transposed.clone());
+            .cast(self.o_transposed.dtype());
+        let mut mixed = gated_flat.clone().matmul(self.o_transposed.clone());
+        if let Some(adapters) = adapters {
+            mixed = mixed + adapters.o.contribution(gated_flat);
+        }
         let x = residual + mixed;
 
         let residual = x.clone();
         let normed = rms_norm(x, &self.post_attention_norm, eps);
-        let feedforward = (burn::tensor::activation::silu(
-            normed.clone().matmul(self.gate_transposed.clone()),
-        ) * normed.matmul(self.up_transposed.clone()))
-        .matmul(self.down_transposed.clone());
+        let mut gate_lin = normed.clone().matmul(self.gate_transposed.clone());
+        let mut up_lin = normed.clone().matmul(self.up_transposed.clone());
+        if let Some(adapters) = adapters {
+            gate_lin = gate_lin + adapters.gate.contribution(normed.clone());
+            up_lin = up_lin + adapters.up.contribution(normed);
+        }
+        let activated = burn::tensor::activation::silu(gate_lin) * up_lin;
+        let mut feedforward = activated.clone().matmul(self.down_transposed.clone());
+        if let Some(adapters) = adapters {
+            feedforward = feedforward + adapters.down.contribution(activated);
+        }
         residual + feedforward
     }
 }
@@ -358,20 +420,27 @@ impl<B: Backend> AttnBlock<B> {
     /// Fully POST-norm block (raw hidden into attention, no input
     /// norm): x + norm(attn(x)), then h + norm(mlp(h)). NoPE: no
     /// rotation anywhere; positions exist only in the causal mask.
-    fn forward(
+    /// Adapters (when present) ride q/o + MLP only (k/v never); the
+    /// None path is op-identical to the frozen oracle.
+    pub(crate) fn forward(
         &self,
         x: FloatTensor<B, 2>,
         mask: &FloatTensor<B, 2>,
         heads: usize,
         head_dim: usize,
         eps: f64,
+        adapters: Option<&AttnAdapters<B>>,
     ) -> FloatTensor<B, 2> {
         let n = x.dims()[0];
         let hidden = heads * head_dim;
         let residual = x.clone();
 
         // Full-projection-width q/k RMSNorm before the head reshape.
-        let q = rms_norm(x.clone().matmul(self.q_transposed.clone()), &self.q_norm, eps);
+        let mut q_rows = x.clone().matmul(self.q_transposed.clone());
+        if let Some(adapters) = adapters {
+            q_rows = q_rows + adapters.q.contribution(x.clone());
+        }
+        let q = rms_norm(q_rows, &self.q_norm, eps);
         let k = rms_norm(x.clone().matmul(self.k_transposed.clone()), &self.k_norm, eps);
         let v = x.matmul(self.v_transposed.clone());
 
@@ -383,24 +452,31 @@ impl<B: Backend> AttnBlock<B> {
         let scores = q.matmul(k.swap_dims(1, 2)).mul_scalar(scale)
             + mask.clone().unsqueeze::<3>().expand([heads, n, n]);
         let attention = burn::tensor::activation::softmax(scores, 2);
-        let context = attention
-            .matmul(v)
-            .swap_dims(0, 1)
-            .reshape([n, hidden])
-            .matmul(self.o_transposed.clone());
-        let x = residual + rms_norm(context, &self.post_attention_norm, eps);
+        let context = attention.matmul(v).swap_dims(0, 1).reshape([n, hidden]);
+        let mut projected = context.clone().matmul(self.o_transposed.clone());
+        if let Some(adapters) = adapters {
+            projected = projected + adapters.o.contribution(context);
+        }
+        let x = residual + rms_norm(projected, &self.post_attention_norm, eps);
 
         let residual = x.clone();
-        let feedforward = (burn::tensor::activation::silu(
-            x.clone().matmul(self.gate_transposed.clone()),
-        ) * x.matmul(self.up_transposed.clone()))
-        .matmul(self.down_transposed.clone());
+        let mut gate_lin = x.clone().matmul(self.gate_transposed.clone());
+        let mut up_lin = x.clone().matmul(self.up_transposed.clone());
+        if let Some(adapters) = adapters {
+            gate_lin = gate_lin + adapters.gate.contribution(x.clone());
+            up_lin = up_lin + adapters.up.contribution(x);
+        }
+        let activated = burn::tensor::activation::silu(gate_lin) * up_lin;
+        let mut feedforward = activated.clone().matmul(self.down_transposed.clone());
+        if let Some(adapters) = adapters {
+            feedforward = feedforward + adapters.down.contribution(activated);
+        }
         residual + rms_norm(feedforward, &self.post_feedforward_norm, eps)
     }
 }
 
 /// Additive 0/-inf causal mask (n, n).
-fn causal_mask<B: Backend>(n: usize, device: &B::Device) -> FloatTensor<B, 2> {
+pub(crate) fn causal_mask<B: Backend>(n: usize, device: &B::Device) -> FloatTensor<B, 2> {
     let mut values = vec![0f32; n * n];
     for query in 0..n {
         for key in (query + 1)..n {
@@ -412,7 +488,7 @@ fn causal_mask<B: Backend>(n: usize, device: &B::Device) -> FloatTensor<B, 2> {
 
 /// HF RMSNorm over the last dim of a rank-2 tensor:
 /// x * rsqrt(mean(x^2) + eps) * weight.
-fn rms_norm<B: Backend>(
+pub(crate) fn rms_norm<B: Backend>(
     x: FloatTensor<B, 2>,
     weight: &FloatTensor<B, 1>,
     eps: f64,
@@ -450,9 +526,17 @@ fn l2_norm_last<B: Backend>(x: FloatTensor<B, 3>) -> FloatTensor<B, 3> {
     x * scale
 }
 
-/// softplus(x) = ln(1 + exp(x)).
+/// softplus(x) = ln(1 + exp(x)), computed in the overflow-stable
+/// form max(x, 0) + ln(1 + exp(-|x|)). The naive form's exp(x)
+/// overflows to inf on large gating inputs: the FORWARD survives
+/// (softplus saturates, decay = exp(-inf) reads zero) but the
+/// BACKWARD computes inf/inf = NaN - the reference stacks all guard
+/// this (the fla/vllm gating kernels' softplus guard). exp(-|x|)
+/// never overflows and the gradient is sigmoid(x) everywhere.
 fn softplus<B: Backend>(x: FloatTensor<B, 2>) -> FloatTensor<B, 2> {
-    x.exp().add_scalar(1.0).log()
+    let positive_part = burn::tensor::activation::relu(x.clone());
+    let negative_magnitude = x.abs().neg();
+    positive_part + negative_magnitude.exp().add_scalar(1.0).log()
 }
 
 /// The causal depthwise conv (kernel k over time, per channel) + silu:

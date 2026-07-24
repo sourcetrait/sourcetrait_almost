@@ -63,6 +63,12 @@ pub(crate) struct HybridWeights {
 }
 
 impl HybridWeights {
+    /// Assemble from pre-built host tensors (the toy-config builders'
+    /// entry; checkpoint loads ride `load`).
+    pub(crate) fn from_tensors(tensors: HashMap<String, (Vec<usize>, Vec<f32>)>) -> Self {
+        Self { tensors }
+    }
+
     /// Read the single shard, converting bf16 payloads to f32.
     pub(crate) fn load(model_dir: &Path) -> BquestResult<Self> {
         let bytes = fs::read(model_dir.join("model.safetensors"))?;

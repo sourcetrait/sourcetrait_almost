@@ -46,6 +46,64 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: SpeculateCommand,
     },
+    /// The CptLoop trainer stage (toy gradient locks + LoRA CPT over
+    /// packed chunks).
+    Train {
+        #[command(subcommand)]
+        command: TrainCommand,
+    },
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub(crate) enum TrainCommand {
+    /// The toy-config gradient locks on cpu f32: adapter-off
+    /// exactness, chain-vs-full gradient equivalence, 60-step
+    /// descent (needs a train build).
+    Gate,
+    /// LoRA CPT over a packed-chunks artifact -> one adapter
+    /// safetensors + a NUON-lines step log (needs a train-cuda
+    /// build; the model resolves through the global -c config).
+    Cpt(TrainCptArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct TrainCptArgs {
+    /// The packed-chunks artifact (a mix pack .safetensors).
+    #[arg(long)]
+    pub(crate) chunks: PathBuf,
+    /// The adapter artifact path (.safetensors).
+    #[arg(long)]
+    pub(crate) out: PathBuf,
+    /// LoRA rank (the library-wide fixed-rank discipline decides the
+    /// production value; sweeps ride this knob).
+    #[arg(long, default_value_t = 64)]
+    pub(crate) rank: usize,
+    /// LoRA alpha; absent = 2 * rank (the era-one anchor).
+    #[arg(long)]
+    pub(crate) alpha: Option<f64>,
+    /// Peak learning rate (linear warmup then constant).
+    #[arg(long, default_value_t = 2e-4)]
+    pub(crate) learning_rate: f64,
+    /// Linear warmup steps.
+    #[arg(long, default_value_t = 10)]
+    pub(crate) warmup_steps: usize,
+    /// Optimizer steps; absent = one pass over the chunks.
+    #[arg(long)]
+    pub(crate) steps: Option<usize>,
+    /// Cross-entropy head-chunk rows (the logits never materialize
+    /// whole).
+    #[arg(long, default_value_t = 128)]
+    pub(crate) loss_chunk: usize,
+    /// Adapter-init seed (deterministic Box-Muller draws).
+    #[arg(long, default_value_t = 299_792_458)]
+    pub(crate) seed: u64,
+    /// The NUON-lines step log; absent = <out stem>_steps.nuon
+    /// beside the adapter.
+    #[arg(long)]
+    pub(crate) log: Option<PathBuf>,
+    /// stderr progress cadence (the log file gets every step).
+    #[arg(long, default_value_t = 10)]
+    pub(crate) log_every: usize,
 }
 
 #[derive(Debug, clap::Subcommand)]

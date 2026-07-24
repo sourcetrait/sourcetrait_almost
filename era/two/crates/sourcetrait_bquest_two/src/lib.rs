@@ -15,6 +15,8 @@ pub mod run;
 pub(crate) mod score;
 pub(crate) mod speculate;
 pub(crate) mod tagger;
+#[cfg(feature = "train")]
+pub(crate) mod train;
 pub(crate) mod wordtok;
 
 #[allow(unused_imports)]
@@ -38,14 +40,36 @@ pub(crate) use sourcetrait_lib_quest_two as lib;
 /// f32, isolated from the CUDA stack under test.
 #[allow(dead_code)]
 pub(crate) type CpuBack = burn::backend::NdArray<f32>;
-/// Fast-oracle backend (comparison-grade bf16: burn carries one
-/// float element type per backend, so the recurrence runs bf16 too).
-#[cfg(feature = "burn-cuda")]
+/// Fast-oracle and trainer cuda backend (bf16 default float; the
+/// GDN mixer's gate/norm/recurrence region computes f32 regardless
+/// via per-tensor casts - the reference stacks' f32-state
+/// discipline).
+#[cfg(any(feature = "burn-cuda", feature = "train-cuda"))]
 #[allow(dead_code)]
 pub(crate) type CudaBack = burn::backend::Cuda<burn::tensor::bf16>;
 
 #[allow(unused_imports)]
-pub(crate) use crate::hybrid::HybridModel;
+pub(crate) use crate::hybrid::{
+    AttnBlock,
+    GdnBlock,
+    HybridBlock,
+    HybridModel,
+    causal_mask,
+};
+#[allow(unused_imports)]
+pub(crate) use crate::lora::{
+    AttnAdapters,
+    ConvDelta,
+    GdnAdapters,
+    LayerAdapters,
+    LoraPair,
+    ModelAdapters,
+};
+#[cfg(feature = "train")]
+pub(crate) use crate::train::{
+    train_cpt,
+    train_gate_verb,
+};
 #[allow(unused_imports)]
 pub(crate) use crate::hybrid_load::{
     HybridCheckpointConfig,
@@ -76,7 +100,10 @@ pub(crate) use crate::cli::{
     SpeculateRecordArgs,
     SpeculateSimulateArgs,
     SpeculateTokensArgs,
+    TrainCommand,
 };
+#[cfg(feature = "train")]
+pub(crate) use crate::cli::TrainCptArgs;
 pub(crate) use crate::mix::{
     SplitMix64,
     mix_pack,
@@ -150,4 +177,6 @@ mod tests {
     mod mix;
     mod score;
     mod speculate;
+    #[cfg(feature = "train")]
+    mod train;
 }

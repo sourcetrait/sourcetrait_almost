@@ -127,9 +127,10 @@ fn burn_forward_gate_short_cuda_bf16() {
         "burn short cuda bf16 vs cpu f32 reference: nmse {nmse:.3e}, argmax {argmax_matches}/{}",
         dump.rows
     );
-    // Bars pinned from the first readings (2.596e-5, 104/106 - the
-    // same kin class as torch-cuda's own 2.151e-5/104 control; the
-    // one-float-type bf16 grade is comparison-grade by design).
+    // Bars pinned from measurement (the f32-recurrence-discipline
+    // era reads 2.834e-5, 104/106 - the same kin class as
+    // torch-cuda's own 2.151e-5/104 control; 106-row argmax is
+    // tie-dominated).
     assert!(nmse <= 5e-5, "nmse {nmse:.3e} over the pinned 5e-5 bar");
     assert!(
         argmax_matches >= 103,
@@ -148,10 +149,10 @@ fn burn_forward_gate_mid_cuda_bf16() {
         "burn mid cuda bf16 vs cpu f32 reference: nmse {nmse:.3e}, argmax {argmax_matches}/{}",
         dump.rows
     );
-    // Bars pinned from the first readings (8.747e-5, 2164/2169):
-    // the bf16-state compounding reads ~12x the f32-state stacks'
-    // ~7e-6 at this length - visible, bounded, comparison-grade.
-    assert!(nmse <= 2e-4, "nmse {nmse:.3e} over the pinned 2e-4 bar");
+    // Bars re-pinned at the f32-recurrence-discipline era (flagged):
+    // the reading moved 8.747e-5 -> 1.821e-5 at 2165/2169 - the
+    // disciplined f32-state stacks' class at depth.
+    assert!(nmse <= 5e-5, "nmse {nmse:.3e} over the pinned 5e-5 bar");
     assert!(
         argmax_matches >= 2160,
         "argmax {argmax_matches}/{} under the pinned 2160 floor",
