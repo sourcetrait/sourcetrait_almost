@@ -59,10 +59,28 @@ pub(crate) fn resolve_task_kind(token: &str) -> BquestResult<TaskKind> {
     }
 }
 
+/// One instruction's strict and loose verdict, keyed by its IFBench
+/// instruction id. The four headline ratios are already built from
+/// these; retaining them is what gives a care-weighted re-aggregation
+/// per-TYPE results to attach to, where the collapsed per-item score
+/// offers nothing.
+pub(crate) struct InstructionVerdict {
+    pub(crate) id: String,
+    pub(crate) strict: bool,
+    pub(crate) loose: bool,
+}
+
 pub(crate) struct ScoreRow {
     pub(crate) doc_id: i64,
     pub(crate) scores: Vec<(String, f64)>,
     pub(crate) extracted: Vec<Option<String>>,
+    /// Per-instruction detail, empty for tasks that have none. STRICTLY
+    /// ADDITIVE: no value in `scores` or `extracted` moves, so the
+    /// reference-parity gate - which compares those two alone, by key
+    /// set and by length - is untouched. The fork constraint holds
+    /// because only aggregation may differ from the reference, never
+    /// the per-item layer.
+    pub(crate) instructions: Vec<InstructionVerdict>,
 }
 
 pub(crate) struct TaskScores {
@@ -132,6 +150,7 @@ fn score_mc(
             doc_id: field_int(prediction, "doc_id")?,
             scores: vec![(String::from("logprob"), max_sum)],
             extracted,
+            instructions: Vec::new(),
         });
     }
     let accuracy = correct as f64 / prediction_rows.len() as f64;
@@ -167,6 +186,7 @@ fn score_gsm8k(
             doc_id: field_int(prediction, "doc_id")?,
             scores: vec![(String::from("exact_match"), score)],
             extracted: vec![extracted],
+            instructions: Vec::new(),
         });
     }
     let accuracy = total / prediction_rows.len() as f64;
@@ -224,10 +244,21 @@ fn score_ifeval_task(
         } else {
             0.0
         };
+        let instructions: Vec<InstructionVerdict> = instruction_ids
+            .iter()
+            .zip(strict.iter())
+            .zip(loose.iter())
+            .map(|((id, strict), loose)| InstructionVerdict {
+                id: id.clone(),
+                strict: *strict,
+                loose: *loose,
+            })
+            .collect();
         rows.push(ScoreRow {
             doc_id: field_int(prediction, "doc_id")?,
             scores: vec![(String::from("ifeval"), score)],
             extracted: vec![Some(response)],
+            instructions,
         });
         strict_lists.push(strict);
         loose_lists.push(loose);
@@ -384,14 +415,32 @@ fn score_row_value(row: &ScoreRow) -> lib::nu::Value {
             None => lib::nu::Value::nothing(span()),
         })
         .collect();
-    lib::nu::Value::record(
-        lib::nu::record! {
-            "doc_id" => v_int(row.doc_id),
-            "scores" => lib::nu::Value::record(scores, span()),
-            "extracted" => lib::nu::Value::list(extracted, span()),
-        },
-        span(),
-    )
+    let mut record = lib::nu::record! {
+        "doc_id" => v_int(row.doc_id),
+        "scores" => lib::nu::Value::record(scores, span()),
+        "extracted" => lib::nu::Value::list(extracted, span()),
+    };
+    // Present only where the task carries instructions, so the 1,263
+    // multiple-choice and exact-match rows stay exactly as they were.
+    // Records are open, so a consumer tests presence.
+    if !row.instructions.is_empty() {
+        let verdicts: Vec<lib::nu::Value> = row
+            .instructions
+            .iter()
+            .map(|verdict| {
+                lib::nu::Value::record(
+                    lib::nu::record! {
+                        "id" => v_str(&verdict.id),
+                        "strict" => v_bool(verdict.strict),
+                        "loose" => v_bool(verdict.loose),
+                    },
+                    span(),
+                )
+            })
+            .collect();
+        record.push("instructions", lib::nu::Value::list(verdicts, span()));
+    }
+    lib::nu::Value::record(record, span())
 }
 
 fn aggregate_value(scores: &TaskScores) -> lib::nu::Value {
