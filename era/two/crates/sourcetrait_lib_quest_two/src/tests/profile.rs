@@ -97,7 +97,45 @@ fn attn_profile_battery() {
         decode_rows: u64,
     }
     let mut overall: HashMap<usize, OverallAccum> = HashMap::new();
-    let mut cell_records = Vec::new();
+    let span = nu::Span::unknown();
+    let masses_value = |middle: f64, sink: f64, recent: f64| {
+        nu::Value::record(
+            nu::record! {
+                "middle" => nu::Value::float(middle, span),
+                "sink" => nu::Value::float(sink, span),
+                "recent" => nu::Value::float(recent, span),
+            },
+            span,
+        )
+    };
+    let layer_value = |layer: &LayerProfile| {
+        nu::Value::record(
+            nu::record! {
+                "layer_index" => nu::Value::int(layer.layer_index as i64, span),
+                "window" => nu::Value::int(layer.window as i64, span),
+                "prefill_rows" => nu::Value::int(layer.prefill_rows as i64, span),
+                "decode_rows" => nu::Value::int(layer.decode_rows as i64, span),
+                "prefill" => nu::Value::list(
+                    layer
+                        .prefill
+                        .iter()
+                        .map(|masses| masses_value(masses.middle, masses.sink, masses.recent))
+                        .collect(),
+                    span,
+                ),
+                "decode" => nu::Value::list(
+                    layer
+                        .decode
+                        .iter()
+                        .map(|masses| masses_value(masses.middle, masses.sink, masses.recent))
+                        .collect(),
+                    span,
+                ),
+            },
+            span,
+        )
+    };
+    let mut cell_records: Vec<nu::Value> = Vec::new();
     let mut hits = 0usize;
     let mut total = 0usize;
     for &length in &lengths {
@@ -146,39 +184,54 @@ fn attn_profile_battery() {
                     }
                     entry.decode_rows += layer.decode_rows;
                 }
-                cell_records.push(serde_json::json!({
-                    "length": length,
-                    "key": spec.keys[key_index].name,
-                    "depth": depth,
-                    "found": found,
-                    "layers": layers,
-                }));
+                cell_records.push(nu::Value::record(
+                    nu::record! {
+                        "length" => nu::Value::int(length as i64, span),
+                        "key" => nu::Value::string(spec.keys[key_index].name.clone(), span),
+                        "depth" => nu::Value::int(depth as i64, span),
+                        "found" => nu::Value::bool(found, span),
+                        "layers" => nu::Value::list(
+                            layers.iter().map(&layer_value).collect(),
+                            span,
+                        ),
+                    },
+                    span,
+                ));
                 println!(
-                    "profile {length} {} @{depth}%: found {found}",
-                    spec.keys[key_index].name
+                    "{}",
+                    nu::to_nuon_text(&nu::Value::record(
+                        nu::record! {
+                            "length" => nu::Value::int(length as i64, span),
+                            "key" => nu::Value::string(
+                                spec.keys[key_index].name.clone(),
+                                span,
+                            ),
+                            "depth" => nu::Value::int(depth as i64, span),
+                            "found" => nu::Value::bool(found, span),
+                        },
+                        span,
+                    ))
+                    .expect("nuon progress")
                 );
             }
         }
     }
 
-    let mut overall_records = Vec::new();
+    let mut overall_records: Vec<nu::Value> = Vec::new();
+    let mut layer_summaries: Vec<nu::Value> = Vec::new();
     let mut layer_indices: Vec<usize> = overall.keys().copied().collect();
     layer_indices.sort_unstable();
     for layer_index in layer_indices {
         let accum = &overall[&layer_index];
-        let mean = |sums: &[[f64; 3]], rows: u64| -> Vec<serde_json::Value> {
-            sums.iter()
-                .map(|sum| {
-                    let rows = if rows == 0 { 1 } else { rows } as f64;
-                    serde_json::json!({
-                        "middle": sum[0] / rows,
-                        "sink": sum[1] / rows,
-                        "recent": sum[2] / rows,
-                    })
-                })
-                .collect()
+        let mean_values = |sums: &[[f64; 3]], rows: u64| -> nu::Value {
+            let rows = if rows == 0 { 1 } else { rows } as f64;
+            nu::Value::list(
+                sums.iter()
+                    .map(|sum| masses_value(sum[0] / rows, sum[1] / rows, sum[2] / rows))
+                    .collect(),
+                span,
+            )
         };
-        let prefill_means = mean(&accum.prefill_sums, accum.prefill_rows);
         let middles: Vec<f64> = accum
             .prefill_sums
             .iter()
@@ -190,29 +243,75 @@ fn attn_profile_battery() {
             high = high.max(*middle);
             sum += middle;
         }
-        println!(
-            "profile layer {layer_index}: middle mean {:.3}, min {low:.3}, max {high:.3}",
-            sum / middles.len() as f64
-        );
-        overall_records.push(serde_json::json!({
-            "layer_index": layer_index,
-            "prefill_rows": accum.prefill_rows,
-            "decode_rows": accum.decode_rows,
-            "prefill": prefill_means,
-            "decode": mean(&accum.decode_sums, accum.decode_rows),
-        }));
+        layer_summaries.push(nu::Value::record(
+            nu::record! {
+                "layer_index" => nu::Value::int(layer_index as i64, span),
+                "middle_mean" => nu::Value::float(sum / middles.len() as f64, span),
+                "middle_min" => nu::Value::float(low, span),
+                "middle_max" => nu::Value::float(high, span),
+            },
+            span,
+        ));
+        overall_records.push(nu::Value::record(
+            nu::record! {
+                "layer_index" => nu::Value::int(layer_index as i64, span),
+                "prefill_rows" => nu::Value::int(accum.prefill_rows as i64, span),
+                "decode_rows" => nu::Value::int(accum.decode_rows as i64, span),
+                "prefill" => mean_values(&accum.prefill_sums, accum.prefill_rows),
+                "decode" => mean_values(&accum.decode_sums, accum.decode_rows),
+            },
+            span,
+        ));
     }
-    println!("profile hits {hits}/{total}");
+    println!(
+        "{}",
+        nu::to_nuon_text(&nu::Value::list(layer_summaries, span)).expect("nuon summary")
+    );
+    println!(
+        "{}",
+        nu::to_nuon_text(&nu::Value::record(
+            nu::record! {
+                "hits" => nu::Value::int(hits as i64, span),
+                "cells" => nu::Value::int(total as i64, span),
+            },
+            span,
+        ))
+        .expect("nuon line")
+    );
 
-    let report = serde_json::json!({
-        "window": window,
-        "lengths": lengths,
-        "depths": depths,
-        "hits": hits,
-        "cells": total,
-        "overall": overall_records,
-        "per_cell": cell_records,
-    });
-    fs::write(&out_path, serde_json::to_vec_pretty(&report).expect("json")).expect("write");
-    println!("profile artifact -> {out_path}");
+    let report = nu::Value::record(
+        nu::record! {
+            "window" => nu::Value::int(window as i64, span),
+            "lengths" => nu::Value::list(
+                lengths
+                    .iter()
+                    .map(|length| nu::Value::int(*length as i64, span))
+                    .collect(),
+                span,
+            ),
+            "depths" => nu::Value::list(
+                depths
+                    .iter()
+                    .map(|depth| nu::Value::int(*depth as i64, span))
+                    .collect(),
+                span,
+            ),
+            "hits" => nu::Value::int(hits as i64, span),
+            "cells" => nu::Value::int(total as i64, span),
+            "overall" => nu::Value::list(overall_records, span),
+            "per_cell" => nu::Value::list(cell_records, span),
+        },
+        span,
+    );
+    nu::save_value(Path::new(&out_path), &report).expect("nuon artifact");
+    println!(
+        "{}",
+        nu::to_nuon_text(&nu::Value::record(
+            nu::record! {
+                "profile_artifact" => nu::Value::string(out_path, span),
+            },
+            span,
+        ))
+        .expect("nuon line")
+    );
 }

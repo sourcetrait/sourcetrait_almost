@@ -41,12 +41,17 @@ fn multi_plan_offsets_depths_and_cycles_keys() {
 }
 
 /// The QualityGatedCuts battery: single + multi grids at the era-one ratchet
-/// lengths, per-cell JSON artifact. No asserts - this run PINS the
+/// lengths, per-cell whole-value NUON artifact (lib::nu; the
+/// NUON-primary doctrine). No asserts - this run PINS the
 /// baseline; rungs are judged per-cell against its artifact.
+/// Progress and the artifact pointer print as NUON records (a
+/// record per mode-length; {needle_artifact: path} last).
 /// Env: QUEST_NEEDLE_SPEC (refquest spec_v1.json), QUEST_NEEDLE_OUT
 /// (artifact path); optional QUEST_NEEDLE_LENGTHS (csv),
 /// QUEST_NEEDLE_MODES (csv of single|multi), QUEST_NEEDLE_SETTINGS
-/// (a -s token: profile name or toml path; absent = embedded base).
+/// (a -s token: profile name or toml path; absent = embedded base),
+/// QUEST_NEEDLE_CONFIG (a -c token; rides the adapter-aware
+/// load_weights path - absent = the standing mmap instrument).
 #[test]
 #[cfg(feature = "cuda")]
 #[ignore = "the QualityGatedCuts battery: needs the DPO checkpoint + a cuda card + QUEST_NEEDLE_SPEC/_OUT"]
@@ -72,15 +77,28 @@ fn needle_battery_artifact() {
         Some(token) => LibSettings::load(Some(token)).expect("settings token"),
         None => LibSettings::default(),
     };
+    let config_token = env::var("QUEST_NEEDLE_CONFIG").ok();
 
-    let dir = model_dir(consts::DPO_MODEL_NAME).expect("dpo dir");
     let spec = NeedleSpec::load(Path::new(&spec_path)).expect("spec loads");
-    let config = load_config(&dir).expect("config");
     let device = candle_core::Device::new_cuda(0).expect("cuda");
-    let weights = mmap_weights(&dir, candle_core::DType::BF16, &device).expect("mmap");
+    let (dir, weights) = match &config_token {
+        Some(token) => {
+            let lib_config = LibConfig::load(Some(token)).expect("config token");
+            let weights = load_weights(&lib_config, candle_core::DType::BF16, &device)
+                .expect("adapter-aware load");
+            (lib_config.model_dir(), weights)
+        }
+        None => {
+            let dir = model_dir(consts::DPO_MODEL_NAME).expect("dpo dir");
+            let weights = mmap_weights(&dir, candle_core::DType::BF16, &device).expect("mmap");
+            (dir, weights)
+        }
+    };
+    let config = load_config(&dir).expect("config");
     let mut model = OlmoHybrid::new(&config, settings, weights).expect("model");
     let tokenizer = load_tokenizer(&dir).expect("tokenizer");
 
+    let span = nu::Span::unknown();
     let mut cells = Vec::new();
     for mode in modes {
         let mode_cells =
@@ -92,18 +110,73 @@ fn needle_battery_artifact() {
                 .collect();
             let found = of_length.iter().filter(|cell| cell.found).count();
             println!(
-                "needle {} {length}: {found}/{}",
-                mode.label(),
-                of_length.len()
+                "{}",
+                nu::to_nuon_text(&nu::Value::record(
+                    nu::record! {
+                        "mode" => nu::Value::string(mode.label(), span),
+                        "target_length" => nu::Value::int(length as i64, span),
+                        "found" => nu::Value::int(found as i64, span),
+                        "cells" => nu::Value::int(of_length.len() as i64, span),
+                    },
+                    span,
+                ))
+                .expect("nuon progress")
             );
         }
         cells.extend(mode_cells);
     }
-    let report = serde_json::json!({
-        "settings_token": settings_token,
-        "lengths": lengths,
-        "cells": cells,
-    });
-    fs::write(&out_path, serde_json::to_vec_pretty(&report).expect("json")).expect("write");
-    println!("needle artifact -> {out_path}");
+    let token_value = |token: &Option<String>| match token {
+        Some(token) => nu::Value::string(token.clone(), span),
+        None => nu::Value::nothing(span),
+    };
+    let cell_values: Vec<nu::Value> = cells
+        .iter()
+        .map(|cell| {
+            nu::Value::record(
+                nu::record! {
+                    "mode" => nu::Value::string(cell.mode.clone(), span),
+                    "target_length" => nu::Value::int(cell.target_length as i64, span),
+                    "key" => nu::Value::string(cell.key.clone(), span),
+                    "depth" => nu::Value::int(cell.depth as i64, span),
+                    "prompt_tokens" => nu::Value::int(cell.prompt_tokens as i64, span),
+                    "found" => nu::Value::bool(cell.found, span),
+                    "distractor_hits" => nu::Value::list(
+                        cell.distractor_hits
+                            .iter()
+                            .map(|hit| nu::Value::string(hit.clone(), span))
+                            .collect(),
+                        span,
+                    ),
+                    "response" => nu::Value::string(cell.response.clone(), span),
+                },
+                span,
+            )
+        })
+        .collect();
+    let report = nu::Value::record(
+        nu::record! {
+            "settings_token" => token_value(&settings_token),
+            "config_token" => token_value(&config_token),
+            "lengths" => nu::Value::list(
+                lengths
+                    .iter()
+                    .map(|length| nu::Value::int(*length as i64, span))
+                    .collect(),
+                span,
+            ),
+            "cells" => nu::Value::list(cell_values, span),
+        },
+        span,
+    );
+    nu::save_value(Path::new(&out_path), &report).expect("nuon artifact");
+    println!(
+        "{}",
+        nu::to_nuon_text(&nu::Value::record(
+            nu::record! {
+                "needle_artifact" => nu::Value::string(out_path, span),
+            },
+            span,
+        ))
+        .expect("nuon line")
+    );
 }
