@@ -71,8 +71,30 @@ pub fn from_nuon_text(text: &str) -> LibQuestResult<Value> {
 /// leans on it); non-serializable types reject rather than
 /// stringify.
 pub fn to_nuon_text(value: &Value) -> LibQuestResult<String> {
+    render_nuon(value, nuon::ToStyle::Default)
+}
+
+/// Value -> CONDENSED NUON: no whitespace at all, which is what
+/// `to nuon --raw` emits.
+pub fn to_nuon_condensed(value: &Value) -> LibQuestResult<String> {
+    render_nuon(value, nuon::ToStyle::Raw)
+}
+
+/// Value -> PRETTY NUON, two-space indented, which is what
+/// `to nuon --pretty` emits.
+///
+/// Two spaces is not a choice: NUON pretty indents two and nushell
+/// source indents four, neither borrows from the other, and
+/// two-space nushell found anywhere is a mistake rather than a
+/// convention.
+pub fn to_nuon_pretty(value: &Value) -> LibQuestResult<String> {
+    render_nuon(value, nuon::ToStyle::Spaces(2))
+}
+
+fn render_nuon(value: &Value, style: nuon::ToStyle) -> LibQuestResult<String> {
     let engine_state = r::nu::EngineState::new();
-    match nuon::to_nuon(&engine_state, value, nuon::ToNuonConfig::default()) {
+    let config = nuon::ToNuonConfig::default().style(style);
+    match nuon::to_nuon(&engine_state, value, config) {
         Ok(text) => Ok(text),
         Err(error) => snafu::whatever!("nuon render failed: {error}"),
     }

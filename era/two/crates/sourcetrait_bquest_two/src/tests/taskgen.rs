@@ -11,7 +11,7 @@ fn temp_root(tag: &str) -> PathBuf {
 }
 
 fn run(out: &Path, count: usize, seed: u64) {
-    taskgen_nuon(&TaskgenNuonArgs {
+    taskgen_all(&TaskgenAllArgs {
         out: out.to_path_buf(),
         count,
         bench_every: 4,
@@ -20,33 +20,142 @@ fn run(out: &Path, count: usize, seed: u64) {
     .expect("generation runs");
 }
 
+/// The verifier a family's prompt implies, recovered the same way an
+/// auditor would: from the instruction. The artifacts do not carry a
+/// verifier on the supervised side, and adding one would be surface
+/// the trainer never reads.
+fn verifier_for(prompt: &str) -> &'static str {
+    if prompt.contains("JSON to NUON") {
+        example::VERIFIER_NUON
+    } else if prompt.contains("shell command to nushell")
+        || prompt.contains("Write a nushell pipeline")
+    {
+        example::VERIFIER_NU_VALUE
+    } else {
+        example::VERIFIER_EXACT
+    }
+}
+
 /// Every supervised answer must pass the very verifier the
 /// reinforcement stage grades with, or the two stages disagree about
-/// what correct means.
+/// what correct means. The two artifacts are generated in lockstep,
+/// so pairing them by index also proves they did not drift.
 #[test]
 fn generated_answers_verify_under_the_reinforcement_verifier() {
+    nu_sandbox::require_sandbox().expect("bubblewrap is present");
     let root = temp_root("verify");
-    run(&root, 48, 7);
+    run(&root, 12, 7);
 
     let train = example::load_sft(&root.join("sft_train.nuon")).expect("sft loads");
+    let graded = example::load_rlvr(&root.join("rlvr_train.nuon")).expect("rlvr loads");
     assert!(!train.is_empty());
-    for messages in &train {
+    assert_eq!(
+        train.len(),
+        graded.len(),
+        "the supervised and reinforcement artifacts fell out of step"
+    );
+
+    for (messages, prompt) in train.iter().zip(&graded) {
+        let asked = messages[0].content.clone().expect("a user turn");
         let answer = messages
             .last()
             .and_then(|message| message.content.clone())
             .expect("an assistant turn");
-        let reward = example::verify(example::VERIFIER_NUON, &answer, &answer)
+        assert_eq!(
+            verifier_for(&asked),
+            prompt.verifier,
+            "the paired rows describe different families"
+        );
+        let reward = example::verify(&prompt.verifier, &answer, &prompt.reference)
             .expect("verifier runs");
-        assert_eq!(reward, 1.0, "a supervised answer did not verify: {answer}");
+        assert_eq!(
+            reward, 1.0,
+            "a supervised answer did not verify under {}: {answer}",
+            prompt.verifier
+        );
     }
 
-    // The reinforcement prompts carry the same answers as references.
+    // Every reinforcement prompt names a KNOWN verifier, and the
+    // value-comparing ones carry a reference that actually parses.
     let prompts = example::load_rlvr(&root.join("rlvr_train.nuon")).expect("rlvr loads");
     assert!(!prompts.is_empty());
+    let mut families = HashSet::new();
     for prompt in &prompts {
-        assert_eq!(prompt.verifier, example::VERIFIER_NUON);
-        lib::nu::from_nuon_text(&prompt.reference).expect("reference parses as NUON");
+        families.insert(prompt.verifier.clone());
+        if prompt.verifier == example::VERIFIER_NUON
+            || prompt.verifier == example::VERIFIER_NU_VALUE
+        {
+            lib::nu::from_nuon_text(&prompt.reference).expect("reference parses as NUON");
+        }
     }
+    assert!(
+        families.len() >= 2,
+        "the families should exercise more than one verifier, got {families:?}"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// The sandbox is the only thing standing between a verifier and
+/// arbitrary generated code, so its confinement is asserted rather
+/// than assumed: no network, and a runaway pipeline is killed.
+#[test]
+fn the_sandbox_confines_what_it_runs() {
+    nu_sandbox::require_sandbox().expect("bubblewrap is present");
+
+    let networked = nu_sandbox::run_nu(
+        "http get https://example.com | describe",
+        std::time::Duration::from_secs(20),
+    )
+    .expect("the run completes");
+    assert!(!networked.ok, "the sandbox allowed a network call");
+
+    let looping = nu_sandbox::run_nu("loop { }", std::time::Duration::from_secs(2))
+        .expect("the run completes");
+    assert!(looping.timed_out, "a non-terminating pipeline was not killed");
+    assert!(!looping.ok);
+
+    // And a well-behaved pipeline still comes back as a VALUE.
+    let value = nu_sandbox::pipeline_value("[1 2 3] | where {|x| $x > 1 }")
+        .expect("the run completes")
+        .expect("a value came back");
+    assert_eq!(value, lib::nu::from_nuon_text("[2, 3]").expect("nuon"));
+}
+
+/// The error family's answer must come from nushell's own diagnostic.
+/// Asserting the mutation site instead would be wrong for a whole
+/// class: an unclosed brace is reported where the parser reaches end
+/// of input, not where the brace was opened.
+#[test]
+fn the_error_line_is_the_one_nushell_reports() {
+    nu_sandbox::require_sandbox().expect("bubblewrap is present");
+    let root = temp_root("errors");
+    run(&root, 12, 23);
+    let examples = example::load_sft(&root.join("sft_train.nuon")).expect("sft loads");
+
+    let mut checked = 0usize;
+    for messages in &examples {
+        let prompt = messages[0].content.clone().expect("a user turn");
+        if !prompt.contains("This nushell fails") {
+            continue;
+        }
+        let snippet = prompt.split_once("\n\n").expect("a payload").1.to_string();
+        let answer = messages
+            .last()
+            .and_then(|message| message.content.clone())
+            .expect("an assistant turn");
+        let outcome = nu_sandbox::run_nu(&snippet, std::time::Duration::from_secs(10))
+            .expect("the run completes");
+        assert!(!outcome.ok, "a snippet taught as broken ran cleanly:\n{snippet}");
+        let reported = outcome
+            .stderr
+            .split_once("[source:")
+            .and_then(|(_, rest)| rest.split_once(':'))
+            .map(|(line, _)| line.to_string())
+            .expect("nushell reported a location");
+        assert_eq!(reported, answer, "the taught line is not the reported one");
+        checked += 1;
+    }
+    assert!(checked > 0, "no error-location examples were generated");
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -61,17 +170,28 @@ fn rejected_answers_are_actually_wrong() {
     let pairs = example::load_dpo(&root.join("dpo_train.nuon")).expect("dpo loads");
     assert!(!pairs.is_empty(), "no preference pairs were produced");
     for pair in &pairs {
+        let asked = pair.prompt[0].content.clone().expect("a user turn");
+        let verifier = verifier_for(&asked);
+        // For an execution-graded family the reference is the VALUE
+        // the chosen pipeline produces, re-derived here rather than
+        // taken on trust from the generator.
+        let reference = if verifier == example::VERIFIER_NU_VALUE {
+            let value = nu_sandbox::pipeline_value(&pair.chosen)
+                .expect("the chosen pipeline runs")
+                .expect("the chosen pipeline produced a value");
+            lib::nu::to_nuon_text(&value).expect("renders")
+        } else {
+            pair.chosen.clone()
+        };
         assert_eq!(
-            example::verify(example::VERIFIER_NUON, &pair.chosen, &pair.chosen)
-                .expect("verifier runs"),
+            example::verify(verifier, &pair.chosen, &reference).expect("verifier runs"),
             1.0,
-            "a chosen answer did not verify"
+            "a chosen answer did not verify under {verifier}"
         );
         assert_eq!(
-            example::verify(example::VERIFIER_NUON, &pair.rejected, &pair.chosen)
-                .expect("verifier runs"),
+            example::verify(verifier, &pair.rejected, &reference).expect("verifier runs"),
             0.0,
-            "a rejected answer verified as correct: {}",
+            "a rejected answer verified as correct under {verifier}: {}",
             pair.rejected
         );
     }

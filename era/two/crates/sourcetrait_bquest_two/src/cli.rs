@@ -196,14 +196,14 @@ pub(crate) struct BenchRunArgs {
 
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum TaskgenCommand {
-    /// Convert-to-NUON: synthesised values rendered to JSON as the
-    /// ask and to NUON as the answer, so the ground truth is the
-    /// renderer itself.
-    Nuon(TaskgenNuonArgs),
+    /// Every family at once: NUON conversion and formatting, nushell
+    /// from a shell command and from prose, and error location. Each
+    /// answer is checked by machine before it ships.
+    All(TaskgenAllArgs),
 }
 
 #[derive(Debug, clap::Args)]
-pub(crate) struct TaskgenNuonArgs {
+pub(crate) struct TaskgenAllArgs {
     /// Output directory; the per-stage tables and the bench land in
     /// it.
     #[arg(long)]

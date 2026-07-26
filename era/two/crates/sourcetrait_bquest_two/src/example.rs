@@ -309,25 +309,39 @@ pub(crate) fn mix_instruct(cli: &Cli, args: &MixInstructArgs) -> BquestResult<()
 
 // ---- Verifiers ----------------------------------------------------
 
-/// The verifier names a reinforcement prompt may select. Both are
-/// mechanical: nothing here asks a model whether an answer is good.
+/// The verifier names a prompt may select. Every one is mechanical:
+/// nothing here asks a model whether an answer is good.
 pub(crate) const VERIFIER_NUON: &str = "nuon_equals";
 pub(crate) const VERIFIER_EXACT: &str = "exact";
+pub(crate) const VERIFIER_NU_VALUE: &str = "nu_value_equals";
+
+const KNOWN_VERIFIERS: [&str; 3] = [VERIFIER_NUON, VERIFIER_EXACT, VERIFIER_NU_VALUE];
 
 fn verifier_known(name: &str) -> BquestResult<()> {
     snafu::ensure_whatever!(
-        name == VERIFIER_NUON || name == VERIFIER_EXACT,
-        "unknown verifier {name:?} (known: {VERIFIER_NUON}, {VERIFIER_EXACT})"
+        KNOWN_VERIFIERS.contains(&name),
+        "unknown verifier {name:?} (known: {})",
+        KNOWN_VERIFIERS.join(", ")
     );
     Ok(())
+}
+
+/// Whether a verifier has to EXECUTE the answer, which the caller
+/// must know because execution needs the sandbox present.
+pub(crate) fn verifier_executes(name: &str) -> bool {
+    name == VERIFIER_NU_VALUE
 }
 
 /// Grade one response against its reference. 1.0 is a pass, 0.0 a
 /// fail - the reward a group-relative advantage is computed from.
 ///
-/// `nuon_equals` parses BOTH sides and compares VALUES, never text:
-/// NUON renders the same value differently depending on content, so a
-/// text comparison would score formatting rather than correctness.
+/// Two of the three compare VALUES rather than text, and that is the
+/// load-bearing choice. NUON renders the same value differently
+/// depending on its content, and two correct pipelines can render one
+/// result as a bordered table and as a literal - so a text comparison
+/// would score formatting and call it correctness. `exact` is the
+/// exception BY DESIGN: it grades the formatting families, where the
+/// bytes ARE the answer.
 pub(crate) fn verify(verifier: &str, response: &str, reference: &str) -> BquestResult<f32> {
     verifier_known(verifier)?;
     Ok(match verifier {
@@ -335,6 +349,13 @@ pub(crate) fn verify(verifier: &str, response: &str, reference: &str) -> BquestR
             let expected = lib::nu::from_nuon_text(reference)?;
             match lib::nu::from_nuon_text(response.trim()) {
                 Ok(actual) if actual == expected => 1.0,
+                _ => 0.0,
+            }
+        }
+        VERIFIER_NU_VALUE => {
+            let expected = lib::nu::from_nuon_text(reference)?;
+            match nu_sandbox::pipeline_value(response.trim())? {
+                Some(actual) if actual == expected => 1.0,
                 _ => 0.0,
             }
         }

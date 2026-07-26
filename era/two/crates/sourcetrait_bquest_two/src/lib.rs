@@ -12,6 +12,7 @@ pub(crate) mod hybrid_load;
 pub(crate) mod ifeval;
 pub(crate) mod lora;
 pub(crate) mod mix;
+pub(crate) mod nu_sandbox;
 pub(crate) mod punkt;
 pub(crate) mod pytext;
 pub(crate) mod rollout;
@@ -83,7 +84,7 @@ pub(crate) use crate::rollout::{
     bench_run,
     rollout_run,
 };
-pub(crate) use crate::taskgen::taskgen_nuon;
+pub(crate) use crate::taskgen::taskgen_all;
 #[allow(unused_imports)]
 pub(crate) use crate::hybrid_load::{
     HybridCheckpointConfig,
@@ -117,8 +118,8 @@ pub(crate) use crate::cli::{
     RolloutCommand,
     RolloutRunArgs,
     SpeculateCommand,
+    TaskgenAllArgs,
     TaskgenCommand,
-    TaskgenNuonArgs,
     SpeculateRecordArgs,
     SpeculateSimulateArgs,
     SpeculateTokensArgs,
