@@ -1,8 +1,4 @@
-//! The IFBench OOD instruction verifiers (ifbench instructions.py)
-//! plus olmo-eval's strict/loose scoring harness, ported checker by
-//! checker. Classic Google-IFEval ids are not ported and error
-//! loudly - the exercised capability set is OOD-only, and a silent
-//! mis-score would be worse than a loud gap.
+//! The IFBench verifiers and their strict/loose scoring harness.
 use crate::*;
 
 use std::sync::LazyLock;
@@ -11,8 +7,7 @@ use crate::checker_data::CheckerData;
 use crate::punkt::sent_tokenize;
 use crate::wordtok::nltk_word_tokenize;
 
-/// A kwarg value as the checkers see it: Python's int/float split is
-/// semantic (indices must be ints; thresholds may be either).
+/// A kwarg value as the checkers see it; the int/float split is semantic.
 #[derive(Clone)]
 pub(crate) enum KwargValue {
     Int(i64),
@@ -56,7 +51,7 @@ fn kwarg<'a>(kwargs: &'a Kwargs, name: &str) -> BquestResult<&'a KwargValue> {
     }
 }
 
-/// The eight loose-scoring response variants, upstream order.
+/// The eight loose-scoring response variants, in upstream's order.
 fn loose_variants(response: &str) -> Vec<String> {
     let lines: Vec<&str> = response.split('\n').collect();
     let join = |parts: &[&str]| parts.join("\n");
@@ -78,8 +73,7 @@ fn loose_variants(response: &str) -> Vec<String> {
     ]
 }
 
-/// olmo-eval's _check_one: null-stripped kwargs, prompt_to_repeat
-/// injection, the non-empty-response gate, then the verifier.
+/// olmo-eval's _check_one, in its own order.
 fn check_one(
     data: &CheckerData,
     instruction_id: &str,
@@ -182,8 +176,7 @@ checker_regex!(
     r#"^"[^\n]*[^\p{L}\p{N}_\t\n\x0B\x0C\r\x1C-\x1F\u{85}\p{Zs}\u{2028}\u{2029}][^\n]*""#
 );
 
-/// Python csv.reader (default quoting, doublequote, non-strict) over
-/// the whole text; records end at \n, \r, or \r\n outside quotes.
+/// Python's csv.reader as a state machine, at its defaults.
 pub(crate) fn py_csv_parse(text: &str, delimiter: char) -> Vec<Vec<String>> {
     #[derive(PartialEq)]
     enum State {
@@ -266,7 +259,6 @@ pub(crate) fn py_csv_parse(text: &str, delimiter: char) -> Vec<Vec<String>> {
                         i += 1;
                     }
                 } else {
-                    // Non-strict: the character joins the field.
                     field.push(c);
                     state = State::InField;
                 }
@@ -281,7 +273,7 @@ pub(crate) fn py_csv_parse(text: &str, delimiter: char) -> Vec<Vec<String>> {
     records
 }
 
-/// The verifier dispatch (check_following per instruction id).
+/// The verifier dispatch, one arm per instruction id.
 fn check_following(
     data: &CheckerData,
     id: &str,
@@ -334,9 +326,6 @@ fn check_following(
             let n = kwarg(kwargs, "small_n")?.as_f64()?;
             let strip_set = format!("{PY_PUNCTUATION} ");
             let conjunctions = ["and", "but", "for", "nor", "or", "so", "yet"];
-            // The reference filters on the cleaned word but collects
-            // the RAW word into its set - distinct casings and
-            // punctuation variants count separately.
             let mut unique: HashSet<&str> = HashSet::new();
             for word in py_split_ws(value) {
                 let cleaned = py_strip_chars(word, &strip_set).to_lowercase();
@@ -561,7 +550,6 @@ fn check_following(
         }
         "format:options" => {
             let options_text = kwarg(kwargs, "options")?.as_text()?;
-            // The strict form: \W*[aA]\W*[bB]\W*[cC]\W*.
             let strict = {
                 let mut chars = options_text.chars().peekable();
                 let mut expect = ['a', 'b', 'c'].into_iter();
@@ -789,8 +777,6 @@ fn check_following(
             words.windows(2).all(|pair| !first_chars_equal(pair[0], pair[1]))
         }
         "format:line_indent" => {
-            // The reference removes blank lines with the classic
-            // mutate-while-iterating for loop; reproduce its skips.
             let mut lines: Vec<&str> = value.split('\n').collect();
             let mut index = 0usize;
             while index < lines.len() {

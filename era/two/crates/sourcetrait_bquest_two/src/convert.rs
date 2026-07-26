@@ -1,24 +1,7 @@
-//! CapabilityNuon: the JSONL <-> nu Value bridge and the `capability
-//! convert` verb.
-//!
-//! Conversion is lossless field-for-field: JSON object order is
-//! preserved (serde_json's preserve_order feature), integers stay i64
-//! (an i64-overflowing integer is a hard error, never an
-//! approximation), and every written .nuon file is gate-verified in
-//! place - each source row's Value must deep-equal the nuon row
-//! re-parsed from disk, every item, or the verb exits nonzero. A
-//! sibling <stem>.provenance.nuon per conversion records the source
-//! path, task token, item count, source sha256, and (for run
-//! predictions) the run name. Trees are discovered, never hardcoded:
-//! any fixture render and any runs root of the same shape converts
-//! through the same code.
+//! The lossless JSONL and nu-value bridge, and `capability convert`.
 use crate::*;
 
-/// Row-kind typedefs, harvested from the standing fixture and run
-/// trees: the spine every real writer satisfies. Records stay OPEN
-/// under conformance, so writer-specific extras (sample_metrics,
-/// instance_metrics, the logprob family on generation rows) pass
-/// undeclared.
+/// Row-kind typedefs, harvested from the standing trees.
 const REQUEST_LOGLIKELIHOOD_TYPEDEF: &str = "record<request_type: string, \
      doc: record<query: string, gold_idx: int, choices: list<string>>, \
      request: record<context: string, continuations: list<string>>, \
@@ -140,9 +123,7 @@ pub(crate) fn field_strings(
     Ok(strings)
 }
 
-/// nu Value -> JSON, the exact inverse of json_to_value (the reverse
-/// bridge direction: nuon artifacts rendered back into the
-/// reference's JSONL for its own tools to consume).
+/// nu Value to JSON, the exact inverse of json_to_value.
 pub(crate) fn value_to_json(value: &lib::nu::Value) -> BquestResult<serde_json::Value> {
     Ok(match value {
         lib::nu::Value::Nothing { .. } => serde_json::Value::Null,
@@ -171,9 +152,7 @@ pub(crate) fn value_to_json(value: &lib::nu::Value) -> BquestResult<serde_json::
     })
 }
 
-/// JSON -> nu Value, lossless field-for-field. Object order is
-/// preserved; an integer beyond i64 is a hard error (the lossless
-/// off-ramp), never a float approximation.
+/// JSON to nu Value, lossless field for field.
 pub(crate) fn json_to_value(json: &serde_json::Value) -> BquestResult<lib::nu::Value> {
     Ok(match json {
         serde_json::Value::Null => lib::nu::Value::nothing(span()),
@@ -233,9 +212,7 @@ pub(crate) fn collect_suffix_files(
     Ok(files)
 }
 
-/// The task token of a source file: the stem with `suffix` stripped
-/// and the trailing render hash (`_<6 hex>`) removed - the sanitized
-/// task spec (e.g. `mmlu_anatomy`, `arc_challenge_mc`).
+/// A source file's task token: the stem without suffix or render hash.
 pub(crate) fn task_token(file_name: &str, suffix: &str) -> String {
     let stem = file_name.strip_suffix(suffix).unwrap_or(file_name);
     if let Some(position) = stem.rfind('_') {
@@ -287,9 +264,7 @@ enum SourceKind {
     Predictions,
 }
 
-/// Convert one JSONL file to a whole-value .nuon table plus its
-/// provenance sibling, conform-validating every row and gate-verifying
-/// the written file (nuon reparse deep-equals every source Value).
+/// Convert one JSONL file, conform-validated and gate-verified.
 fn convert_file(
     source: &Path,
     dest: &Path,
@@ -335,8 +310,6 @@ fn convert_file(
 
     lib::nu::save_value(dest, &lib::nu::Value::list(rows.clone(), span()))?;
 
-    // GATE 1, integral: the written file re-parsed must deep-equal
-    // every source Value.
     let reloaded = lib::nu::load_value(dest)?;
     let reloaded_rows = match reloaded.as_list() {
         Ok(list) => list,
@@ -403,7 +376,6 @@ pub(crate) fn capability_convert(args: &CapabilityConvertArgs) -> BquestResult<(
         .as_ref()
         .map(|csv| csv.split(',').map(|t| t.trim().to_string()).collect());
 
-    // Fixture requests.
     let requests_root = fixtures.join("requests");
     let request_files = collect_suffix_files(&requests_root, "-requests.jsonl")?;
     snafu::ensure_whatever!(
@@ -433,7 +405,6 @@ pub(crate) fn capability_convert(args: &CapabilityConvertArgs) -> BquestResult<(
         eprintln!("capability convert: fixtures {task} - {items} items");
     }
 
-    // Standing runs' predictions (tree-discovered).
     let mut run_names: Vec<String> = Vec::new();
     let mut prediction_files = 0usize;
     let mut prediction_items = 0usize;

@@ -1,39 +1,16 @@
-//! Instruction-shaped training examples: the on-disk shapes, their
-//! ingest, and the packing that turns them into trainable rows.
-//!
-//! The continued-pretraining path packs a DOCUMENT stream - join every
-//! document, cut fixed windows, shuffle. That is wrong for an
-//! instruction example, because the cut falls wherever it falls and
-//! would split a prompt from its response into two independently
-//! shuffled rows. So these pack ONE EXAMPLE PER ROW: render, encode,
-//! mark the assistant positions, pad to the window, and keep the
-//! example whole or drop it.
-//!
-//! ## DEV
-//! The loss mask rides a SECOND tensor beside the ids, which is why
-//! `train::load_chunks` had to start rejecting tensors it does not
-//! recognise: it previously read one named tensor and ignored the
-//! rest, so a mask written beside the ids would have been skipped in
-//! silence and the run would have completed as an unmasked one.
-//! ##
-// The stage verbs (cfg train) and the rollout verb are the consumers;
-// a non-train build sees the ingest side alone. The allow retires
-// when every stage is wired.
+//! Instruction-shaped examples: their shapes, ingest and packing.
 #![allow(dead_code)]
 use crate::*;
 
-/// A supervised example: one conversation whose assistant turns are
-/// what the model must learn to produce.
+/// A supervised example: one conversation, assistant turns supervised.
 pub(crate) const SFT_TYPEDEF: &str =
     "table<messages: table<role: string, content: string>>";
 
-/// A preference pair: a shared prompt and two candidate assistant
-/// replies, the first preferred.
+/// A preference pair: one prompt, two replies, the first preferred.
 pub(crate) const DPO_TYPEDEF: &str = "table<prompt: table<role: string, content: string>, \
      chosen: string, rejected: string>";
 
-/// A verifiable prompt: what to ask, which verifier grades the reply,
-/// and the reference that verifier compares against.
+/// A verifiable prompt: what to ask, its verifier, its reference.
 pub(crate) const RLVR_TYPEDEF: &str = "table<prompt: table<role: string, content: string>, \
      verifier: string, reference: string>";
 
@@ -55,15 +32,13 @@ pub(crate) struct RlvrExample {
     pub(crate) reference: String,
 }
 
-/// One packed row: the window's ids and the per-position loss mask
-/// (1 where the model must produce that token).
+/// One packed row: the window's ids and its per-position loss mask.
 pub(crate) struct PackedRow {
     pub(crate) ids: Vec<u32>,
     pub(crate) mask: Vec<u8>,
 }
 
-/// Read a message table into chat messages, rejecting any role the
-/// renderer does not know rather than dropping it.
+/// Read a message table into chat messages; an unknown role raises.
 fn read_messages(rows: &[&lib::nu::Record]) -> BquestResult<Vec<lib::ChatMessage>> {
     let mut messages = Vec::with_capacity(rows.len());
     for row in rows {
@@ -136,9 +111,7 @@ pub(crate) fn load_rlvr(path: &Path) -> BquestResult<Vec<RlvrExample>> {
     Ok(examples)
 }
 
-/// Render + encode a conversation, marking every assistant position.
-/// The span boundaries come from the renderer rather than from
-/// re-measuring a prefix, so they are exact by construction.
+/// Render and encode a conversation, masked to its assistant spans.
 pub(crate) fn encode_supervised(
     tokenizer: &tokenizers::Tokenizer,
     messages: &[lib::ChatMessage],
@@ -154,8 +127,7 @@ pub(crate) fn encode_supervised(
     Ok((encoded.ids, mask))
 }
 
-/// Render a prompt with the assistant opener appended - what a
-/// rollout is fed and what a preference candidate continues from.
+/// Render a prompt with the assistant opener appended.
 pub(crate) fn encode_prompt(
     tokenizer: &tokenizers::Tokenizer,
     prompt: &[lib::ChatMessage],
@@ -164,10 +136,7 @@ pub(crate) fn encode_prompt(
     Ok(lib::encode_render(tokenizer, &render)?.ids)
 }
 
-/// Pad one encoded example to `width`, or report it as too long.
-/// Truncation is deliberately not offered: a clipped response trains
-/// the model to stop mid-answer, and dropping is visible where
-/// clipping is not.
+/// Pad one encoded example to `width`, or None if it is too long.
 pub(crate) fn pack_row(
     ids: Vec<u32>,
     mask: Vec<u8>,
@@ -184,9 +153,7 @@ pub(crate) fn pack_row(
     Some(PackedRow { ids, mask })
 }
 
-/// Write a packed set as the two-tensor artifact plus its provenance
-/// sidecar. Rows are `width` wide; the trainer takes ids[..width-1]
-/// as inputs and ids[1..] as targets under mask[1..].
+/// Write a packed set as the two-tensor artifact plus its provenance.
 pub(crate) fn write_pack(
     out: &Path,
     rows: &[PackedRow],
@@ -245,8 +212,7 @@ pub(crate) fn write_pack(
     Ok(())
 }
 
-/// `bquest mix instruct`: supervised examples -> one packed artifact.
-/// Every row is one whole example, masked to its assistant turns.
+/// `bquest mix instruct`: supervised examples, one whole per row.
 pub(crate) fn mix_instruct(cli: &Cli, args: &MixInstructArgs) -> BquestResult<()> {
     let started = std::time::Instant::now();
     let config = lib::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
@@ -307,10 +273,7 @@ pub(crate) fn mix_instruct(cli: &Cli, args: &MixInstructArgs) -> BquestResult<()
     Ok(())
 }
 
-// ---- Verifiers ----------------------------------------------------
-
-/// The verifier names a prompt may select. Every one is mechanical:
-/// nothing here asks a model whether an answer is good.
+/// The verifier names a prompt may select; every one is mechanical.
 pub(crate) const VERIFIER_NUON: &str = "nuon_equals";
 pub(crate) const VERIFIER_EXACT: &str = "exact";
 pub(crate) const VERIFIER_NU_VALUE: &str = "nu_value_equals";
@@ -326,22 +289,12 @@ fn verifier_known(name: &str) -> BquestResult<()> {
     Ok(())
 }
 
-/// Whether a verifier has to EXECUTE the answer, which the caller
-/// must know because execution needs the sandbox present.
+/// Whether a verifier has to execute the answer, needing the sandbox.
 pub(crate) fn verifier_executes(name: &str) -> bool {
     name == VERIFIER_NU_VALUE
 }
 
-/// Grade one response against its reference. 1.0 is a pass, 0.0 a
-/// fail - the reward a group-relative advantage is computed from.
-///
-/// Two of the three compare VALUES rather than text, and that is the
-/// load-bearing choice. NUON renders the same value differently
-/// depending on its content, and two correct pipelines can render one
-/// result as a bordered table and as a literal - so a text comparison
-/// would score formatting and call it correctness. `exact` is the
-/// exception BY DESIGN: it grades the formatting families, where the
-/// bytes ARE the answer.
+/// Grade one response against its reference: 1.0 pass, 0.0 fail.
 pub(crate) fn verify(verifier: &str, response: &str, reference: &str) -> BquestResult<f32> {
     verifier_known(verifier)?;
     Ok(match verifier {

@@ -1,14 +1,4 @@
-//! The nltk Punkt sentence tokenizer, inference path only, ported
-//! against nltk 3.10.0's punkt.py with the shipped punkt_tab english
-//! parameters.
-//!
-//! Faithfulness notes: all indices are Python string indices
-//! (codepoints, never bytes); the period-context and word-tokenizer
-//! regexes are hand-scanned equivalents of the PunktLanguageVars
-//! patterns (Python-\s semantics via pytext); the last-whitespace
-//! scan uses ASCII string.whitespace exactly as upstream; boundary
-//! realignment reproduces the lazy quote-run match including its
-//! MULTILINE $.
+//! The nltk Punkt sentence tokenizer, inference path only.
 use crate::*;
 
 const ORTHO_BEG_UC: u32 = 1 << 1;
@@ -132,20 +122,19 @@ impl PunktTok {
     }
 }
 
-/// _RE_NUMERIC on a lowercased token: ^-?[\.,]?\d[\d,\.-]*\.?$ - the
-/// whole token, since the pattern is fully anchored.
+/// _RE_NUMERIC on a lowercased token; the pattern is fully anchored.
 fn numeric_type_matches(lowered: &str) -> bool {
     let chars: Vec<char> = lowered.chars().collect();
     let mut i = 0usize;
     if i < chars.len() && chars[i] == '-' {
         i += 1;
     }
-    if i < chars.len() && (chars[i] == '.' || chars[i] == ',') {
-        // Optional [.,] - but only when a digit follows; the regex
-        // backtracks it away otherwise.
-        if i + 1 < chars.len() && py_is_decimal(chars[i + 1]) {
-            i += 1;
-        }
+    if i < chars.len()
+        && (chars[i] == '.' || chars[i] == ',')
+        && i + 1 < chars.len()
+        && py_is_decimal(chars[i + 1])
+    {
+        i += 1;
     }
     if i >= chars.len() || !py_is_decimal(chars[i]) {
         return false;
@@ -154,8 +143,7 @@ fn numeric_type_matches(lowered: &str) -> bool {
     chars[i..].iter().all(|&c| py_is_decimal(c) || c == ',' || c == '.' || c == '-')
 }
 
-/// The multi-char punctuation match at a position:
-/// -{2,} | \.{2,} | (?:\.\s){2,}\. - returns the match length.
+/// The multi-char punctuation match at a position, as its length.
 fn multi_char_len(chars: &[char], i: usize) -> Option<usize> {
     if i >= chars.len() {
         return None;
@@ -178,7 +166,6 @@ fn multi_char_len(chars: &[char], i: usize) -> Option<usize> {
         if j - i >= 2 {
             return Some(j - i);
         }
-        // (?:\.\s){2,}\. with greedy backtracking.
         let mut reps = 0usize;
         let mut k = i;
         while k < chars.len() && chars[k] == '.' && k + 1 < chars.len() && py_is_space(chars[k + 1])
@@ -238,7 +225,6 @@ fn punkt_word_tokenize(line: &str) -> Vec<String> {
             continue;
         }
         if !WORD_START_EXCLUDED.contains(c) {
-            // (?=WordStart)\S+? up to the word-end lookahead.
             let mut j = i + 1;
             while !word_end_lookahead(&chars, j) {
                 j += 1;
@@ -247,15 +233,13 @@ fn punkt_word_tokenize(line: &str) -> Vec<String> {
             i = j;
             continue;
         }
-        // Bare \S.
         tokens.push(c.to_string());
         i += 1;
     }
     tokens
 }
 
-/// PunktBaseClass._tokenize_words, inference shape (the line/paragraph
-/// flags feed only training).
+/// PunktBaseClass._tokenize_words, inference shape.
 fn tokenize_words(text: &str) -> Vec<PunktTok> {
     let mut tokens = Vec::new();
     for line in text.split('\n') {
@@ -382,9 +366,7 @@ fn text_contains_sentbreak(params: &PunktParams, context: &str) -> bool {
     false
 }
 
-/// One period-context match: the end char at `start`, lookahead
-/// content through `after_end`, and the next token's span if the
-/// whitespace branch matched.
+/// One period-context match, as spans into the character vector.
 struct PeriodMatch {
     start: usize,
     after_end: usize,
@@ -427,8 +409,7 @@ fn slice_text(chars: &[char], start: usize, stop: usize) -> String {
     chars[start..stop].iter().collect()
 }
 
-/// _get_last_whitespace_index: ASCII string.whitespace, scanning from
-/// the end; 0 when none found.
+/// _get_last_whitespace_index, over ASCII string.whitespace.
 fn last_ascii_whitespace_index(chars: &[char], start: usize, stop: usize) -> usize {
     for i in (start..stop).rev() {
         if PY_ASCII_WHITESPACE.contains(chars[i]) {
@@ -503,9 +484,7 @@ fn slices_from_text(params: &PunktParams, chars: &[char]) -> Vec<(usize, usize)>
     slices
 }
 
-/// re_boundary_realignment lazy match at the head of `chars[start..stop]`:
-/// ["')\]}]+? then \s+ | (?=--) | $ (MULTILINE). Returns
-/// (group_rstrip_len, match_end_offset).
+/// re_boundary_realignment's lazy match, as (group_len, match_end).
 fn realign_match(chars: &[char], start: usize, stop: usize) -> Option<(usize, usize)> {
     let mut max_run = 0usize;
     while start + max_run < stop && REALIGN_CHARS.contains(chars[start + max_run]) {

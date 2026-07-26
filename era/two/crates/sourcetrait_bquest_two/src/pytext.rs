@@ -1,11 +1,4 @@
 //! Python string semantics for the reference-faithful scorer ports.
-//!
-//! The ifbench checkers and the nltk tokenizers are specified in
-//! Python; their behavior leans on Python's own character classes
-//! (str.isspace, re \w, str.isupper on strings) and string methods
-//! (strip with a char set, whitespace split, non-overlapping count).
-//! This module reproduces exactly those semantics so the ports read
-//! like their sources and the equality gates hold.
 
 use unicode_properties::GeneralCategory;
 use unicode_properties::UnicodeGeneralCategory;
@@ -13,8 +6,7 @@ use unicode_properties::UnicodeGeneralCategory;
 /// Python's string.punctuation (32 ASCII characters).
 pub(crate) const PY_PUNCTUATION: &str = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
 
-/// Python's string.whitespace (ASCII only - used by punkt's
-/// last-whitespace scan, distinct from str.isspace).
+/// Python's string.whitespace, ASCII only; not str.isspace's set.
 pub(crate) const PY_ASCII_WHITESPACE: &str = " \t\n\r\x0b\x0c";
 
 /// str.isspace / re \s: Unicode whitespace plus the ASCII separators.
@@ -65,8 +57,7 @@ pub(crate) fn py_is_decimal(c: char) -> bool {
     c.general_category() == GeneralCategory::DecimalNumber
 }
 
-/// A letter-ish word character: re [^\W\d] (word char, not a decimal
-/// digit) - what punkt calls "alpha".
+/// re [^\W\d] - what punkt calls "alpha".
 pub(crate) fn py_is_word_nondigit(c: char) -> bool {
     py_is_word(c) && !py_is_decimal(c)
 }
@@ -77,8 +68,7 @@ fn is_cased(c: char) -> bool {
         || c.general_category() == GeneralCategory::TitlecaseLetter
 }
 
-/// str.isupper on a string: at least one cased character and every
-/// cased character uppercase.
+/// str.isupper on a string.
 pub(crate) fn py_str_isupper(s: &str) -> bool {
     let mut any_cased = false;
     for c in s.chars() {
@@ -92,8 +82,7 @@ pub(crate) fn py_str_isupper(s: &str) -> bool {
     any_cased
 }
 
-/// str.islower on a string: at least one cased character and every
-/// cased character lowercase.
+/// str.islower on a string.
 pub(crate) fn py_str_islower(s: &str) -> bool {
     let mut any_cased = false;
     for c in s.chars() {
@@ -107,8 +96,7 @@ pub(crate) fn py_str_islower(s: &str) -> bool {
     any_cased
 }
 
-/// str.isdigit on a string, to Nd precision (superscript-digit No
-/// forms are out of scope for the exercised texts).
+/// str.isdigit on a string, to Nd precision.
 pub(crate) fn py_str_isdigit(s: &str) -> bool {
     !s.is_empty() && s.chars().all(py_is_decimal)
 }
@@ -153,8 +141,7 @@ pub(crate) fn py_count(haystack: &str, needle: &str) -> usize {
     haystack.matches(needle).count()
 }
 
-/// re.search(r"\b<literal>\b") for an ASCII-safe literal needle, with
-/// optional ASCII case-insensitivity. Word boundaries use Python's \w.
+/// re.search(r"\b<literal>\b"), optionally ASCII-case-insensitive.
 pub(crate) fn py_boundary_search(haystack: &str, needle: &str, ignore_case: bool) -> bool {
     if needle.is_empty() {
         return false;
@@ -172,9 +159,6 @@ pub(crate) fn py_boundary_search(haystack: &str, needle: &str, ignore_case: bool
             a == b
         }
     };
-    // A \b boundary exists at the needle edge when the needle-edge
-    // character and the neighbor differ in wordness; the needle edges
-    // here are word characters (keywords), so the neighbor must not be.
     for start in 0..=(chars.len() - n) {
         if !needle_chars.iter().enumerate().all(|(k, &c)| eq(chars[start + k], c)) {
             continue;
@@ -190,8 +174,7 @@ pub(crate) fn py_boundary_search(haystack: &str, needle: &str, ignore_case: bool
     false
 }
 
-/// NFKD-decompose then keep only ASCII (the checkers'
-/// unicodedata.normalize('NFKD', s).encode('ASCII', 'ignore') fold).
+/// NFKD-decompose then keep only ASCII - the checkers' fold.
 pub(crate) fn nfkd_ascii(s: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
     s.nfkd().filter(|c| c.is_ascii()).collect()
@@ -214,8 +197,7 @@ pub(crate) fn py_word_run_count(s: &str) -> usize {
     count
 }
 
-/// RegexpTokenizer(r"\w+") tokens themselves (count_stopwords needs
-/// the tokens, not just the count).
+/// RegexpTokenizer(r"\w+") tokens themselves.
 pub(crate) fn py_word_runs(s: &str) -> Vec<String> {
     let mut runs = Vec::new();
     let mut current = String::new();

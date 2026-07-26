@@ -1,5 +1,4 @@
-//! Crate-wide error types; module errors wrap into `BquestError` as they
-//! land.
+//! Crate-wide error types; module errors wrap in as they land.
 #[allow(unused_imports)]
 use crate::*;
 

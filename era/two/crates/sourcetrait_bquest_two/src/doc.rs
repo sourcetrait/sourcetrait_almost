@@ -1,13 +1,7 @@
-//! The self-documentation surface (DocCli): the always-moving
-//! command tree as an eye-tree-style listing, so each era's surface
-//! documents itself.
+//! The command tree as a listing, so each era's surface documents itself.
 use crate::*;
 
-/// One line per node - `name # summary` at one space per depth, the
-/// grammar signature-block style: categories, topics, and actions
-/// only, NO flag or parameter detail. Summaries are the clap about
-/// strings (the derive doc comments), flattened to one line; the
-/// implicit help node stays out.
+/// One `name # summary` line per node, indented one space per depth.
 pub(crate) fn render_cli_tree(command: &clap::Command) -> String {
     let mut out = String::new();
     for sub in command.get_subcommands() {

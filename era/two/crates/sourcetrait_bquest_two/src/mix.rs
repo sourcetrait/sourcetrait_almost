@@ -1,10 +1,4 @@
-//! The training-mix pipeline's document stage: render corpus trees
-//! into dolma-FIELD documents (one FILE per document, text = the
-//! verbatim bytes, identity in metadata only - the lineage
-//! presentation; bquest understood 03). Artifacts are whole-value
-//! .nuon tables, one per spec row - document text carries raw
-//! newlines, which the NUON-LINES form's single-line guard rightly
-//! refuses, so the lines form is reserved for logs.
+//! The mix pipeline's document stage: trees and shards to documents.
 use crate::*;
 
 use std::io::BufRead;
@@ -13,8 +7,7 @@ use std::io::BufRead;
 pub(crate) const MIX_SPEC_TYPEDEF: &str = "table<name: string, corpus_dir: string, \
      repo: string, license: string, kind: string>";
 
-/// One rendered document (the dolma field shape; kind rides metadata
-/// so the pack stage can gate FIM to code documents).
+/// One rendered document, in the dolma field shape.
 pub(crate) const MIX_DOCUMENT_TYPEDEF: &str = "record<id: string, text: string, \
      source: string, added: string, created: string, \
      metadata: record<repo: string, path: string, language: string, \
@@ -50,9 +43,7 @@ fn read_spec(value: &lib::nu::Value) -> BquestResult<Vec<MixSpecRow>> {
     Ok(spec_rows)
 }
 
-/// The metadata language token, from the file extension (lowercase;
-/// unmapped extensions carry verbatim, extensionless files read
-/// "text").
+/// The metadata language token, from the file extension.
 fn language_token(path: &Path) -> String {
     let Some(extension) = path.extension().and_then(|e| e.to_str()) else {
         return String::from("text");
@@ -64,8 +55,7 @@ fn language_token(path: &Path) -> String {
     }
 }
 
-/// Render one corpus tree into document rows, walk sorted for
-/// deterministic output.
+/// Render one corpus tree into document rows, walked sorted.
 fn render_tree(spec: &MixSpecRow, stamp: &str) -> BquestResult<Vec<lib::nu::Value>> {
     snafu::ensure_whatever!(
         spec.corpus_dir.is_dir(),
@@ -120,10 +110,7 @@ fn render_tree(spec: &MixSpecRow, stamp: &str) -> BquestResult<Vec<lib::nu::Valu
     Ok(documents)
 }
 
-// The FIM family is consumed by the pack stage (next in CptLoop);
-// the allows retire with it.
-/// FIM sentinel spellings (the pipe-wrapped forms the tokenizer
-/// carries as single special tokens; the lineage's exact bytes).
+/// The FIM sentinel spellings, as the tokenizer carries them.
 #[allow(dead_code)]
 pub(crate) const FIM_PREFIX: &str = "<|fim_prefix|>";
 #[allow(dead_code)]
@@ -134,8 +121,7 @@ pub(crate) const FIM_SUFFIX: &str = "<|fim_suffix|>";
 #[allow(dead_code)]
 pub(crate) const FIM_RATE: f64 = 0.5;
 
-/// SplitMix64: the deterministic seed-expanding rng (the era-one
-/// packing precedent; no external rng dependency).
+/// The crate's deterministic seed-expanding rng.
 #[allow(dead_code)]
 pub(crate) struct SplitMix64 {
     state: u64,
@@ -166,12 +152,7 @@ impl SplitMix64 {
     }
 }
 
-/// The lineage FIM transform: at FIM_RATE per document pick two char
-/// break points, then render 50/50 PSM
-/// (prefix-sentinel prefix, suffix-sentinel suffix, middle-sentinel
-/// middle) vs SPM (the suffix span leads); otherwise the text passes
-/// through untouched. Char-boundary safe; the three spans always
-/// reassemble the original text.
+/// The lineage FIM transform, at FIM_RATE with an even PSM/SPM split.
 #[allow(dead_code)]
 pub(crate) fn fim_transform(text: &str, rng: &mut SplitMix64) -> String {
     if rng.next_unit() >= FIM_RATE {
@@ -204,17 +185,14 @@ pub(crate) fn fim_transform(text: &str, rng: &mut SplitMix64) -> String {
     }
 }
 
-/// One document's pack-relevant fields (text + the FIM gate).
+/// One document's pack-relevant fields: text plus the FIM gate.
 #[allow(dead_code)]
 pub(crate) struct PackDocument {
     pub(crate) text: String,
     pub(crate) code: bool,
 }
 
-/// Tokenize documents in order into one EOS-joined id stream: FIM
-/// (when armed) transforms CODE documents pre-tokenization - the
-/// sentinels are added tokens, so they land as single ids - and
-/// every document ends with the EOS id.
+/// Tokenize documents in order into one EOS-joined id stream.
 #[allow(dead_code)]
 pub(crate) fn tokenize_documents(
     tokenizer: &tokenizers::Tokenizer,
@@ -242,9 +220,7 @@ pub(crate) fn tokenize_documents(
     Ok(stream)
 }
 
-/// Cut the joined stream into (seq_len + 1) chunks and shuffle them
-/// (Fisher-Yates over the chunk order, SplitMix64-seeded); the
-/// ragged tail is dropped and reported as the second return.
+/// Cut the stream into (seq_len + 1) chunks and shuffle them.
 #[allow(dead_code)]
 pub(crate) fn chunk_and_shuffle(
     stream: &[u32],
@@ -264,11 +240,7 @@ pub(crate) fn chunk_and_shuffle(
     (chunks, dropped_tail)
 }
 
-/// `bquest mix pack`: document tables (in the given mix order) ->
-/// one shuffled packed-chunks artifact - "chunks" u32
-/// [n, seq_len + 1] safetensors plus a .nuon provenance sidecar.
-/// The model dir resolves through the global -c config (the
-/// tokenizer is the checkpoint's own).
+/// `bquest mix pack`: document tables to one packed-chunks artifact.
 pub(crate) fn mix_pack(cli: &Cli, args: &MixPackArgs) -> BquestResult<()> {
     let started = std::time::Instant::now();
     let config = lib::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
@@ -379,12 +351,7 @@ pub(crate) fn mix_pack(cli: &Cli, args: &MixPackArgs) -> BquestResult<()> {
     Ok(())
 }
 
-/// `bquest mix sample`: document tables -> one sampled table. One
-/// seeded Fisher-Yates shuffle across the UNION of all input rows,
-/// taken in shuffled order until the text-byte budget is crossed
-/// (the final document overshoots; the overshoot is visible in the
-/// reported text_bytes). The admixture-leg sampler: deterministic
-/// per seed, provenance beside the artifact.
+/// `bquest mix sample`: one seeded draw to a text-byte budget.
 pub(crate) fn mix_sample(args: &MixSampleArgs) -> BquestResult<()> {
     let started = std::time::Instant::now();
     let document_type = lib::nu::parse_typedef(MIX_DOCUMENT_TYPEDEF)?;
@@ -462,9 +429,7 @@ pub(crate) fn mix_sample(args: &MixSampleArgs) -> BquestResult<()> {
     Ok(())
 }
 
-/// `bquest mix render`: corpus trees (per the spec) -> one
-/// whole-value documents_<name>.nuon table per spec row, rows
-/// conform-validated against the document typedef before write.
+/// `bquest mix render`: corpus trees to one document table per row.
 pub(crate) fn mix_render(args: &MixRenderArgs) -> BquestResult<()> {
     let started = std::time::Instant::now();
     let spec_value = lib::nu::load_value(&args.spec)?;
@@ -520,37 +485,7 @@ pub(crate) fn mix_render(args: &MixRenderArgs) -> BquestResult<()> {
     Ok(())
 }
 
-/// `bquest mix rip`: one zstd-compressed dolma JSONL shard -> a
-/// document table, taking documents until a text-byte budget is
-/// crossed. The their-side replay's ingest, in the same document
-/// shape `mix render` produces for our own corpus trees, so both
-/// sides feed `mix sample` and `mix pack` unchanged.
-///
-/// ## DEV
-/// THE DECODER LIVES HERE because the box ships no zstd binary and
-/// nushell reads none, so the harness previously drove a throwaway
-/// Rust bin built per session and lost to the session prune. bquest
-/// already carries Rust and already reads these shards at pack time,
-/// so folding it in removes the replay leg's only external
-/// dependency.
-///
-/// DECOMPRESSION IS STREAMED, and that is a storage requirement
-/// rather than a refinement. The caller's loop fetches one shard,
-/// rips it, and deletes it, which bounds peak storage at one
-/// compressed file; materializing the decompressed shard first
-/// multiplies that several-fold for no gain. So the reader decodes
-/// line by line and stops reading the moment the budget is crossed.
-///
-/// IDENTITY RIDES METADATA, never the text. That is the lineage's own
-/// presentation - ai2's renderers put the repository, path and
-/// license in a sidecar and let the text field carry raw file bytes -
-/// and departing from it would teach a header convention their model
-/// never saw.
-///
-/// `source` carries the STREAM name rather than the upstream's own
-/// source field, because a wayside audit counts documents per source
-/// stream and that count is the evidence the excluded topics
-/// contributed nothing.
+/// `bquest mix rip`: one zstd dolma shard, streamed to a document table.
 pub(crate) fn mix_rip(args: &MixRipArgs) -> BquestResult<()> {
     let started = std::time::Instant::now();
     let file = fs::File::open(&args.shard)?;
@@ -575,8 +510,6 @@ pub(crate) fn mix_rip(args: &MixRipArgs) -> BquestResult<()> {
     let mut seen = 0usize;
     let mut without_text = 0usize;
     for line in io::BufReader::new(decoder).lines() {
-        // The budget gates the READ, so a met budget stops
-        // decompressing rather than merely stops collecting.
         if text_bytes >= args.budget_bytes {
             break;
         }

@@ -1,11 +1,4 @@
-//! nltk's averaged perceptron POS tagger (perceptron.py, nltk
-//! 3.10.0), inference for the first token only - all the ifeval port
-//! needs (StartWithVerbChecker reads pos_tag(tokens)[0]).
-//!
-//! Faithfulness: the tagdict shortcut keys on the RAW word; features
-//! accumulate in insertion order; weight maps iterate in JSON file
-//! order (serde_json preserve_order); prediction takes the maximum of
-//! (score, label) over the class list exactly as Python's max does.
+//! nltk's averaged perceptron POS tagger, first token only.
 use crate::*;
 
 pub(crate) struct PerceptronTagger {
@@ -53,9 +46,7 @@ impl PerceptronTagger {
         chars[start..].iter().collect()
     }
 
-    /// The tag of tokens[0] under PerceptronTagger.tag (prev/prev2 are
-    /// the START sentinels for the first token, so later predictions
-    /// cannot affect it).
+    /// The tag of tokens[0] under PerceptronTagger.tag.
     pub(crate) fn tag_first(&self, tokens: &[String]) -> BquestResult<String> {
         let Some(word) = tokens.first() else {
             snafu::whatever!("tag_first on an empty token list");
@@ -69,7 +60,6 @@ impl PerceptronTagger {
         context.push(String::from("-END-"));
         context.push(String::from("-END2-"));
 
-        // _get_features(i=0, ...) with i offset by len(START) = 2.
         let i = 2usize;
         let first_char = word.chars().next().map(String::from).unwrap_or_default();
         let mut features: Vec<(String, i64)> = Vec::new();
@@ -112,7 +102,6 @@ impl PerceptronTagger {
             }
         }
 
-        // max(classes, key=lambda label: (scores[label], label)).
         let mut best: Option<(&str, f64)> = None;
         for label in &self.classes {
             let score = *scores.get(label.as_str()).unwrap_or(&0.0);

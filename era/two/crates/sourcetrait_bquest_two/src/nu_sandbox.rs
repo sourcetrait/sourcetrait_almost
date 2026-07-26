@@ -1,28 +1,4 @@
-//! Running nushell that we did not write.
-//!
-//! Three of the task families are verified by EXECUTION - the answer
-//! is a pipeline, and whether it is right is whether it produces the
-//! right value. That means running model output, so it runs under
-//! bubblewrap with the root read-only, no network, no session, and
-//! dying with its parent.
-//!
-//! ## DEV
-//! In-process evaluation was never an option here even though the
-//! library already carries the nushell crates. A verifier runs
-//! generated code, and generated code is arbitrary: an in-process
-//! eval would hand it the trainer's own address space, filesystem
-//! and network. Bubblewrap is unprivileged, already present because
-//! Flatpak ships it, and alters nothing.
-//!
-//! The comparison is on VALUES, never on stdout text. Two correct
-//! pipelines can render the same value differently - a table prints
-//! as a bordered grid and as a NUON literal - so the runner appends
-//! `to nuon` and the caller compares parsed values. Comparing the
-//! rendered text would score formatting and call it correctness.
-//!
-//! A generated pipeline can loop forever, so every run carries a
-//! timeout and the child is killed on it. Without one a single
-//! non-terminating answer stalls a whole verification pass.
+//! Running nushell that we did not write, under bubblewrap.
 use crate::*;
 
 use std::process::{
@@ -30,17 +6,12 @@ use std::process::{
     Stdio,
 };
 
-/// The sandbox binary. Absent is a hard error rather than a silent
-/// fallback to running unsandboxed - the whole point is that model
-/// output never runs unconfined.
+/// The sandbox binary; absent is a hard error, never a fallback.
 const SANDBOX_BIN: &str = "bwrap";
-/// The nushell binary, resolved on PATH so the estate's pinned
-/// version is what runs.
+/// The nushell binary, resolved on PATH to the estate's pinned one.
 const NU_BIN: &str = "nu";
 
-/// Filesystem roots the sandbox binds. These are platform paths
-/// rather than ours, so they are REQUIRED to exist rather than
-/// created.
+/// Filesystem roots the sandbox binds; required, never created.
 const ROOT: &str = "/";
 const DEV: &str = "/dev";
 const PROC: &str = "/proc";
@@ -59,9 +30,7 @@ pub(crate) struct NuOutcome {
     pub(crate) timed_out: bool,
 }
 
-/// Confirm the sandbox is available. Called before a verification
-/// pass so a missing sandbox fails once and loudly rather than once
-/// per item.
+/// Confirm the sandbox is available, once per verification pass.
 pub(crate) fn require_sandbox() -> BquestResult<()> {
     let probe = Command::new(SANDBOX_BIN)
         .arg("--version")
@@ -121,12 +90,8 @@ pub(crate) fn run_nu(source: &str, timeout: std::time::Duration) -> BquestResult
     })
 }
 
-/// Run a pipeline and return the VALUE it produced, by appending
-/// `to nuon` and parsing what comes back. None when the pipeline
-/// failed, timed out, or emitted something that is not NUON.
+/// The VALUE a pipeline produced, or None if it produced no NUON.
 pub(crate) fn pipeline_value(source: &str) -> BquestResult<Option<lib::nu::Value>> {
-    // A trailing semicolon or comment would swallow the appended
-    // stage, so the pipeline is parenthesised rather than concatenated.
     let wrapped = format!("({source}) | to nuon");
     let outcome = run_nu(&wrapped, DEFAULT_TIMEOUT)?;
     if !outcome.ok {

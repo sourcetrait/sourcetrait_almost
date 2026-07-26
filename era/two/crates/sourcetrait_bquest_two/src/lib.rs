@@ -42,14 +42,10 @@ pub(crate) use std::{
 
 pub(crate) use sourcetrait_lib_quest_two as lib;
 
-/// Reference backend for the burn hybrid oracle: deterministic host
-/// f32, isolated from the CUDA stack under test.
+/// The oracle's reference backend: deterministic host f32.
 #[allow(dead_code)]
 pub(crate) type CpuBack = burn::backend::NdArray<f32>;
-/// Fast-oracle and trainer cuda backend (bf16 default float; the
-/// GDN mixer's gate/norm/recurrence region computes f32 regardless
-/// via per-tensor casts - the reference stacks' f32-state
-/// discipline).
+/// The fast-oracle and trainer backend; bf16 default float.
 #[cfg(any(feature = "burn-cuda", feature = "train-cuda"))]
 #[allow(dead_code)]
 pub(crate) type CudaBack = burn::backend::Cuda<burn::tensor::bf16>;

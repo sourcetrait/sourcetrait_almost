@@ -1,26 +1,12 @@
-//! The CapabilityRatchet engine runner (EngineRunner): drive the lib
-//! engine over rendered olmo-eval fixture requests and emit
-//! predictions in their JSONL shape; scoring stays their code (the
-//! CPU-only rescore step in the eval env consumes these rows beside
-//! the fixture requests).
-//!
-//! Pinned olmo-eval contracts this file mirrors: the lm_eval-style
-//! context/continuation encode (trailing whitespace moves to the
-//! continuation; continuation ids are whole_enc[len(ctx_enc)..]; the
-//! fed ids are ctx_enc ++ cont_ids - which may differ from whole_enc
-//! across a BPE boundary, deliberately), and build_predictions'
-//! model_output field set (the logprob-derived keys appear only on
-//! loglikelihood rows; generation rows carry text/extracted_answer/
-//! num_chars/is_greedy alone).
+//! The capability runner: the engine over olmo-eval fixture requests.
 use crate::*;
 
-/// The prefill chunk for context advances (the lib generate default).
+/// The prefill chunk for context advances.
 const PREFILL_CHUNK: usize = 512;
 /// The capability home relative to the XDG data home.
 pub(crate) const CAPABILITY_HOME_RELATIVE: &str = "sourcetrait/quest/capability";
 
-/// A fixture request row (the olmo-eval requests JSONL shape; fields
-/// this runner does not consume are ignored by serde).
+/// A fixture request row, in the olmo-eval requests shape.
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct RequestRow {
     pub(crate) request_type: String,
@@ -34,8 +20,7 @@ pub(crate) struct RequestRow {
 
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct RequestBody {
-    /// A string (completion/loglikelihood) or a [{role, content}]
-    /// message list (chat).
+    /// A string, or a chat message list.
     #[serde(default)]
     pub(crate) context: serde_json::Value,
     #[serde(default)]
@@ -58,9 +43,7 @@ pub(crate) struct GenerationKwargs {
     pub(crate) temperature: Option<f64>,
 }
 
-/// One model_output entry in the olmo-eval predictions shape; the
-/// Option fields serialize only when present (their builder omits the
-/// logprob family on generation rows).
+/// One model_output entry in the olmo-eval predictions shape.
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct ModelOutput {
     pub(crate) text: String,
@@ -91,7 +74,7 @@ pub(crate) struct PredictionRow {
     pub(crate) final_output: String,
 }
 
-/// XDG data home, honoring the spec fallback (~/.local/share).
+/// The XDG data home, honouring the spec's own fallback.
 pub(crate) fn data_home() -> BquestResult<PathBuf> {
     if let Ok(dir) = std::env::var("XDG_DATA_HOME")
         && !dir.is_empty()
@@ -115,8 +98,7 @@ fn ids_tensor(ids: &[u32], device: &candle_core::Device) -> BquestResult<candle_
     Ok(candle_core::Tensor::from_vec(ids.to_vec(), ids.len(), device)?)
 }
 
-/// Log-softmax picks on one host logits row: (logprob of `token`,
-/// whether `token` is the row argmax).
+/// One host row's log-softmax pick: (logprob, was-argmax).
 fn row_pick(row: &[f32], token: u32) -> (f64, bool) {
     let mut max_value = f32::NEG_INFINITY;
     let mut max_index = 0usize;
@@ -144,8 +126,6 @@ pub(crate) fn capability_run(cli: &Cli, args: &CapabilityRunArgs) -> BquestResul
         Some(dir) => dir.clone(),
         None => capability_home.join("fixtures/full"),
     };
-    // Input-format detection, decided at source: a requests tree
-    // carrying *-requests.nuon runs the nuon path; JSONL otherwise.
     let requests_root = fixtures.join("requests");
     snafu::ensure_whatever!(
         requests_root.is_dir(),
@@ -330,9 +310,7 @@ pub(crate) fn capability_run(cli: &Cli, args: &CapabilityRunArgs) -> BquestResul
     Ok(())
 }
 
-/// The reverse adapter: a nuon run's predictions rendered back to the
-/// reference's JSONL tree (the live bridge for rescore.py
-/// comparisons).
+/// The reverse adapter: a nuon run rendered back to their JSONL.
 pub(crate) fn capability_bridge(args: &CapabilityBridgeArgs) -> BquestResult<()> {
     let started = std::time::Instant::now();
     let out_root = match &args.out {
@@ -416,8 +394,7 @@ fn read_rows(file: &Path) -> BquestResult<Vec<RequestRow>> {
     Ok(rows)
 }
 
-/// The mirrored output path: requests/<sub>/<stem>-requests.jsonl ->
-/// <out>/predictions/<sub>/<stem>-predictions.jsonl.
+/// The mirrored output path, requests to predictions.
 fn prediction_path(
     requests_root: &Path,
     file: &Path,
@@ -435,10 +412,7 @@ fn prediction_path(
     Ok(out_root.join("predictions").join(parent).join(name))
 }
 
-/// MC/loglikelihood scoring: the shared context prefills once (all but
-/// its final token), then each continuation forwards
-/// [last_ctx ++ cont_ids] and rolls back - row j of the block predicts
-/// cont_ids[j] (the all-position logits contract).
+/// Log-likelihood rows: one shared prefill, then per continuation.
 fn run_loglikelihood_task(
     model: &mut lib::OlmoHybrid,
     tokenizer: &tokenizers::Tokenizer,
@@ -464,8 +438,6 @@ fn run_loglikelihood_task(
             ),
         };
 
-        // The lm_eval boundary: trailing whitespace moves from the
-        // context to every continuation before tokenization.
         let trimmed = context.trim_end();
         let moved = &context[trimmed.len()..];
         let ctx_enc = encode(tokenizer, trimmed)?;
@@ -545,11 +517,7 @@ fn run_loglikelihood_task(
     Ok(predictions)
 }
 
-/// generate_until rows: greedy decode through the carried engine at
-/// the row's cap, with their client-side stop-sequence truncation
-/// (cut at the earliest stop occurrence). Chat contexts render
-/// through the byte-identical chat template; string contexts feed
-/// verbatim.
+/// generate_until rows: greedy decode at the row's own cap.
 fn run_generation_task(
     model: &mut lib::OlmoHybrid,
     tokenizer: &tokenizers::Tokenizer,

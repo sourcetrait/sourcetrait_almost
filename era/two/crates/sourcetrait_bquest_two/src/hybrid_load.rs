@@ -1,14 +1,8 @@
-//! Independent checkpoint plumbing for the burn hybrid oracle: its
-//! OWN config serde and its OWN safetensors-to-host loader (the
-//! oracle triangle's independence covers loaders, not just math),
-//! plus the C2 dump readers the parity gates consume.
-// Consumed by the parity gates alone until the CptLoop trainer verbs
-// land on top; the allow retires with them.
+//! The burn oracle's own config serde, weight loader and dump readers.
 #![allow(dead_code)]
 use crate::*;
 
-/// The oracle's own read of config.json - only the fields the frozen
-/// forward needs, parsed independently of lib's checkpoint model.
+/// The oracle's own read of config.json, independent of lib's.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub(crate) struct HybridCheckpointConfig {
     pub(crate) vocab_size: usize,
@@ -55,16 +49,13 @@ impl HybridCheckpointConfig {
     }
 }
 
-/// Checkpoint tensors as host f32 buffers keyed by safetensors name,
-/// consumed as the model takes them (the era-one heat loader pattern,
-/// authored fresh).
+/// Checkpoint tensors as host f32, consumed by safetensors name.
 pub(crate) struct HybridWeights {
     tensors: HashMap<String, (Vec<usize>, Vec<f32>)>,
 }
 
 impl HybridWeights {
-    /// Assemble from pre-built host tensors (the toy-config builders'
-    /// entry; checkpoint loads ride `load`).
+    /// Assemble from pre-built host tensors: the toy builders' entry.
     pub(crate) fn from_tensors(tensors: HashMap<String, (Vec<usize>, Vec<f32>)>) -> Self {
         Self { tensors }
     }
@@ -103,8 +94,7 @@ impl HybridWeights {
         Ok(entry)
     }
 
-    /// A pytorch Linear weight (out, in), pre-transposed to (in, out)
-    /// so the forward is a plain x.matmul(w).
+    /// A pytorch Linear weight (out, in), transposed to (in, out).
     pub(crate) fn take_linear_transposed<B: burn::tensor::backend::Backend>(
         &mut self,
         name: &str,
@@ -148,9 +138,7 @@ impl HybridWeights {
         Ok(burn::tensor::Tensor::from_data(data, device))
     }
 
-    /// A depthwise conv weight (channels, 1, kernel) as `kernel`
-    /// broadcastable (1, channels) tap rows, tap-major - tap k-1
-    /// multiplies the current token (the pinned orientation).
+    /// A depthwise conv weight as broadcastable tap rows, tap-major.
     pub(crate) fn take_conv_taps<B: burn::tensor::backend::Backend>(
         &mut self,
         name: &str,
@@ -175,8 +163,7 @@ impl HybridWeights {
         Ok(taps)
     }
 
-    /// Raw host values of a rank-2 tensor (the embedding table stays
-    /// host-side for direct row gathering).
+    /// Raw host values of a rank-2 tensor, as (rows, cols, values).
     pub(crate) fn take_host_matrix(
         &mut self,
         name: &str,
@@ -187,7 +174,7 @@ impl HybridWeights {
     }
 }
 
-/// Read a rank-1 u32 tensor from a C2 dump.
+/// Read a rank-1 u32 tensor from a reference dump.
 pub(crate) fn dump_read_u32(
     file: &safetensors::SafeTensors,
     name: &str,
@@ -207,7 +194,7 @@ pub(crate) fn dump_read_u32(
         .collect())
 }
 
-/// Read a rank-2 f32 tensor from a C2 dump: (rows, cols, values).
+/// Read a rank-2 f32 dump tensor as (rows, cols, values).
 pub(crate) fn dump_read_f32_matrix(
     file: &safetensors::SafeTensors,
     name: &str,

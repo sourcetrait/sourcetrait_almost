@@ -1,18 +1,14 @@
-//! The bquest command surface: the global -d/-c/-s profile flagset over
-//! every subcommand (the suite's -d/-c/-s framework, lib-resolved).
+//! The command surface: a global profile flagset over a verb tree.
 use crate::*;
 
 /// bquest: the training, development, and testing tool.
 #[derive(Debug, clap::Parser)]
 #[command(name = "bquest", version, about)]
 pub(crate) struct Cli {
-    /// Profile root override: profile names resolve under
-    /// <dir>/config and <dir>/settings instead of the XDG suite root.
+    /// Profile root override, in place of the XDG suite root.
     #[arg(short = 'd', long = "dir", global = true)]
     pub(crate) dir: Option<PathBuf>,
-    /// Config profile token: a pure snake resolves under the profile
-    /// root; anything else is a component-toml path; absent = the
-    /// `default` profile with the embedded-base fallback.
+    /// Config profile token: a snake, or a component-toml path.
     #[arg(short = 'c', long = "config", global = true)]
     pub(crate) config: Option<String>,
     /// Settings profile token: the same rules as --config.
@@ -45,8 +41,7 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: BenchCommand,
     },
-    /// Task generators: synthesised examples whose answers are
-    /// mechanically verifiable, for every stage plus the bench.
+    /// Task generators: synthesised, mechanically-verifiable examples.
     Taskgen {
         #[command(subcommand)]
         command: TaskgenCommand,
@@ -57,14 +52,12 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: RolloutCommand,
     },
-    /// The Speculation:DepthProbe instrument (recorded greedy streams
-    /// + the offline policy/cost-model simulator).
+    /// The speculation depth probe: record, then replay offline.
     Speculate {
         #[command(subcommand)]
         command: SpeculateCommand,
     },
-    /// The training stages: gradient locks, continued pretraining,
-    /// and the supervised, preference and reinforcement legs.
+    /// The training stages, in chain order from the gate onward.
     Train {
         #[command(subcommand)]
         command: TrainCommand,
@@ -73,34 +66,25 @@ pub(crate) enum Command {
 
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum TrainCommand {
-    /// The toy-config gradient locks on cpu f32: adapter-off
-    /// exactness, chain-vs-full gradient equivalence, 60-step
-    /// descent (needs a train build).
+    /// The three toy-config gradient locks, on cpu f32.
     Gate,
-    /// LoRA CPT over a packed-chunks artifact -> one adapter
-    /// safetensors + a NUON-lines step log (needs a train-cuda
-    /// build; the model resolves through the global -c config).
+    /// Continued pretraining over a packed-chunks artifact.
     Cpt(TrainCptArgs),
-    /// Supervised tuning over a packed instruction artifact: the loss
-    /// covers the assistant turns alone.
+    /// Supervised tuning: the loss covers the assistant turns alone.
     Sft(TrainSftArgs),
-    /// Preference tuning over pairs, graded against the frozen base
-    /// (the adapter-off path is the reference model).
+    /// Preference tuning over pairs, against the frozen base.
     Dpo(TrainDpoArgs),
     /// Reinforcement tuning over verifier-scored rollout groups.
     Rlvr(TrainRlvrArgs),
 }
 
-/// The knobs every stage loop shares, so a posture reads the same
-/// whichever objective is running.
+/// The knobs every stage loop shares.
 #[derive(Debug, clap::Args)]
 pub(crate) struct StageArgs {
     /// The adapter artifact path (.safetensors).
     #[arg(long)]
     pub(crate) out: PathBuf,
-    /// Continue a previous stage's adapter rather than starting from
-    /// the base - the checkpoint chain. Rank and alpha then come from
-    /// that artifact and --rank / --alpha are ignored.
+    /// Continue a previous stage's adapter; without it, the base.
     #[arg(long)]
     pub(crate) resume: Option<PathBuf>,
     /// LoRA rank (fresh adapters only).
@@ -135,8 +119,7 @@ pub(crate) struct StageArgs {
 
 #[derive(Debug, clap::Args)]
 pub(crate) struct TrainSftArgs {
-    /// A packed instruction artifact (from `mix instruct`), carrying
-    /// ids and their loss mask.
+    /// A packed instruction artifact, from `mix instruct`.
     #[arg(long)]
     pub(crate) chunks: PathBuf,
     /// Rows folded into one optimizer step.
@@ -175,9 +158,7 @@ pub(crate) struct TrainRlvrArgs {
 
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum BenchCommand {
-    /// Answer every bench prompt greedily and report the pass rate -
-    /// what the model can DO, against the general battery's reading
-    /// of what a posture is breaking.
+    /// Answer every bench prompt greedily and report the pass rate.
     Run(BenchRunArgs),
 }
 
@@ -196,9 +177,7 @@ pub(crate) struct BenchRunArgs {
 
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum TaskgenCommand {
-    /// Every family at once: NUON conversion and formatting, nushell
-    /// from a shell command and from prose, and error location. Each
-    /// answer is checked by machine before it ships.
+    /// Every family at once, each answer machine-checked before it ships.
     All(TaskgenAllArgs),
 }
 
@@ -221,8 +200,7 @@ pub(crate) struct TaskgenAllArgs {
 
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum RolloutCommand {
-    /// Sample replies to verifiable prompts through the engine, grade
-    /// each against its verifier, and emit scored groups.
+    /// Sample replies, grade each, and emit the scored groups.
     Run(RolloutRunArgs),
 }
 
@@ -235,15 +213,13 @@ pub(crate) struct RolloutRunArgs {
     /// The scored-rollout artifact (.nuon).
     #[arg(long)]
     pub(crate) out: PathBuf,
-    /// Replies sampled per prompt - the group an advantage is
-    /// computed over. One carries no relative signal.
+    /// Replies per prompt: the group an advantage is computed over.
     #[arg(long, default_value_t = 8)]
     pub(crate) group: usize,
     /// Decode budget per reply.
     #[arg(long, default_value_t = 256)]
     pub(crate) max_tokens: usize,
-    /// Sampling temperature; the group needs spread, so greedy would
-    /// make every member identical.
+    /// Sampling temperature; the group needs spread, so never zero.
     #[arg(long, default_value_t = 1.0)]
     pub(crate) temperature: f64,
     /// The base sampling seed (each reply offsets from it).
@@ -259,11 +235,10 @@ pub(crate) struct TrainCptArgs {
     /// The adapter artifact path (.safetensors).
     #[arg(long)]
     pub(crate) out: PathBuf,
-    /// LoRA rank (the library-wide fixed-rank discipline decides the
-    /// production value; sweeps ride this knob).
+    /// LoRA rank; the production value is fixed library-wide.
     #[arg(long, default_value_t = 64)]
     pub(crate) rank: usize,
-    /// LoRA alpha; absent = 2 * rank (the era-one anchor).
+    /// LoRA alpha; absent = 2 * rank, the era-one anchor.
     #[arg(long)]
     pub(crate) alpha: Option<f64>,
     /// Peak learning rate (linear warmup then constant).
@@ -293,21 +268,15 @@ pub(crate) struct TrainCptArgs {
 
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum MixCommand {
-    /// Pack document tables into shuffled training chunks (EOS-joined
-    /// token stream, seq_len + 1 rows, optional FIM on code).
+    /// Pack document tables into shuffled training chunks.
     Pack(MixPackArgs),
-    /// Render corpus trees into dolma-field document tables (one
-    /// file per document, verbatim text, identity in metadata).
+    /// Render corpus trees into dolma-field document tables.
     Render(MixRenderArgs),
-    /// Sample documents from tables (one seeded shuffle across the
-    /// union) until a text-byte budget is crossed - the admixture
-    /// leg sampler.
+    /// Sample documents across tables to a text-byte budget.
     Sample(MixSampleArgs),
-    /// Pack instruction examples one per row, masking the assistant
-    /// turns, for supervised tuning.
+    /// Pack instruction examples one per row, assistant turns masked.
     Instruct(MixInstructArgs),
-    /// Stream one zstd dolma shard into a document table, taking
-    /// documents to a byte budget - the their-side replay's ingest.
+    /// Stream one zstd dolma shard into a document table.
     Rip(MixRipArgs),
 }
 
@@ -320,31 +289,25 @@ pub(crate) struct MixRipArgs {
     /// it).
     #[arg(long)]
     pub(crate) out: PathBuf,
-    /// The source stream this shard belongs to. It rides every
-    /// document's `source`, which is what a wayside audit counts by.
+    /// The source stream this shard belongs to.
     #[arg(long)]
     pub(crate) name: String,
     /// The hub dataset the shard came from (rides metadata.repo).
     #[arg(long)]
     pub(crate) hub: String,
-    /// The shard's path inside the dataset (rides metadata.path);
-    /// absent = the shard's file name.
+    /// The shard's path inside the dataset; absent = its file name.
     #[arg(long = "shard-path")]
     pub(crate) shard_path: Option<String>,
-    /// `docs` or `code` - the same field the render spec takes. Their
-    /// code stream is already infilling-transformed upstream, so
-    /// nothing from this side should ever be marked code.
+    /// `docs` or `code`; nothing on this side should be code.
     #[arg(long, default_value = "docs")]
     pub(crate) kind: String,
     /// The upstream license (rides metadata.license).
     #[arg(long, default_value = "odc-by")]
     pub(crate) license: String,
-    /// Stop once cumulative text bytes cross this budget; the
-    /// crossing document overshoots, exactly as `mix sample` does.
+    /// Stop once text bytes cross this; the last document overshoots.
     #[arg(long)]
     pub(crate) budget_bytes: usize,
-    /// Verbatim added/created stamp carried into every document
-    /// (deterministic; absent = empty).
+    /// Verbatim added/created stamp; absent = empty.
     #[arg(long)]
     pub(crate) stamp: Option<String>,
 }
@@ -358,9 +321,7 @@ pub(crate) struct MixInstructArgs {
     /// lands beside it).
     #[arg(long)]
     pub(crate) out: PathBuf,
-    /// The window each example pads to; a longer example is DROPPED
-    /// and reported, never truncated - a clipped reply teaches the
-    /// model to stop mid-answer.
+    /// The window each example pads to; a longer one is dropped.
     #[arg(long, default_value_t = 1024)]
     pub(crate) seq_len: usize,
 }
@@ -374,8 +335,7 @@ pub(crate) struct MixSampleArgs {
     /// lands beside it).
     #[arg(long)]
     pub(crate) out: PathBuf,
-    /// Stop once cumulative text bytes cross this budget (the last
-    /// document overshoots; the overshoot is reported).
+    /// Stop once text bytes cross this; the last document overshoots.
     #[arg(long)]
     pub(crate) budget_bytes: usize,
     /// The deterministic sample seed.
@@ -389,8 +349,7 @@ pub(crate) struct MixPackArgs {
     /// (the mix order).
     #[arg(long, required = true, num_args = 1..)]
     pub(crate) documents: Vec<PathBuf>,
-    /// The packed-chunks artifact (.safetensors; a .nuon provenance
-    /// sidecar lands beside it).
+    /// The packed-chunks artifact; a provenance sidecar lands beside it.
     #[arg(long)]
     pub(crate) out: PathBuf,
     /// Training window; chunks carry seq_len + 1 ids.
@@ -406,43 +365,32 @@ pub(crate) struct MixPackArgs {
 
 #[derive(Debug, clap::Args)]
 pub(crate) struct MixRenderArgs {
-    /// The render spec (.nuon table: name / corpus_dir / repo /
-    /// license / kind per corpus tree).
+    /// The render spec: one row per corpus tree.
     #[arg(long)]
     pub(crate) spec: PathBuf,
-    /// Output directory (documents_<name>.nuon lands per spec row).
+    /// Output directory; one document table lands per spec row.
     #[arg(long)]
     pub(crate) out: PathBuf,
-    /// Verbatim added/created stamp carried into every document
-    /// (deterministic; absent = empty).
+    /// Verbatim added/created stamp; absent = empty.
     #[arg(long)]
     pub(crate) stamp: Option<String>,
 }
 
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum DocCommand {
-    /// Print the whole command tree as an eye-tree listing - one
-    /// `name # summary` line per category/topic/action, no flag or
-    /// parameter detail (the grammar signature-block style).
+    /// Print the whole command tree, one summary line per node.
     Cli,
 }
 
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum CapabilityCommand {
-    /// Drive the engine over rendered olmo-eval fixture requests and
-    /// emit predictions in their JSONL shape (scoring stays their
-    /// code, run CPU-only in the eval env).
+    /// Drive the engine over rendered olmo-eval fixture requests.
     Run(CapabilityRunArgs),
-    /// Convert fixture requests and standing runs' predictions from
-    /// their JSONL to whole-value .nuon mirrors (lossless,
-    /// gate-verified in place; provenance siblings written).
+    /// Mirror fixture requests and run predictions into nuon.
     Convert(CapabilityConvertArgs),
-    /// Score a converted run in pure rust (MC logprob accuracy, gsm8k
-    /// exact-match, IFBench ifeval): per-item scores + per-task
-    /// aggregates as .nuon.
+    /// Score a converted run: per-item scores plus aggregates.
     Score(CapabilityScoreArgs),
-    /// Render a nuon run's predictions back to the reference JSONL
-    /// tree (the reverse adapter for rescore.py comparisons).
+    /// Render a nuon run's predictions back to their JSONL tree.
     Bridge(CapabilityBridgeArgs),
 }
 
@@ -458,14 +406,11 @@ pub(crate) struct CapabilityBridgeArgs {
 
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum SpeculateCommand {
-    /// Record plain greedy transcripts (token streams + text) from a
-    /// .nuon fixture plan into per-transcript .nuon artifacts.
+    /// Record plain greedy transcripts from a fixture plan.
     Record(SpeculateRecordArgs),
-    /// Replay recorded streams through the lookup index under
-    /// candidate policies x pass-cost models; emit the depth report.
+    /// Replay recorded streams under every policy and cost model.
     Simulate(SpeculateSimulateArgs),
-    /// Print a transcript's emitted tokens as indexed decoded pieces
-    /// (the phase-annotation aid).
+    /// Print a transcript's emitted tokens as decoded pieces.
     Tokens(SpeculateTokensArgs),
 }
 
@@ -486,8 +431,7 @@ pub(crate) struct SpeculateRecordArgs {
 
 #[derive(Debug, clap::Args)]
 pub(crate) struct SpeculateSimulateArgs {
-    /// The recorded-transcript directory (spec_transcript_*.nuon +
-    /// optional sibling spec_phases_*.nuon annotations).
+    /// The recorded-transcript directory, with any phase siblings.
     #[arg(long)]
     pub(crate) transcripts: PathBuf,
     /// The report artifact path (.nuon).
@@ -510,39 +454,32 @@ pub(crate) struct SpeculateTokensArgs {
 
 #[derive(Debug, clap::Args)]
 pub(crate) struct CapabilityConvertArgs {
-    /// Fixture render root (carrying requests/); absent = the
-    /// capability home's fixtures/full.
+    /// Fixture render root; absent = the capability home's.
     #[arg(long)]
     pub(crate) fixtures: Option<PathBuf>,
-    /// Runs root whose child run directories carry predictions/;
-    /// absent = the capability home's runs.
+    /// Runs root; absent = the capability home's.
     #[arg(long)]
     pub(crate) runs: Option<PathBuf>,
     /// Nuon output root; absent = the capability home's nuon.
     #[arg(long)]
     pub(crate) out: Option<PathBuf>,
-    /// Comma-separated task-token filter (the sanitized spec, e.g.
-    /// mmlu_anatomy); absent = every task found.
+    /// Comma-separated task-token filter; absent = every task found.
     #[arg(long)]
     pub(crate) tasks: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]
 pub(crate) struct CapabilityScoreArgs {
-    /// Converted nuon run directory (carrying predictions/); absent =
-    /// the capability home's nuon/runs/engine_default.
+    /// Converted nuon run directory; absent = the default engine run.
     #[arg(long)]
     pub(crate) run: Option<PathBuf>,
-    /// Converted nuon fixtures root (carrying requests/); absent =
-    /// the capability home's nuon/fixtures.
+    /// Converted nuon fixtures root; absent = the capability home's.
     #[arg(long)]
     pub(crate) fixtures: Option<PathBuf>,
-    /// Output root (scores/ and aggregates.nuon land beneath it);
-    /// absent = the run directory itself.
+    /// Output root; absent = the run directory itself.
     #[arg(long)]
     pub(crate) out: Option<PathBuf>,
-    /// Checker-data directory (the copied reference data files);
-    /// absent = the capability home's checker_data.
+    /// Checker-data directory; absent = the capability home's.
     #[arg(long)]
     pub(crate) checker_data: Option<PathBuf>,
     /// Comma-separated task-token filter; absent = every task found.
@@ -552,12 +489,10 @@ pub(crate) struct CapabilityScoreArgs {
 
 #[derive(Debug, clap::Args)]
 pub(crate) struct CapabilityRunArgs {
-    /// Fixture root (a render's -O dir carrying requests/); absent =
-    /// the capability home's fixtures/full.
+    /// Fixture root; absent = the capability home's fixtures.
     #[arg(long)]
     pub(crate) fixtures: Option<PathBuf>,
-    /// Output root (predictions/ lands beneath it); absent = the
-    /// capability home's runs/engine_<settings token or default>.
+    /// Output root; absent = the capability home's run for these settings.
     #[arg(long)]
     pub(crate) out: Option<PathBuf>,
     /// Comma-separated task_name filter; absent = every task found.

@@ -1,30 +1,17 @@
-//! The adapter framework: frozen-base additive adapters under the
-//! direction-3 placement rule, enforced BY CONSTRUCTION - the only
-//! adapters that exist are the sanctioned readout-surface ones (GDN
-//! q_proj / q_conv1d / g_proj / o_proj, attn q/o, MLP everywhere);
-//! state-carrying weights (GDN k/v projections and convs, a_proj,
-//! b_proj, attn k/v) have no adapter type to attach. Linear targets
-//! ride low-rank pairs; the depthwise q_conv1d rides a full delta
-//! (11,520 params/layer - a rank decomposition of a (channels, 4)
-//! kernel buys nothing). Zero-init keeps adapter-off bit-exact.
-// The trainer stage (cfg train) is the consumer; non-train builds
-// see the framework dead.
+//! Frozen-base additive adapters, placed by construction.
 #![allow(dead_code)]
 use crate::*;
 
 use burn::tensor::backend::Backend;
 
-/// One adapted projection's low-rank pair: a [in, rank] drawn
-/// N(0, 0.02), b [rank, out] zeros (an untrained pair contributes
-/// exactly nothing), contribution (x.a).b * (alpha / rank).
+/// One adapted projection's low-rank pair, contributing (x.a).b * scale.
 pub(crate) struct LoraPair<B: Backend> {
     pub(crate) a: burn::tensor::Tensor<B, 2>,
     pub(crate) b: burn::tensor::Tensor<B, 2>,
     pub(crate) scale: f64,
 }
 
-/// One standard-normal draw (Box-Muller over SplitMix64; the
-/// deterministic init discipline - no external rng).
+/// One standard-normal draw, Box-Muller over SplitMix64.
 fn normal_draw(rng: &mut SplitMix64) -> f64 {
     let mut first_unit = rng.next_unit();
     if first_unit <= f64::MIN_POSITIVE {
@@ -35,8 +22,7 @@ fn normal_draw(rng: &mut SplitMix64) -> f64 {
 }
 
 impl<B: Backend> LoraPair<B> {
-    /// Seeded init: a ~ N(0, 0.02) host-drawn then uploaded, b zeros;
-    /// both marked require_grad (a no-op off autodiff backends).
+    /// Seeded init: a ~ N(0, 0.02) host-drawn, b zeros.
     pub(crate) fn init(
         in_dim: usize,
         out_dim: usize,
@@ -67,18 +53,14 @@ impl<B: Backend> LoraPair<B> {
         x.matmul(self.a.clone()).matmul(self.b.clone()).mul_scalar(self.scale)
     }
 
-    /// The dense delta this pair merges into a base weight:
-    /// (a.b) * scale, [in, out] (the AdapterLoad consumer; the
-    /// caller owns any orientation transpose).
+    /// The dense [in, out] delta this pair merges into a base weight.
     #[allow(dead_code)]
     pub(crate) fn merged_delta(&self) -> burn::tensor::Tensor<B, 2> {
         self.a.clone().matmul(self.b.clone()).mul_scalar(self.scale)
     }
 }
 
-/// The q_conv1d full delta: one zero-init (1, channels) row per tap,
-/// added to the base taps at forward. Zero delta = the base conv
-/// bit-exact.
+/// The q_conv1d full delta: one zero-init (1, channels) row per tap.
 pub(crate) struct ConvDelta<B: Backend> {
     pub(crate) taps: Vec<burn::tensor::Tensor<B, 2>>,
 }
@@ -129,9 +111,7 @@ pub(crate) enum LayerAdapters<B: Backend> {
 }
 
 impl<B: Backend> LayerAdapters<B> {
-    /// Named refs to this layer's trainable tensors (all rank 2 -
-    /// conv taps ride as rows), keyed under the checkpoint-aligned
-    /// prefix (`model.layers.<i>`).
+    /// Named refs to this layer's trainable tensors, all rank 2.
     pub(crate) fn params(
         &self,
         prefix: &str,
@@ -217,8 +197,7 @@ fn pair_muts<'t, B: Backend>(
     params.push((format!("{prefix}.{target}.lora_b"), &mut pair.b));
 }
 
-/// The whole model's trainable state: one LayerAdapters per layer,
-/// placement decided by the config's layer kinds.
+/// The whole model's trainable state: one LayerAdapters per layer.
 pub(crate) struct ModelAdapters<B: Backend> {
     pub(crate) layers: Vec<LayerAdapters<B>>,
     pub(crate) rank: usize,
@@ -269,17 +248,7 @@ impl<B: Backend> ModelAdapters<B> {
         Ok(Self { layers, rank, alpha, seed })
     }
 
-    /// Resume from a saved adapter: the same structure `init` builds,
-    /// with every tensor replaced by the artifact's.
-    ///
-    /// This is what makes a STAGED sequence possible - supervised
-    /// tuning continuing the continued-pretraining checkpoint, then
-    /// preference tuning continuing that. Without it every stage
-    /// would restart from the base and the chain would not exist.
-    ///
-    /// Rank and alpha come from the artifact rather than the caller:
-    /// a resumed adapter's geometry is already decided, and taking
-    /// them from a flag would let a mismatched rank load as garbage.
+    /// Resume from a saved adapter, at the artifact's own geometry.
     pub(crate) fn load(
         path: &Path,
         config: &HybridCheckpointConfig,
@@ -337,14 +306,9 @@ impl<B: Backend> ModelAdapters<B> {
             stored.insert(name, (view.shape().to_vec(), values));
         }
 
-        // Build the structure at the artifact's geometry, then
-        // overwrite every trainable tensor from the file.
         let mut adapters = Self::init(config, rank, alpha, seed, device)?;
         for (name, tensor) in adapters.params_mut() {
             let replacement = match name.split_once(".delta_tap") {
-                // The conv delta persists as one (channels, 1, kernel)
-                // tensor and trains as `kernel` rows, so a tap is a
-                // stride through it.
                 Some((prefix, tap_index)) => {
                     let Ok(tap) = tap_index.parse::<usize>() else {
                         snafu::whatever!("adapter tap index in {name} does not parse");
@@ -409,12 +373,7 @@ impl<B: Backend> ModelAdapters<B> {
         params
     }
 
-    /// Persist the adapter as one safetensors file: lora pairs as
-    /// `<target>.lora_a` [in, rank] / `.lora_b` [rank, out] (over the
-    /// TRANSPOSED weight: delta_for_w_transposed = a.b * alpha/rank),
-    /// the conv delta assembled to the checkpoint's (channels, 1,
-    /// kernel) layout as `q_conv1d.delta`; rank/alpha/model
-    /// identity ride the metadata.
+    /// Persist the adapter as one safetensors file plus its metadata.
     pub(crate) fn save(&self, path: &Path, model_id: &str) -> BquestResult<()> {
         let mut buffers: Vec<(String, Vec<usize>, Vec<u8>)> = Vec::new();
         for (index, layer) in self.layers.iter().enumerate() {

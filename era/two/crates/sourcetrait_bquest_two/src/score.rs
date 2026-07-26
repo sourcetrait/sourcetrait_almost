@@ -1,13 +1,4 @@
-//! `bquest capability score`: pure-rust, CPU, nuon-in/nuon-out
-//! scoring of a converted run - the faithful port of olmo-eval's
-//! scorers for the capability task set (MC logprob accuracy, gsm8k
-//! exact-match with last-number extraction, IFBench OOD ifeval).
-//!
-//! Task routing mirrors the reference registry: mmlu_* and arc_* are
-//! logprob MC (mmlu extracts nothing, arc extracts the continuation
-//! text), gsm8k is exact-match, ifeval_ood is the instruction
-//! verifier suite; any other task errors loudly rather than
-//! mis-scoring.
+//! `bquest capability score`: the reference scorers, ported to rust.
 use crate::*;
 
 use std::sync::LazyLock;
@@ -32,7 +23,7 @@ pub(crate) fn extract_last_number(text: &str) -> Option<String> {
         .map(|found| found.as_str().to_string())
 }
 
-/// gsm8k _clean_short_answer (falls back to the input text).
+/// gsm8k _clean_short_answer, falling back to the input text.
 pub(crate) fn clean_short_answer(text: &str) -> String {
     extract_last_number(text).unwrap_or_else(|| text.to_string())
 }
@@ -59,11 +50,7 @@ pub(crate) fn resolve_task_kind(token: &str) -> BquestResult<TaskKind> {
     }
 }
 
-/// One instruction's strict and loose verdict, keyed by its IFBench
-/// instruction id. The four headline ratios are already built from
-/// these; retaining them is what gives a care-weighted re-aggregation
-/// per-TYPE results to attach to, where the collapsed per-item score
-/// offers nothing.
+/// One instruction's strict and loose verdict, by its IFBench id.
 pub(crate) struct InstructionVerdict {
     pub(crate) id: String,
     pub(crate) strict: bool,
@@ -74,18 +61,12 @@ pub(crate) struct ScoreRow {
     pub(crate) doc_id: i64,
     pub(crate) scores: Vec<(String, f64)>,
     pub(crate) extracted: Vec<Option<String>>,
-    /// Per-instruction detail, empty for tasks that have none. STRICTLY
-    /// ADDITIVE: no value in `scores` or `extracted` moves, so the
-    /// reference-parity gate - which compares those two alone, by key
-    /// set and by length - is untouched. The fork constraint holds
-    /// because only aggregation may differ from the reference, never
-    /// the per-item layer.
+    /// Per-instruction detail, empty for tasks that have none.
     pub(crate) instructions: Vec<InstructionVerdict>,
 }
 
 pub(crate) struct TaskScores {
-    /// metric name -> (scorer name, value), in the reference's
-    /// config.metrics order.
+    /// Metric, scorer and value, in the reference's own order.
     pub(crate) metrics: Vec<(String, String, f64)>,
     pub(crate) num_instances: usize,
     pub(crate) rows: Vec<ScoreRow>,
@@ -106,7 +87,7 @@ fn output_text(output: &lib::nu::Record) -> BquestResult<String> {
     field_str(output, "text")
 }
 
-/// Python max(list) / list.index(max): the value and its first index.
+/// Python's max then list.index: the value and its first index.
 fn first_max(values: &[f64]) -> (usize, f64) {
     let mut best_index = 0usize;
     let mut best = values[0];
@@ -312,9 +293,7 @@ fn score_ifeval_task(
     })
 }
 
-/// Score one task's prediction rows against its fixture rows. Rows
-/// must arrive doc_id-sorted; doc_id == position is enforced exactly
-/// as the reference rescore does.
+/// Score one task's prediction rows against its fixture rows.
 pub(crate) fn score_task(
     data: Option<&CheckerData>,
     kind: TaskKind,
@@ -351,7 +330,7 @@ pub(crate) fn score_task(
     }
 }
 
-/// Sorted rows of a whole-value nuon table file, by doc_id.
+/// A whole-value nuon table's rows, sorted by doc_id.
 pub(crate) fn load_sorted_rows(path: &Path) -> BquestResult<Vec<lib::nu::Value>> {
     let value = lib::nu::load_value(path)?;
     let list = match value.as_list() {
@@ -381,7 +360,7 @@ fn rows_as_records(rows: &[lib::nu::Value]) -> BquestResult<Vec<&lib::nu::Record
         .collect()
 }
 
-/// Locate the fixtures requests nuon file for a task token.
+/// The fixture requests file for a task token; ambiguity raises.
 pub(crate) fn find_fixture_file(
     fixtures_root: &Path,
     token: &str,
@@ -420,9 +399,6 @@ fn score_row_value(row: &ScoreRow) -> lib::nu::Value {
         "scores" => lib::nu::Value::record(scores, span()),
         "extracted" => lib::nu::Value::list(extracted, span()),
     };
-    // Present only where the task carries instructions, so the 1,263
-    // multiple-choice and exact-match rows stay exactly as they were.
-    // Records are open, so a consumer tests presence.
     if !row.instructions.is_empty() {
         let verdicts: Vec<lib::nu::Value> = row
             .instructions

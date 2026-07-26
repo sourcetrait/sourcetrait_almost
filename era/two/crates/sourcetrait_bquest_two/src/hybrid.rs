@@ -1,17 +1,4 @@
-//! Stateless Olmo-Hybrid forward on burn: the oracle triangle's
-//! third stack (original python / candle lib / burn). No caches, no
-//! decode path - every call is one full-sequence replay over all
-//! positions, implemented from the pinned checkpoint semantics
-//! (parent understood 09), deliberately not translated from the
-//! candle implementation. Generic over the backend: CpuBack (ndarray
-//! f32) is the reference grade; CudaBack (bf16 default float) is the
-//! fast grade. The GDN gate/norm/recurrence region computes in f32
-//! on EVERY grade (per-tensor casts; no-op at f32) - the reference
-//! stacks' f32-state discipline, which the 1024-deep training
-//! backward made mandatory rather than optional.
-// The parity gates consume the None-adapter path; the trainer stage
-// (cfg train) consumes the injected path plus the exposed structure,
-// so non-train builds still need the allow.
+//! Stateless Olmo-Hybrid forward on burn: the oracle's third stack.
 #![allow(dead_code)]
 use crate::*;
 
@@ -74,8 +61,7 @@ pub(crate) struct AttnBlock<B: Backend> {
     pub(crate) down_transposed: FloatTensor<B, 2>,
 }
 
-/// The gated output RMSNorm's eps (the fla FusedRMSNormGated default;
-/// deliberately NOT rms_norm_eps).
+/// The gated output RMSNorm's eps; deliberately not rms_norm_eps.
 const O_NORM_EPS: f64 = 1e-5;
 /// The qk L2 norm's eps.
 const L2_EPS: f64 = 1e-6;
@@ -127,8 +113,7 @@ impl<B: Backend> HybridModel<B> {
         })
     }
 
-    /// Host-side embedding gather for an id sequence (the table is
-    /// frozen and host-resident).
+    /// Host-side embedding gather for an id sequence.
     pub(crate) fn embed(&self, ids: &[u32]) -> FloatTensor<B, 2> {
         let n = ids.len();
         let mut gathered = Vec::with_capacity(n * self.hidden);
@@ -142,8 +127,7 @@ impl<B: Backend> HybridModel<B> {
         )
     }
 
-    /// Logits for every position as a flat row-major (n, vocab) f32
-    /// buffer (row r predicts token r+1 - the C2 dump contract).
+    /// Every position's logits as a flat row-major (n, vocab) buffer.
     pub(crate) fn forward_all(&self, ids: &[u32]) -> BquestResult<(usize, Vec<f32>)> {
         let n = ids.len();
         snafu::ensure_whatever!(n > 0, "empty id sequence");
@@ -240,11 +224,7 @@ impl<B: Backend> GdnBlock<B> {
         })
     }
 
-    /// Fully PRE-norm block: x + mixer(input_norm(x)), then
-    /// h + mlp(post_attention_norm(h)). Adapters (when present) add
-    /// their contributions on the direction-3 readout surface only -
-    /// q/q_conv/g/o + MLP; the k/v/a/b state path never adapts - and
-    /// the None path is op-identical to the frozen oracle.
+    /// The fully pre-norm GDN block, adapters optional.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn forward(
         &self,
@@ -260,8 +240,6 @@ impl<B: Backend> GdnBlock<B> {
         let residual = x.clone();
         let normed = rms_norm(x, &self.input_norm, eps);
 
-        // Projections, each through its causal depthwise conv + silu
-        // (the gate projection takes no conv).
         let mut q_rows = normed.clone().matmul(self.q_transposed.clone());
         if let Some(adapters) = adapters {
             q_rows = q_rows + adapters.q.contribution(normed.clone());
@@ -281,21 +259,12 @@ impl<B: Backend> GdnBlock<B> {
             gate_rows = gate_rows + adapters.g.contribution(normed.clone());
         }
 
-        // The f32 recurrence discipline (the reference stacks upcast
-        // q/k/v/beta/g AND the state to f32 regardless of model
-        // dtype; the paper's repeated-downcast warning is the
-        // mechanism, and at bf16 the 1024-deep BACKWARD through the
-        // recurrence NaNs - live-fired): the gate math, qk norms,
-        // recurrence, and gated output norm compute in f32; the
-        // mixer output casts back for o_proj. No-op on f32 grades.
         let compute = burn::tensor::FloatDType::F32;
         let q = q.cast(compute);
         let k = k.cast(compute);
         let v = v.cast(compute);
         let gate_rows = gate_rows.cast(compute);
 
-        // Gating scalars: g = -exp(A_log) * softplus(a + dt_bias);
-        // beta = 2 * sigmoid(b) (the negative-eigenvalue variant).
         let a_rows = normed.clone().matmul(self.a_transposed.clone()).cast(compute);
         let b_rows = normed.matmul(self.b_transposed.clone()).cast(compute);
         let decay = self
@@ -310,15 +279,10 @@ impl<B: Backend> GdnBlock<B> {
             ));
         let beta = burn::tensor::activation::sigmoid(b_rows).mul_scalar(2.0);
 
-        // Heads: q/k (n, heads, key_dim) L2-normed, q pre-scaled;
-        // v (n, heads, value_dim).
         let q = l2_norm_last(q.reshape([n, heads, key_dim])).mul_scalar((key_dim as f64).powf(-0.5));
         let k = l2_norm_last(k.reshape([n, heads, key_dim]));
         let v = v.reshape([n, heads, value_dim]);
 
-        // The gated-delta recurrence, sequential per token (the
-        // correctness grade): decay the state BEFORE the delta
-        // correction.
         let mut state =
             FloatTensor::<B, 3>::zeros([heads, key_dim, value_dim], device).cast(compute);
         let mut outputs: Vec<FloatTensor<B, 3>> = Vec::with_capacity(n);
@@ -350,9 +314,6 @@ impl<B: Backend> GdnBlock<B> {
         }
         let y = burn::tensor::Tensor::cat(outputs, 1).swap_dims(0, 1);
 
-        // Gated output RMSNorm over the value-head dim (eps 1e-5),
-        // norm THEN gate; gate = silu(g_proj(x)) - all in f32, then
-        // one cast back to the projection dtype.
         let o_norm_compute = self.o_norm.clone().cast(compute);
         let y = rms_norm_last(y, &o_norm_compute, O_NORM_EPS);
         let gate = burn::tensor::activation::silu(gate_rows).reshape([n, heads, value_dim]);
@@ -417,11 +378,7 @@ impl<B: Backend> AttnBlock<B> {
         })
     }
 
-    /// Fully POST-norm block (raw hidden into attention, no input
-    /// norm): x + norm(attn(x)), then h + norm(mlp(h)). NoPE: no
-    /// rotation anywhere; positions exist only in the causal mask.
-    /// Adapters (when present) ride q/o + MLP only (k/v never); the
-    /// None path is op-identical to the frozen oracle.
+    /// The fully post-norm attention block, adapters optional.
     pub(crate) fn forward(
         &self,
         x: FloatTensor<B, 2>,
@@ -435,7 +392,6 @@ impl<B: Backend> AttnBlock<B> {
         let hidden = heads * head_dim;
         let residual = x.clone();
 
-        // Full-projection-width q/k RMSNorm before the head reshape.
         let mut q_rows = x.clone().matmul(self.q_transposed.clone());
         if let Some(adapters) = adapters {
             q_rows = q_rows + adapters.q.contribution(x.clone());
@@ -475,7 +431,7 @@ impl<B: Backend> AttnBlock<B> {
     }
 }
 
-/// Additive 0/-inf causal mask (n, n).
+/// The additive zero-and-negative-infinity causal mask, (n, n).
 pub(crate) fn causal_mask<B: Backend>(n: usize, device: &B::Device) -> FloatTensor<B, 2> {
     let mut values = vec![0f32; n * n];
     for query in 0..n {
@@ -486,8 +442,7 @@ pub(crate) fn causal_mask<B: Backend>(n: usize, device: &B::Device) -> FloatTens
     FloatTensor::<B, 2>::from_data(burn::tensor::TensorData::new(values, [n, n]), device)
 }
 
-/// HF RMSNorm over the last dim of a rank-2 tensor:
-/// x * rsqrt(mean(x^2) + eps) * weight.
+/// HF RMSNorm over a rank-2 tensor's last dimension.
 pub(crate) fn rms_norm<B: Backend>(
     x: FloatTensor<B, 2>,
     weight: &FloatTensor<B, 1>,
@@ -499,8 +454,7 @@ pub(crate) fn rms_norm<B: Backend>(
     x * scale * weight.clone().unsqueeze::<2>().expand([n, width])
 }
 
-/// RMSNorm over the last dim of a rank-3 tensor (the gated output
-/// norm's per-head form).
+/// RMSNorm over a rank-3 tensor's last dimension, for the per-head form.
 fn rms_norm_last<B: Backend>(
     x: FloatTensor<B, 3>,
     weight: &FloatTensor<B, 1>,
@@ -517,8 +471,7 @@ fn rms_norm_last<B: Backend>(
             .expand([n, heads, width])
 }
 
-/// SUM-based L2 norm over the last dim (x / sqrt(sum(x^2) + eps) -
-/// deliberately not RMSNorm's mean).
+/// Sum-based L2 norm over the last dim, not RMSNorm's mean.
 fn l2_norm_last<B: Backend>(x: FloatTensor<B, 3>) -> FloatTensor<B, 3> {
     let [n, heads, width] = x.dims();
     let sum_square = (x.clone() * x.clone()).sum_dim(2);
@@ -526,22 +479,14 @@ fn l2_norm_last<B: Backend>(x: FloatTensor<B, 3>) -> FloatTensor<B, 3> {
     x * scale
 }
 
-/// softplus(x) = ln(1 + exp(x)), computed in the overflow-stable
-/// form max(x, 0) + ln(1 + exp(-|x|)). The naive form's exp(x)
-/// overflows to inf on large gating inputs: the FORWARD survives
-/// (softplus saturates, decay = exp(-inf) reads zero) but the
-/// BACKWARD computes inf/inf = NaN - the reference stacks all guard
-/// this (the fla/vllm gating kernels' softplus guard). exp(-|x|)
-/// never overflows and the gradient is sigmoid(x) everywhere.
+/// softplus as max(x, 0) + ln(1 + exp(-|x|)): the backward is safe.
 fn softplus<B: Backend>(x: FloatTensor<B, 2>) -> FloatTensor<B, 2> {
     let positive_part = burn::tensor::activation::relu(x.clone());
     let negative_magnitude = x.abs().neg();
     positive_part + negative_magnitude.exp().add_scalar(1.0).log()
 }
 
-/// The causal depthwise conv (kernel k over time, per channel) + silu:
-/// tap k-1 multiplies the current token, earlier taps reach back in
-/// time, missing history is zero (the stateless left-pad form).
+/// The causal depthwise conv over time plus silu, stateless.
 fn causal_conv_silu<B: Backend>(
     x: FloatTensor<B, 2>,
     taps: &[FloatTensor<B, 2>],

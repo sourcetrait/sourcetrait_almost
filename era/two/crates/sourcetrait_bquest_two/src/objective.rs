@@ -1,24 +1,4 @@
 //! The training objectives, as loss blocks over the top hidden state.
-//!
-//! Every one of these takes the final-normed hidden state and returns
-//! a scalar, so the per-layer gradient chain beneath them is
-//! untouched: the chain consumes a seed gradient at the top hidden
-//! state and knows nothing about which objective produced it. That is
-//! why supervised, preference and reinforcement training share one
-//! trainer.
-//!
-//! ## DEV
-//! Continued pretraining averaged over EVERY position. The supervised
-//! form is the same computation weighted by a mask and divided by the
-//! masked count instead of the row count - the whole difference
-//! between "continue this document" and "produce this reply".
-//!
-//! Preference and reinforcement both want a SUM rather than a mean:
-//! the DPO log-ratio and the policy-gradient term are defined over a
-//! sequence's total log-probability, and dividing by length would
-//! silently make long replies cheaper to prefer.
-//! ##
-// The stage loops are the consumers; the allow retires with them.
 #![allow(dead_code)]
 use crate::*;
 
@@ -30,14 +10,10 @@ use burn::tensor::{
 
 type FloatTensor<B, const D: usize> = burn::tensor::Tensor<B, D>;
 
-/// Guard against a zero-variance group (every rollout scoring alike
-/// carries no preference signal, so its advantages are zero).
+/// The spread below which a group counts as zero-variance.
 const ADVANTAGE_EPS: f32 = 1e-6;
 
-/// Per-position log-probabilities of the target tokens, accumulated
-/// head-chunk by head-chunk so the (n, vocab) logits never
-/// materialize as one tensor. Positions whose mask is zero contribute
-/// nothing.
+/// The masked positions' summed target log-probability, head-chunked.
 fn masked_logprob_sum<AD: AutodiffBackend>(
     hidden: FloatTensor<AD, 2>,
     lm_head_transposed: &FloatTensor<AD, 2>,
@@ -90,10 +66,7 @@ pub(crate) fn supervised_count(mask: &[u8]) -> usize {
     mask.iter().filter(|slot| **slot != 0).count()
 }
 
-/// Mean next-token cross-entropy over the MASKED positions alone -
-/// the supervised objective. An example with nothing masked is an
-/// error rather than a zero-loss step, because it would look like a
-/// clean step while training nothing.
+/// The supervised objective: mean cross-entropy over masked positions.
 pub(crate) fn masked_cross_entropy<AD: AutodiffBackend>(
     hidden: FloatTensor<AD, 2>,
     lm_head_transposed: &FloatTensor<AD, 2>,
@@ -111,9 +84,7 @@ pub(crate) fn masked_cross_entropy<AD: AutodiffBackend>(
     Ok(summed.neg().div_scalar(supervised as f64))
 }
 
-/// A sequence's total log-probability over the masked positions - the
-/// quantity both the preference log-ratio and the policy gradient are
-/// defined on. Deliberately NOT length-normalized.
+/// A sequence's total masked log-probability; not length-normalized.
 pub(crate) fn sequence_logprob<AD: AutodiffBackend>(
     hidden: FloatTensor<AD, 2>,
     lm_head_transposed: &FloatTensor<AD, 2>,
@@ -129,25 +100,14 @@ pub(crate) fn sequence_logprob<AD: AutodiffBackend>(
     masked_logprob_sum::<AD>(hidden, lm_head_transposed, targets, mask, chunk, device)
 }
 
-/// softplus in the overflow-stable form max(x, 0) + ln(1 + exp(-|x|)).
-/// The naive form's exp overflows on a confident pair and the
-/// BACKWARD then computes inf/inf = NaN - the same guard the gating
-/// path needed, and the reason a preference loss is written this way
-/// rather than as -log(sigmoid(x)).
+/// softplus as max(x, 0) + ln(1 + exp(-|x|)): the backward is safe.
 fn softplus_stable<AD: AutodiffBackend>(x: FloatTensor<AD, 1>) -> FloatTensor<AD, 1> {
     let positive_part = burn::tensor::activation::relu(x.clone());
     let negative_magnitude = x.abs().neg();
     positive_part + negative_magnitude.exp().add_scalar(1.0).log()
 }
 
-/// The DPO loss for one pair: -log sigmoid(beta * (policy log-ratio -
-/// reference log-ratio)), written as softplus(-x).
-///
-/// The reference log-probabilities arrive as plain scalars because
-/// the reference model is the ADAPTER-OFF path - zero-init adapters
-/// are bit-exact to the base and the gate locks that - so they are
-/// computed once without gradients and never need a second copy of
-/// the weights.
+/// The DPO loss for one pair, as softplus of the negated log-ratio.
 pub(crate) fn dpo_loss<AD: AutodiffBackend>(
     chosen_policy: FloatTensor<AD, 1>,
     rejected_policy: FloatTensor<AD, 1>,
@@ -162,10 +122,7 @@ pub(crate) fn dpo_loss<AD: AutodiffBackend>(
     softplus_stable::<AD>(logits.neg())
 }
 
-/// Group-relative advantages: each rollout's reward centred on its
-/// group's mean and scaled by its spread. A group whose rollouts all
-/// scored alike yields zero advantages - there is nothing to prefer,
-/// and that is the honest gradient rather than a divide-by-noise.
+/// Group-relative advantages: rewards centred and scaled per group.
 pub(crate) fn group_advantages(rewards: &[f32]) -> Vec<f32> {
     let count = rewards.len();
     if count == 0 {
@@ -181,9 +138,7 @@ pub(crate) fn group_advantages(rewards: &[f32]) -> Vec<f32> {
     rewards.iter().map(|r| (r - mean) / deviation).collect()
 }
 
-/// The policy-gradient term for one rollout: minimising
-/// -advantage * log p(response) raises the probability of
-/// better-than-average rollouts and lowers the rest.
+/// The policy-gradient term for one rollout: -advantage * logprob.
 pub(crate) fn policy_gradient_loss<AD: AutodiffBackend>(
     sequence_logprob: FloatTensor<AD, 1>,
     advantage: f32,

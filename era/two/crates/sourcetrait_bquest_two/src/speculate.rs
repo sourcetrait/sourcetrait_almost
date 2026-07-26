@@ -1,30 +1,11 @@
-//! The Speculation:DepthProbe instrument: record plain greedy
-//! transcripts (the token streams speculation would ride), then
-//! replay them offline through the real lookup index under candidate
-//! policies and pass-cost models.
-//!
-//! Everything data-shaped is whole-value .nuon: the fixture plan in,
-//! the per-transcript artifacts out (machine-written, never
-//! hand-edited), the report out. Phase annotations ride SIBLING
-//! hand-authored .nuon files (spec_phases_<name>.nuon) joined at
-//! simulate time.
-//!
-//! Replay fidelity: the round loop mirrors generate.rs
-//! step()/stage_or_speculate() - the emitted token joins the index
-//! BEFORE drafting, queue-popped tokens owe no round, the bonus rides
-//! as pending, a sample_len end skips the final round while a
-//! stop-token end pays it, and accepted drafts join the index at
-//! round close. One conservative bias: a draft that would accept the
-//! STOP token itself (echo-shaped turn tails) scores as a rejection
-//! here because stops are never emitted into the recorded stream - at
-//! most one round per stop-ended turn reads one pass heavy.
+//! The speculation depth probe: record greedy streams, replay offline.
 use crate::*;
 
 /// The fixture plan shape (`--fixtures`).
 const FIXTURE_TYPEDEF: &str =
     "table<name: string, kind: string, turns: list<string>, budget: int>";
 
-/// The recorded-transcript artifact shape (spec_transcript_<name>.nuon).
+/// The recorded-transcript artifact shape.
 const TRANSCRIPT_TYPEDEF: &str = "record<name: string, kind: string, \
      meta: record<model: string, settings: string, device: string, \
      bquest_version: string, recorded_at: int>, \
@@ -32,13 +13,10 @@ const TRANSCRIPT_TYPEDEF: &str = "record<name: string, kind: string, \
      suffix_ids: list<int>, emitted_ids: list<int>, consumed: int, \
      finish: string, prefill_seconds: float, decode_seconds: float>>";
 
-/// The hand-authored phase-annotation shape (spec_phases_<name>.nuon);
-/// `end` is exclusive, -1 = to the turn's end; token indices index
-/// emitted_ids.
+/// The hand-authored phase-annotation shape; `end` is exclusive.
 const PHASES_TYPEDEF: &str = "table<turn: int, start: int, end: int, phase: string>";
 
-/// Gated-off rounds re-probe every this-many suppressions so a cold
-/// gate can observe recovery (the EMA only updates on drafted rounds).
+/// Suppressions a gated-off policy re-probes after.
 const RECOVERY_PROBE: usize = 32;
 
 /// EMA weight for the gated policies' accept-depth tracking.
@@ -138,10 +116,7 @@ pub(crate) fn speculate_record(cli: &Cli, args: &SpeculateRecordArgs) -> BquestR
     Ok(())
 }
 
-/// Record one plan's turns: plain greedy (the depth statistics are
-/// greedy-deterministic), chat-rendered, natural stops honored under
-/// the per-turn budget; later turns chain live through generate_from
-/// (the trail IS the restored-context contract).
+/// Record one plan's turns, plain greedy and chained live.
 fn record_transcript(
     model: &mut lib::OlmoHybrid,
     tokenizer: &tokenizers::Tokenizer,
@@ -305,8 +280,7 @@ fn read_phases(path: &Path) -> BquestResult<Vec<PhaseRow>> {
     Ok(phases)
 }
 
-/// A prose-family kind defaults every token to the prose phase;
-/// anything else is unlabeled until its phases file lands.
+/// A prose kind defaults to the prose phase, anything else unlabeled.
 fn default_phase(kind: &str) -> &'static str {
     if kind.starts_with("prose") {
         "prose"
@@ -332,10 +306,7 @@ fn phase_label(
     String::from(default_label)
 }
 
-/// The pass cost of a PARTIAL/REJECTED verification round: 2 in v1 as
-/// built (verify + GDN shadow replay); 1 under a kernel-managed
-/// accept (the fla/vllm mechanism). Full accepts and plain steps are
-/// 1 pass in both.
+/// The pass cost of a partial or rejected verification round.
 #[derive(Clone, Copy)]
 pub(crate) struct CostModel {
     pub(crate) name: &'static str,
@@ -347,7 +318,7 @@ pub(crate) const COST_MODELS: [CostModel; 2] = [
     CostModel { name: "one_pass_kernel_accept", partial_passes: 1 },
 ];
 
-/// The candidate policy shapes over the real v1 DraftPolicy.
+/// The candidate policy shapes over the shipped DraftPolicy.
 #[derive(Clone, Copy)]
 pub(crate) enum PolicyKind {
     /// The shipped policy verbatim.
@@ -374,8 +345,6 @@ impl PolicyState {
         Self {
             kind,
             inner: lib::DraftPolicy::new(),
-            // Hot starts: gates open until observed depth argues
-            // otherwise.
             ema: 2.0,
             level_ema: [2.0; 5],
             gate_skips: 0,
@@ -392,10 +361,7 @@ impl PolicyState {
         }
     }
 
-    /// The round's draft, mirroring stage_or_speculate's derivation
-    /// (probe_limit -> index.draft -> draft_limit truncation), with
-    /// the candidate gate applied after the match. Gated-off rounds
-    /// re-probe every RECOVERY_PROBE suppressions.
+    /// The round's draft, with the candidate gate applied after the match.
     fn round_draft(
         &mut self,
         index: &lib::LookupIndex,
@@ -470,10 +436,7 @@ pub(crate) struct PhaseTally {
     pub(crate) passes: u64,
 }
 
-/// Replay one transcript under one policy and one cost model,
-/// tallying per phase label. A plain greedy decode reads exactly one
-/// pass per token, so tokens_per_pass is the against-plain ratio
-/// directly.
+/// Replay one transcript under one policy and cost model, per phase.
 pub(crate) fn replay_transcript(
     transcript: &RecordedTranscript,
     phases: &[PhaseRow],
@@ -485,8 +448,6 @@ pub(crate) fn replay_transcript(
     let mut policy = PolicyState::new(policy_kind);
     let mut trail: Vec<u32> = Vec::new();
     for (turn_index, turn) in transcript.turns.iter().enumerate() {
-        // Per-generation index, seeded like start_generation: the
-        // committed trail plus this turn's rendered suffix.
         let mut index = lib::LookupIndex::new();
         index.extend(&trail);
         index.extend(&turn.suffix_ids);
@@ -508,8 +469,6 @@ pub(crate) fn replay_transcript(
             let label = phase_label(phases, default_label, turn_index, position);
             position += 1;
             tallies.entry(label.clone()).or_default().tokens += 1;
-            // The budget check precedes the round (a sample_len end
-            // never pays a final round; a stop-token end does).
             if position >= total && sample_len_end {
                 break;
             }
@@ -583,7 +542,6 @@ pub(crate) fn speculate_simulate(args: &SpeculateSimulateArgs) -> BquestResult<(
     );
 
     let mut result_rows: Vec<lib::nu::Value> = Vec::new();
-    // (policy, cost) -> (prose tokens/passes, all tokens/passes).
     let mut aggregates: HashMap<String, (u64, u64, u64, u64)> = HashMap::new();
     let mut summary_keys: Vec<(String, String)> = Vec::new();
     for file in &transcript_files {
@@ -689,8 +647,7 @@ pub(crate) fn speculate_simulate(args: &SpeculateSimulateArgs) -> BquestResult<(
     Ok(())
 }
 
-/// The phase-annotation aid: emitted tokens as indexed decoded
-/// pieces, one line each (turn:index, id, piece).
+/// The phase-annotation aid: emitted tokens as decoded pieces.
 pub(crate) fn speculate_tokens(cli: &Cli, args: &SpeculateTokensArgs) -> BquestResult<()> {
     let config = lib::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
     let tokenizer = lib::load_tokenizer(&config.model_dir())?;

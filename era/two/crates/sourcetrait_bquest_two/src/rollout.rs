@@ -1,40 +1,18 @@
-//! Sampled generation graded by a mechanical verifier - the data the
-//! reinforcement stage learns from.
-//!
-//! Rollouts ride the CANDLE engine rather than the burn oracle: the
-//! oracle is a stateless full-sequence forward with no cache, so
-//! generating a reply of any length through it would replay the whole
-//! prefix per token. The engine has the decode path already.
-//!
-//! ## DEV
-//! Rollout and training are separate VERBS, deliberately, rather than
-//! two phases inside one loop. Both stacks hold a full copy of the
-//! weights, and two resident copies do not fit the card - so the loop
-//! is driven from outside, one process at a time: generate, score,
-//! step, repeat. That also makes the scored artifact a real
-//! checkpoint rather than a value in flight.
-//!
-//! The policy being sampled is whatever adapter the config names, so
-//! an on-policy loop points the config at the adapter the previous
-//! step wrote.
-//! ##
+//! Verifier-graded sampled generation, and the greedy bench beside it.
 use crate::*;
 
 /// One graded reply.
 const ROLLOUT_TYPEDEF: &str = "table<prompt_index: int, prompt_ids: list<int>, \
      response_ids: list<int>, response: string, reward: float, verifier: string>";
 
-/// One rollout ready for training: the padded window, its response
-/// mask, and the verifier's reward.
+/// One rollout ready for training: window, mask and reward.
 #[cfg(feature = "train")]
 pub(crate) type PackedRollout = (Vec<u32>, Vec<u8>, f32);
-/// Rollouts bucketed by the prompt they answer - the unit a
-/// group-relative advantage is computed over.
+/// Rollouts bucketed by the prompt they answer.
 #[cfg(feature = "train")]
 pub(crate) type RolloutGroups = Vec<Vec<PackedRollout>>;
 
-/// `bquest rollout run`: sample `group` replies per verifiable
-/// prompt, grade each, and write the scored table.
+/// `bquest rollout run`: sample and grade a group per prompt.
 pub(crate) fn rollout_run(cli: &Cli, args: &RolloutRunArgs) -> BquestResult<()> {
     let started = std::time::Instant::now();
     snafu::ensure_whatever!(
@@ -69,9 +47,9 @@ pub(crate) fn rollout_run(cli: &Cli, args: &RolloutRunArgs) -> BquestResult<()> 
             let options = lib::GenerateOptions {
                 temperature: Some(args.temperature),
                 top_p: None,
-                // Each member draws its own stream, or the group is
-                // one reply repeated and every advantage is zero.
-                seed: args.seed.wrapping_add((prompt_index * args.group + member) as u64),
+                seed: args
+                    .seed
+                    .wrapping_add((prompt_index * args.group + member) as u64),
                 sample_len: args.max_tokens,
                 chat: false,
                 ignore_stops: false,
@@ -135,18 +113,7 @@ pub(crate) fn rollout_run(cli: &Cli, args: &RolloutRunArgs) -> BquestResult<()> 
 const BENCH_TYPEDEF: &str = "table<prompt_index: int, response: string, reward: float, \
      verifier: string>";
 
-/// `bquest bench run`: the same generate-and-grade machinery as a
-/// rollout, but GREEDY and one reply per prompt, reporting a score
-/// rather than training data.
-///
-/// This is the only reading that answers whether the model is any
-/// good at the job. The general battery indicates what a posture is
-/// BREAKING; this measures what it can DO, and every item in it is
-/// something we care about by construction, so a miss is a defect
-/// rather than a trade-off.
-///
-/// Which posture is measured rides the config's adapter token, so
-/// reading a checkpoint means pointing the config at it.
+/// `bquest bench run`: answer every bench prompt greedily, and score.
 pub(crate) fn bench_run(cli: &Cli, args: &BenchRunArgs) -> BquestResult<()> {
     let started = std::time::Instant::now();
     let config = lib::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
@@ -229,12 +196,7 @@ pub(crate) fn bench_run(cli: &Cli, args: &BenchRunArgs) -> BquestResult<()> {
     Ok(())
 }
 
-/// Read a scored-rollout artifact back into per-prompt groups, each
-/// row padded to `width` with its response positions masked.
-///
-/// A rollout longer than the window is DROPPED rather than clipped: a
-/// truncated reply would be graded on text the model did not finish
-/// producing.
+/// Read a scored-rollout artifact back into padded per-prompt groups.
 #[cfg(feature = "train")]
 pub(crate) fn load_groups(
     path: &Path,

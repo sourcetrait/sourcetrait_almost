@@ -1,9 +1,4 @@
-//! The reference checker data, loaded from the capability home's
-//! checker_data directory - byte copies of the eval env's own files
-//! (punkt_tab english, the averaged-perceptron tagger JSONs, the nltk
-//! english stopwords, syllapy's word dictionary, the emoji package's
-//! emoji.json). Rust parses their formats directly; nothing is
-//! re-authored.
+//! Byte copies of the evaluation environment's own checker data files.
 use crate::*;
 
 use crate::punkt::PunktParams;
@@ -61,8 +56,7 @@ impl CheckerData {
         Ok(Self { punkt, tagger, stopwords, syllapy, emoji_single })
     }
 
-    /// syllapy.count: dictionary word, else compound split on the
-    /// first hyphen, else the vowel-group heuristic.
+    /// syllapy.count.
     pub(crate) fn syllable_count(&self, word: &str) -> i64 {
         let word = py_strip_ws(word);
         let word = word.to_lowercase();
@@ -76,7 +70,6 @@ impl CheckerData {
         if let Some(&count) = self.syllapy.get(word) {
             return count;
         }
-        // The compound match ([^-]+)-(.+): a leading hyphen-free part.
         if let Some((head, tail)) = word.split_once('-')
             && !head.is_empty() && !tail.is_empty() {
                 let first = self.syllable_count(head);

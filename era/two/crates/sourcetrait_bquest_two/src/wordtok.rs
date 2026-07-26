@@ -1,8 +1,4 @@
-//! nltk's NLTKWordTokenizer (destructive.py, nltk 3.10.0): the exact
-//! regex-substitution battery, with Python's \s spelled out and the
-//! two lookahead-bearing rules (the clitic quote split and the
-//! contraction list) hand-scanned. nltk.word_tokenize = punkt
-//! sentence split, then this per sentence.
+//! nltk's NLTKWordTokenizer: the exact regex battery, in order.
 use crate::*;
 
 use std::sync::LazyLock;
@@ -46,8 +42,7 @@ rules! {
 static ENDING_4: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(&format!("[{PYS}]+")).expect("rule compiles"));
 
-/// STARTING_QUOTES rule 5: (?i)(')(?!re|ve|ll|m|t|s|d|n)(\w)\b - a
-/// quote before a single-letter word, negative lookahead hand-checked.
+/// STARTING_QUOTES rule 5, its negative lookahead hand-scanned.
 fn split_clitic_quotes(text: &str) -> String {
     const BLOCKED: [&str; 8] = ["re", "ve", "ll", "m", "t", "s", "d", "n"];
     let chars: Vec<char> = text.chars().collect();
@@ -84,9 +79,7 @@ enum Tail {
     SpaceLookahead,
 }
 
-/// One MacIntyre contraction rule: an optional literal leading space,
-/// two case-preserved parts split by a space in the output, \b (or a
-/// \s lookahead) on the right, \b on the left when no leading space.
+/// One MacIntyre contraction rule, its right lookahead hand-scanned.
 fn contraction_replace(
     text: &str,
     leading_space: bool,
@@ -130,8 +123,6 @@ fn contraction_replace(
             }
         };
         if matched {
-            // The replacement " \1 \2 " carries exactly one leading
-            // space whether or not the pattern consumed one.
             out.push(' ');
             for &c in &chars[start..start + part1_len] {
                 out.push(c);
