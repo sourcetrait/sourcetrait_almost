@@ -14,6 +14,7 @@ pub(crate) mod lora;
 pub(crate) mod mix;
 pub(crate) mod punkt;
 pub(crate) mod pytext;
+pub(crate) mod rollout;
 pub mod run;
 pub(crate) mod score;
 pub(crate) mod speculate;
@@ -71,8 +72,13 @@ pub(crate) use crate::lora::{
 #[cfg(feature = "train")]
 pub(crate) use crate::train::{
     train_cpt,
+    train_dpo,
     train_gate_verb,
+    train_rlvr,
+    train_sft,
 };
+pub(crate) use crate::example::mix_instruct;
+pub(crate) use crate::rollout::rollout_run;
 #[allow(unused_imports)]
 pub(crate) use crate::hybrid_load::{
     HybridCheckpointConfig,
@@ -97,9 +103,12 @@ pub(crate) use crate::cli::{
     Command,
     DocCommand,
     MixCommand,
+    MixInstructArgs,
     MixPackArgs,
     MixRenderArgs,
     MixSampleArgs,
+    RolloutCommand,
+    RolloutRunArgs,
     SpeculateCommand,
     SpeculateRecordArgs,
     SpeculateSimulateArgs,
@@ -107,7 +116,13 @@ pub(crate) use crate::cli::{
     TrainCommand,
 };
 #[cfg(feature = "train")]
-pub(crate) use crate::cli::TrainCptArgs;
+pub(crate) use crate::cli::{
+    StageArgs,
+    TrainCptArgs,
+    TrainDpoArgs,
+    TrainRlvrArgs,
+    TrainSftArgs,
+};
 pub(crate) use crate::mix::{
     SplitMix64,
     mix_pack,

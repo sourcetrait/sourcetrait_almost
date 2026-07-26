@@ -16,6 +16,10 @@ pub fn run() {
             MixCommand::Pack(args) => mix_pack(&cli, args),
             MixCommand::Render(args) => mix_render(args),
             MixCommand::Sample(args) => mix_sample(args),
+            MixCommand::Instruct(args) => mix_instruct(&cli, args),
+        },
+        Command::Rollout { command } => match command {
+            RolloutCommand::Run(args) => rollout_run(&cli, args),
         },
         Command::Speculate { command } => match command {
             SpeculateCommand::Record(args) => speculate_record(&cli, args),
@@ -35,6 +39,9 @@ fn train_dispatch(cli: &Cli, command: &TrainCommand) -> BquestResult<()> {
     match command {
         TrainCommand::Gate => train_gate_verb(),
         TrainCommand::Cpt(args) => train_cpt(cli, args),
+        TrainCommand::Sft(args) => train_sft(cli, args),
+        TrainCommand::Dpo(args) => train_dpo(cli, args),
+        TrainCommand::Rlvr(args) => train_rlvr(cli, args),
     }
 }
 

@@ -40,14 +40,20 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: MixCommand,
     },
+    /// Sampled, verifier-graded generation - the reinforcement
+    /// stage's data source.
+    Rollout {
+        #[command(subcommand)]
+        command: RolloutCommand,
+    },
     /// The Speculation:DepthProbe instrument (recorded greedy streams
     /// + the offline policy/cost-model simulator).
     Speculate {
         #[command(subcommand)]
         command: SpeculateCommand,
     },
-    /// The CptLoop trainer stage (toy gradient locks + LoRA CPT over
-    /// packed chunks).
+    /// The training stages: gradient locks, continued pretraining,
+    /// and the supervised, preference and reinforcement legs.
     Train {
         #[command(subcommand)]
         command: TrainCommand,
@@ -64,6 +70,123 @@ pub(crate) enum TrainCommand {
     /// safetensors + a NUON-lines step log (needs a train-cuda
     /// build; the model resolves through the global -c config).
     Cpt(TrainCptArgs),
+    /// Supervised tuning over a packed instruction artifact: the loss
+    /// covers the assistant turns alone.
+    Sft(TrainSftArgs),
+    /// Preference tuning over pairs, graded against the frozen base
+    /// (the adapter-off path is the reference model).
+    Dpo(TrainDpoArgs),
+    /// Reinforcement tuning over verifier-scored rollout groups.
+    Rlvr(TrainRlvrArgs),
+}
+
+/// The knobs every stage loop shares, so a posture reads the same
+/// whichever objective is running.
+#[derive(Debug, clap::Args)]
+pub(crate) struct StageArgs {
+    /// The adapter artifact path (.safetensors).
+    #[arg(long)]
+    pub(crate) out: PathBuf,
+    /// LoRA rank.
+    #[arg(long, default_value_t = 64)]
+    pub(crate) rank: usize,
+    /// LoRA alpha; absent = 2 * rank.
+    #[arg(long)]
+    pub(crate) alpha: Option<f64>,
+    /// Peak learning rate (linear warmup then constant).
+    #[arg(long, default_value_t = 1e-5)]
+    pub(crate) learning_rate: f64,
+    /// Linear warmup steps.
+    #[arg(long, default_value_t = 10)]
+    pub(crate) warmup_steps: usize,
+    /// Optimizer steps; absent = one pass over the input.
+    #[arg(long)]
+    pub(crate) steps: Option<usize>,
+    /// Cross-entropy head-chunk rows (the logits never materialize
+    /// whole).
+    #[arg(long, default_value_t = 128)]
+    pub(crate) loss_chunk: usize,
+    /// Adapter-init seed.
+    #[arg(long, default_value_t = 299_792_458)]
+    pub(crate) seed: u64,
+    /// The NUON-lines step log; absent = <out stem>_steps.nuon.
+    #[arg(long)]
+    pub(crate) log: Option<PathBuf>,
+    /// stderr progress cadence.
+    #[arg(long, default_value_t = 10)]
+    pub(crate) log_every: usize,
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct TrainSftArgs {
+    /// A packed instruction artifact (from `mix instruct`), carrying
+    /// ids and their loss mask.
+    #[arg(long)]
+    pub(crate) chunks: PathBuf,
+    /// Rows folded into one optimizer step.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) accumulate: usize,
+    #[command(flatten)]
+    pub(crate) stage: StageArgs,
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct TrainDpoArgs {
+    /// A preference-pair table (.nuon: prompt / chosen / rejected).
+    #[arg(long)]
+    pub(crate) pairs: PathBuf,
+    /// The window each candidate pads to; a pair exceeding it drops.
+    #[arg(long, default_value_t = 1024)]
+    pub(crate) seq_len: usize,
+    /// The preference sharpness.
+    #[arg(long, default_value_t = 0.1)]
+    pub(crate) beta: f64,
+    #[command(flatten)]
+    pub(crate) stage: StageArgs,
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct TrainRlvrArgs {
+    /// A scored-rollout artifact (from `rollout run`).
+    #[arg(long)]
+    pub(crate) rollouts: PathBuf,
+    /// The window each rollout pads to.
+    #[arg(long, default_value_t = 1024)]
+    pub(crate) seq_len: usize,
+    #[command(flatten)]
+    pub(crate) stage: StageArgs,
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub(crate) enum RolloutCommand {
+    /// Sample replies to verifiable prompts through the engine, grade
+    /// each against its verifier, and emit scored groups.
+    Run(RolloutRunArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct RolloutRunArgs {
+    /// A verifiable-prompt table (.nuon: prompt / verifier /
+    /// reference).
+    #[arg(long)]
+    pub(crate) prompts: PathBuf,
+    /// The scored-rollout artifact (.nuon).
+    #[arg(long)]
+    pub(crate) out: PathBuf,
+    /// Replies sampled per prompt - the group an advantage is
+    /// computed over. One carries no relative signal.
+    #[arg(long, default_value_t = 8)]
+    pub(crate) group: usize,
+    /// Decode budget per reply.
+    #[arg(long, default_value_t = 256)]
+    pub(crate) max_tokens: usize,
+    /// Sampling temperature; the group needs spread, so greedy would
+    /// make every member identical.
+    #[arg(long, default_value_t = 1.0)]
+    pub(crate) temperature: f64,
+    /// The base sampling seed (each reply offsets from it).
+    #[arg(long, default_value_t = 299_792_458)]
+    pub(crate) seed: u64,
 }
 
 #[derive(Debug, clap::Args)]
@@ -118,6 +241,25 @@ pub(crate) enum MixCommand {
     /// union) until a text-byte budget is crossed - the admixture
     /// leg sampler.
     Sample(MixSampleArgs),
+    /// Pack instruction examples one per row, masking the assistant
+    /// turns, for supervised tuning.
+    Instruct(MixInstructArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct MixInstructArgs {
+    /// A supervised example table (.nuon: messages per row).
+    #[arg(long)]
+    pub(crate) examples: PathBuf,
+    /// The packed artifact (.safetensors; a .nuon provenance sidecar
+    /// lands beside it).
+    #[arg(long)]
+    pub(crate) out: PathBuf,
+    /// The window each example pads to; a longer example is DROPPED
+    /// and reported, never truncated - a clipped reply teaches the
+    /// model to stop mid-answer.
+    #[arg(long, default_value_t = 1024)]
+    pub(crate) seq_len: usize,
 }
 
 #[derive(Debug, clap::Args)]

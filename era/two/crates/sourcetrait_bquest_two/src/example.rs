@@ -245,6 +245,68 @@ pub(crate) fn write_pack(
     Ok(())
 }
 
+/// `bquest mix instruct`: supervised examples -> one packed artifact.
+/// Every row is one whole example, masked to its assistant turns.
+pub(crate) fn mix_instruct(cli: &Cli, args: &MixInstructArgs) -> BquestResult<()> {
+    let started = std::time::Instant::now();
+    let config = lib::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
+    let tokenizer = lib::load_tokenizer(&config.model_dir())?;
+    lib::verify_token_map(&tokenizer)?;
+    let examples = load_sft(&args.examples)?;
+    let width = args.seq_len + 1;
+
+    let mut rows = Vec::with_capacity(examples.len());
+    let mut dropped = 0usize;
+    let mut supervised_total = 0usize;
+    for messages in &examples {
+        let (ids, mask) = encode_supervised(&tokenizer, messages)?;
+        let supervised: usize = mask.iter().filter(|slot| **slot != 0).count();
+        snafu::ensure_whatever!(
+            supervised > 0,
+            "an example rendered with no supervised position - its assistant \
+             turn produced no tokens"
+        );
+        match pack_row(ids, mask, width, lib::consts::TOKEN_PAD) {
+            Some(row) => {
+                supervised_total += supervised;
+                rows.push(row);
+            }
+            None => dropped += 1,
+        }
+    }
+    if dropped > 0 {
+        eprintln!(
+            "mix instruct: {dropped} of {} examples exceed the {width}-token \
+             window and were DROPPED (never truncated)",
+            examples.len()
+        );
+    }
+
+    let provenance = lib::nu::record! {
+        "examples" => v_str(&args.examples.display().to_string()),
+        "examples_available" => v_int(examples.len() as i64),
+        "rows" => v_int(rows.len() as i64),
+        "dropped_too_long" => v_int(dropped as i64),
+        "seq_len" => v_int(args.seq_len as i64),
+        "supervised_tokens" => v_int(supervised_total as i64),
+        "bquest_version" => v_str(env!("CARGO_PKG_VERSION")),
+    };
+    write_pack(&args.out, &rows, width, provenance)?;
+
+    let summary = lib::nu::Value::record(
+        lib::nu::record! {
+            "rows" => v_int(rows.len() as i64),
+            "dropped_too_long" => v_int(dropped as i64),
+            "supervised_tokens" => v_int(supervised_total as i64),
+            "out" => v_str(&args.out.display().to_string()),
+            "seconds" => v_float(started.elapsed().as_secs_f64()),
+        },
+        span(),
+    );
+    println!("{}", lib::nu::to_nuon_text(&summary)?);
+    Ok(())
+}
+
 // ---- Verifiers ----------------------------------------------------
 
 /// The verifier names a reinforcement prompt may select. Both are
