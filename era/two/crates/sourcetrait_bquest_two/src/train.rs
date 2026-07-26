@@ -1,12 +1,4 @@
-//! The CptLoop trainer stage: LoRA CPT (plain LM loss over packed
-//! chunks) under MANUAL PER-LAYER CHECKPOINTING - a no-grad pass over
-//! the frozen model caches each layer's input, then the loss block
-//! and each layer run as their own small autodiff graphs chained by
-//! vector-Jacobian products, so at most one layer's graph is ever
-//! live (the era-one method: full-graph autodiff over a 7B measured
-//! ~7.5 GiB of retained forward on Tier A - card overflow beside the
-//! weights). Burn autodiff over the sequential GDN recurrence is the
-//! correctness grade; the chunked backward stays a later perf lever.
+//! The trainer stages: LoRA training under manual per-layer checkpointing.
 use crate::*;
 
 use burn::optim::SimpleOptimizer;
@@ -20,8 +12,7 @@ use burn::tensor::{
 type FloatTensor<B, const D: usize> = burn::tensor::Tensor<B, D>;
 pub(crate) type OptState<B> = <burn::optim::AdamW as SimpleOptimizer<B>>::State<2>;
 
-/// The loop knobs (paths stay with the verb; the gate reuses the
-/// loop on toy values).
+/// The knobs every stage loop shares.
 pub(crate) struct LoopOptions {
     pub(crate) steps: usize,
     pub(crate) learning_rate: f64,
@@ -30,7 +21,7 @@ pub(crate) struct LoopOptions {
     pub(crate) log_every: usize,
 }
 
-/// One step's log row (the NUON-lines record).
+/// One step's log row, as one NUON-lines record.
 #[cfg_attr(not(feature = "train-cuda"), allow(dead_code))]
 pub(crate) struct StepLog {
     pub(crate) step: usize,
@@ -40,8 +31,7 @@ pub(crate) struct StepLog {
     pub(crate) elapsed_seconds: f64,
 }
 
-/// First/final loss plus run totals - the descent signal the gate
-/// and the smoke assert on.
+/// First and final loss plus run totals.
 #[cfg_attr(not(feature = "train-cuda"), allow(dead_code))]
 pub(crate) struct TrainReport {
     pub(crate) first_loss: f32,
@@ -51,14 +41,13 @@ pub(crate) struct TrainReport {
     pub(crate) seconds: f64,
 }
 
-/// One step's chain outcome: the loss and every adapter gradient on
-/// the inner backend, keyed by the artifact names.
+/// One step's loss and its adapter gradients, keyed by artifact name.
 pub(crate) struct StepOutcome<B: Backend> {
     pub(crate) loss: f32,
     pub(crate) grads: HashMap<String, FloatTensor<B, 2>>,
 }
 
-/// Zero-copy autodiff view of a frozen block (untracked constants).
+/// Zero-copy autodiff view of a frozen block, as untracked constants.
 fn lift_block<AD: AutodiffBackend>(
     block: &HybridBlock<AD::InnerBackend>,
 ) -> HybridBlock<AD> {
@@ -99,8 +88,7 @@ fn lift_block<AD: AutodiffBackend>(
     }
 }
 
-/// Frozen (inner-backend) view of one layer's current adapter values,
-/// for the no-grad pass.
+/// Inner-backend view of one layer's adapters, for the no-grad pass.
 fn adapters_inner<AD: AutodiffBackend>(
     layer: &LayerAdapters<AD>,
 ) -> LayerAdapters<AD::InnerBackend> {
@@ -136,8 +124,7 @@ fn adapters_inner<AD: AutodiffBackend>(
     }
 }
 
-/// The dimension bundle off the inner model, so one dispatcher
-/// serves blocks on ANY backend (the AD-lifted calls reuse it).
+/// The dimension bundle read off the inner model.
 fn dims_of<AD: AutodiffBackend>(model: &HybridModel<AD::InnerBackend>) -> HybridDims {
     HybridDims {
         attn_heads: model.attn_heads,
@@ -206,8 +193,7 @@ fn dims_block_forward<B: Backend>(
     }
 }
 
-/// Mean next-token cross-entropy, computed head-chunk by head-chunk
-/// so the (n, vocab) logits never materialize as one tensor.
+/// Mean next-token cross-entropy, chunked over the head.
 fn cross_entropy_chunked<AD: AutodiffBackend>(
     hidden: FloatTensor<AD, 2>,
     lm_head_transposed: &FloatTensor<AD, 2>,
@@ -242,8 +228,7 @@ fn cross_entropy_chunked<AD: AutodiffBackend>(
         .div_scalar(n as f64)
 }
 
-/// Pass 1 (no grad, frozen adapter views): cache each layer's INPUT
-/// and return them with the last layer's output (pre final norm).
+/// Pass one, no grad: cache each layer's input and the top output.
 pub(crate) fn forward_cache<AD: AutodiffBackend>(
     model: &HybridModel<AD::InnerBackend>,
     adapters: &ModelAdapters<AD>,
@@ -267,14 +252,7 @@ pub(crate) fn forward_cache<AD: AutodiffBackend>(
     (layer_inputs, x)
 }
 
-/// The loss block, as a small autodiff graph over ONE sequence's top
-/// hidden state: final-norm it, hand it plus the head to
-/// `build_loss`, and return the scalar loss with the seed gradient
-/// the layer chain consumes.
-///
-/// The objective lives entirely in `build_loss`. That is the whole
-/// reason supervised, preference and reinforcement training share the
-/// machinery below - the chain never learns what it is training.
+/// The loss block: one sequence's scalar loss plus its seed gradient.
 pub(crate) fn seed_from_hidden<AD, F>(
     model: &HybridModel<AD::InnerBackend>,
     top_x: FloatTensor<AD::InnerBackend, 2>,
@@ -300,18 +278,14 @@ where
     Ok((loss_value, grad_out))
 }
 
-/// What a paired loss block yields: the scalar loss and one seed
-/// gradient per sequence.
+/// A paired loss block's yield: the loss and one seed per sequence.
 pub(crate) type PairedSeed<AD> = (
     f32,
     FloatTensor<<AD as AutodiffBackend>::InnerBackend, 2>,
     FloatTensor<<AD as AutodiffBackend>::InnerBackend, 2>,
 );
 
-/// The paired loss block: TWO sequences under ONE scalar loss, so a
-/// preference objective that couples them backwards once and yields a
-/// seed gradient for each. Each seed then drives its own layer chain
-/// and the two gradient sets accumulate.
+/// The paired loss block: two sequences under one coupled loss.
 pub(crate) fn seed_pair_from_hidden<AD, F>(
     model: &HybridModel<AD::InnerBackend>,
     left_x: FloatTensor<AD::InnerBackend, 2>,
@@ -344,8 +318,7 @@ where
     Ok((loss_value, left_grad, right_grad))
 }
 
-/// Pass 2: per-layer VJP, top down from a seed gradient; at most one
-/// layer's graph is live at a time.
+/// Pass two: a per-layer VJP top down from a seed gradient.
 pub(crate) fn chain_from_seed<AD: AutodiffBackend>(
     model: &HybridModel<AD::InnerBackend>,
     adapters: &ModelAdapters<AD>,
@@ -393,10 +366,7 @@ pub(crate) fn chain_from_seed<AD: AutodiffBackend>(
     Ok(lora_grads)
 }
 
-/// Add one gradient set into an accumulator, summing where a name is
-/// already present. Preference and reinforcement steps both fold
-/// several sequences into one optimizer step, which continued
-/// pretraining never needed.
+/// Add one gradient set into an accumulator, summing on name.
 pub(crate) fn accumulate_grads<B: Backend>(
     into: &mut HashMap<String, FloatTensor<B, 2>>,
     from: HashMap<String, FloatTensor<B, 2>>,
@@ -409,7 +379,7 @@ pub(crate) fn accumulate_grads<B: Backend>(
     }
 }
 
-/// Scale an accumulated gradient set (the mean over its contributors).
+/// Scale an accumulated gradient set.
 pub(crate) fn scale_grads<B: Backend>(
     grads: &mut HashMap<String, FloatTensor<B, 2>>,
     factor: f64,
@@ -422,8 +392,7 @@ pub(crate) fn scale_grads<B: Backend>(
     }
 }
 
-/// One continued-pretraining step: the plain LM objective over every
-/// position, composed from the three pieces above.
+/// One continued-pretraining step: the plain LM objective.
 pub(crate) fn chain_step<AD: AutodiffBackend>(
     model: &HybridModel<AD::InnerBackend>,
     adapters: &ModelAdapters<AD>,
@@ -445,9 +414,7 @@ pub(crate) fn chain_step<AD: AutodiffBackend>(
     Ok(StepOutcome { loss, grads })
 }
 
-/// The full-graph reference step (toy scale only): the identical
-/// forward run end to end as ONE autodiff graph - the arbiter the
-/// gate compares the chain against.
+/// The full-graph reference step, at toy scale only.
 fn full_graph_step<AD: AutodiffBackend>(
     model: &HybridModel<AD::InnerBackend>,
     adapters: &ModelAdapters<AD>,
@@ -491,9 +458,7 @@ fn full_graph_step<AD: AutodiffBackend>(
     Ok(StepOutcome { loss: loss_value, grads: lora_grads })
 }
 
-/// The training loop: chain steps + AdamW per raw tensor under
-/// linear warmup then constant lr; `on_step` receives every step's
-/// log row (the cpt verb appends the NUON-lines log there).
+/// The continued-pretraining loop: chain steps under AdamW.
 pub(crate) fn train_loop<AD: AutodiffBackend>(
     model: &HybridModel<AD::InnerBackend>,
     adapters: &mut ModelAdapters<AD>,
@@ -534,13 +499,9 @@ pub(crate) fn train_loop<AD: AutodiffBackend>(
         )?;
         if step == 0 {
             first_loss = outcome.loss;
-            // Per-layer gradient health at step 0 (the NaN
-            // localizer): QUEST_TRAIN_DEBUG_GRADS=1.
             if std::env::var("QUEST_TRAIN_DEBUG_GRADS").is_ok() {
                 debug_grad_health(&outcome.grads)?;
             }
-            // VRAM bisection park (an external poller reads the
-            // level): QUEST_TRAIN_PROBE=grads|step.
             if probe.as_deref() == Some("grads") {
                 eprintln!("bquest train probe: parked at grads");
                 std::thread::sleep(std::time::Duration::from_secs(3));
@@ -602,15 +563,12 @@ pub(crate) fn train_loop<AD: AutodiffBackend>(
     })
 }
 
-/// The shared learning rate schedule: linear warmup to the peak,
-/// then constant.
+/// The shared learning-rate schedule: linear warmup, then constant.
 pub(crate) fn warmup_rate(peak: f64, warmup_steps: usize, step: usize) -> f64 {
     peak * (((step + 1) as f64 / warmup_steps.max(1) as f64).min(1.0))
 }
 
-/// Apply one AdamW update per adapter tensor, consuming the gradient
-/// set. Shared by every stage so the optimizer, its per-tensor state
-/// keying and its no-weight-decay posture cannot drift between them.
+/// Apply one AdamW update per adapter tensor, consuming the gradients.
 pub(crate) fn optimizer_step<AD: AutodiffBackend>(
     optimizer: &burn::optim::AdamW,
     states: &mut HashMap<String, OptState<AD::InnerBackend>>,
@@ -633,8 +591,7 @@ pub(crate) fn optimizer_step<AD: AutodiffBackend>(
     Ok(())
 }
 
-/// Per-layer gradient health print (step 0, QUEST_TRAIN_DEBUG_GRADS):
-/// non-finite counts localize a NaN backward to its layer.
+/// Per-layer gradient health print, for localizing a NaN backward.
 fn debug_grad_health<B: Backend>(
     grads: &HashMap<String, FloatTensor<B, 2>>,
 ) -> BquestResult<()> {
@@ -666,26 +623,13 @@ fn debug_grad_health<B: Backend>(
     Ok(())
 }
 
-/// A loaded pack: the id rows, and the per-position loss mask when
-/// the artifact carries one (supervised packs do; a continued-
-/// pretraining pack does not, and every position trains).
+/// A loaded pack: the id rows and an optional per-position loss mask.
 pub(crate) struct ChunkPack {
     pub(crate) rows: Vec<Vec<u32>>,
     pub(crate) masks: Option<Vec<Vec<u8>>>,
 }
 
-/// Read a packed artifact: ids as u32 [n, width], and an optional
-/// loss mask as u8 of the same shape.
-///
-/// ## DEV
-/// This REJECTS any tensor it does not recognise. The previous form
-/// read one named tensor and ignored the rest, so the first objective
-/// to write a second tensor beside the ids would have had it skipped
-/// in silence - a run that completes cleanly having trained the wrong
-/// objective. That is the failure this rejection exists to make
-/// impossible, and it is why the check is here rather than in the
-/// writer.
-/// ##
+/// Read a packed artifact: u32 ids and an optional u8 loss mask.
 fn load_chunks(path: &Path) -> BquestResult<ChunkPack> {
     let bytes = fs::read(path)?;
     let parsed = match safetensors::SafeTensors::deserialize(&bytes) {
@@ -745,10 +689,7 @@ fn load_chunks(path: &Path) -> BquestResult<ChunkPack> {
     Ok(ChunkPack { rows, masks })
 }
 
-// ---- The toy-config gate (cpu f32) --------------------------------
-
-/// A 2-layer toy hybrid shape (one GDN + one attention layer) small
-/// enough for cpu-f32 full-graph autodiff.
+/// A 2-layer toy hybrid shape, small enough for cpu-f32 autodiff.
 pub(crate) fn toy_config() -> HybridCheckpointConfig {
     HybridCheckpointConfig {
         vocab_size: 96,
@@ -770,8 +711,7 @@ pub(crate) fn toy_config() -> HybridCheckpointConfig {
     }
 }
 
-/// Matrix init at a bounded uniform scale so activations neither
-/// explode nor vanish through the toy depth.
+/// Matrix init at a bounded uniform scale.
 fn toy_tensor(rng: &mut SplitMix64, shape: Vec<usize>) -> (Vec<usize>, Vec<f32>) {
     let count: usize = shape.iter().product();
     let values = (0..count)
@@ -780,9 +720,7 @@ fn toy_tensor(rng: &mut SplitMix64, shape: Vec<usize>) -> (Vec<usize>, Vec<f32>)
     (shape, values)
 }
 
-/// Norm scales init near 1.0 (a small norm weight multiplies every
-/// activation down and flattens the loss landscape - the fixture
-/// trap the era-one gate hit).
+/// Norm scales init near 1.0.
 fn toy_norm(rng: &mut SplitMix64, width: usize) -> (Vec<usize>, Vec<f32>) {
     let values = (0..width)
         .map(|_| 1.0 + ((rng.next_u64() % 2000) as f32 / 1000.0 - 1.0) * 0.05)
@@ -901,9 +839,7 @@ pub(crate) fn toy_weights(config: &HybridCheckpointConfig) -> HybridWeights {
     HybridWeights::from_tensors(tensors)
 }
 
-/// One gradient-set comparison (chain vs full graph): worst per-param
-/// nmse, with all-zero reference grads matched against all-zero chain
-/// grads (b starts zero, so a-grads are exactly zero until b moves).
+/// One gradient-set comparison: the worst per-parameter nmse.
 pub(crate) struct GradCompare {
     pub(crate) max_nmse: f64,
     pub(crate) compared: usize,
@@ -971,17 +907,12 @@ pub(crate) struct GateVerdict {
     pub(crate) descended: bool,
 }
 
-/// The chain-vs-full gradient bar (f32 reassociation class; the two
-/// graph shapes compute the same math in different orders).
+/// The chain-versus-full gradient bar.
 const GATE_GRAD_NMSE_BAR: f64 = 1e-9;
-/// The descent margin (60 steps over 4 repeating chunks memorizes
-/// them; a broken gradient path cannot cross it by noise).
+/// The descent margin the 60-step lock must clear.
 const GATE_DESCENT_MARGIN: f32 = 0.05;
 
-/// Run the toy-config locks on cpu f32: (1) zero-init adapters leave
-/// the forward value-equal to the adapter-free oracle path; (2) the
-/// per-layer VJP chain's gradients equal a full-graph backward's, at
-/// init AND after five optimizer steps; (3) 60 steps descend.
+/// Run the three toy-config locks on cpu f32.
 pub(crate) fn run_train_gate() -> BquestResult<GateVerdict> {
     type ToyAd = burn::backend::Autodiff<CpuBack>;
     let device: <CpuBack as burn::tensor::backend::BackendTypes>::Device = Default::default();
@@ -1000,8 +931,6 @@ pub(crate) fn run_train_gate() -> BquestResult<GateVerdict> {
     let mask_inner = causal_mask::<CpuBack>(seq_len, &device);
     let dims = dims_of::<ToyAd>(&model);
 
-    // Lock 1: adapter-off exactness - fresh zero-b adapters must
-    // leave every hidden value equal to the None path.
     let adapters = ModelAdapters::<ToyAd>::init(&config, 4, 16.0, 99, &device)?;
     let frozen: Vec<LayerAdapters<CpuBack>> =
         adapters.layers.iter().map(adapters_inner::<ToyAd>).collect();
@@ -1017,8 +946,6 @@ pub(crate) fn run_train_gate() -> BquestResult<GateVerdict> {
     let adapted_values = tensor_values(&adapted)?;
     let adapter_off_exact = plain_values == adapted_values;
 
-    // Lock 2: chain-vs-full gradient equivalence at init (b zero) and
-    // after five real optimizer steps (b live).
     let targets = &chunks[0][1..];
     let chain = chain_step::<ToyAd>(
         &model, &adapters, &mask_inner, ids, targets, 8, &device,
@@ -1051,7 +978,6 @@ pub(crate) fn run_train_gate() -> BquestResult<GateVerdict> {
     )?;
     let trained_grads = compare_grads(&chain.grads, &full.grads)?;
 
-    // Lock 3: descent over fresh adapters.
     let mut adapters = ModelAdapters::<ToyAd>::init(&config, 4, 16.0, 42, &device)?;
     let descent_options = LoopOptions {
         steps: 60,
@@ -1079,8 +1005,7 @@ pub(crate) fn run_train_gate() -> BquestResult<GateVerdict> {
     })
 }
 
-/// `bquest train gate`: run the toy locks and print the NUON verdict;
-/// any failing lock exits nonzero.
+/// `bquest train gate`: run the locks and print the NUON verdict.
 pub(crate) fn train_gate_verb() -> BquestResult<()> {
     let verdict = run_train_gate()?;
     let passed = verdict.adapter_off_exact
@@ -1108,17 +1033,13 @@ pub(crate) fn train_gate_verb() -> BquestResult<()> {
     Ok(())
 }
 
-/// `bquest train cpt`: LoRA CPT over a packed-chunks artifact on the
-/// train-cuda grade; the adapter lands as one safetensors file and
-/// every step appends to the NUON-lines log.
+/// `bquest train cpt`: LoRA CPT over a packed-chunks artifact.
 pub(crate) fn train_cpt(cli: &Cli, args: &TrainCptArgs) -> BquestResult<()> {
     let config = lib::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
     let model_dir = config.model_dir();
     let model_id = config.model.clone();
     let alpha = args.alpha.unwrap_or(2.0 * args.rank as f64);
     let pack = load_chunks(&args.chunks)?;
-    // A masked pack is a SUPERVISED pack; running it here would
-    // average the loss over the prompt as well as the reply.
     snafu::ensure_whatever!(
         pack.masks.is_none(),
         "{} carries a loss mask, so it is a supervised pack - use `train sft`",
@@ -1212,8 +1133,6 @@ pub(crate) fn train_cpt(cli: &Cli, args: &TrainCptArgs) -> BquestResult<()> {
     }
 }
 
-// ---- The post-training stage verbs ---------------------------------
-
 /// The step log's default home: beside the adapter it belongs to.
 fn stage_log_path(args: &StageArgs) -> PathBuf {
     match &args.log {
@@ -1229,8 +1148,7 @@ fn stage_log_path(args: &StageArgs) -> PathBuf {
     }
 }
 
-/// One step's NUON-lines row - appended per step so a crashed run
-/// still leaves its progress on disk.
+/// Append one step's NUON-lines row to the step log.
 fn append_step_log(log_path: &Path, log: &StepLog) -> BquestResult<()> {
     let row = lib::nu::Value::record(
         lib::nu::record! {
@@ -1270,9 +1188,7 @@ fn print_stage_summary(
     Ok(())
 }
 
-/// Fresh adapters, or the previous stage's continued. This is the
-/// seam the staged sequence turns on: each stage either starts from
-/// the base or carries the checkpoint before it forward.
+/// Fresh adapters, or the previous stage's continued.
 #[cfg(feature = "train-cuda")]
 fn stage_adapters<AD: AutodiffBackend>(
     stage: &StageArgs,
@@ -1302,9 +1218,7 @@ fn stage_options(args: &StageArgs, steps: usize) -> LoopOptions {
     }
 }
 
-/// `bquest train sft`: supervised tuning over a packed instruction
-/// artifact. The pack MUST carry a loss mask - an unmasked pack is a
-/// continued-pretraining pack and would train the prompt too.
+/// `bquest train sft`: supervised tuning over a packed artifact.
 pub(crate) fn train_sft(cli: &Cli, args: &TrainSftArgs) -> BquestResult<()> {
     let config = lib::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
     let model_dir = config.model_dir();
@@ -1364,10 +1278,7 @@ pub(crate) fn train_sft(cli: &Cli, args: &TrainSftArgs) -> BquestResult<()> {
     }
 }
 
-/// `bquest train dpo`: preference tuning. Each candidate renders as
-/// the prompt plus that reply, so the response mask comes from the
-/// renderer's spans exactly as the supervised path's does; the
-/// reference log-probabilities come from the adapter-off forward.
+/// `bquest train dpo`: preference tuning over pairs.
 pub(crate) fn train_dpo(cli: &Cli, args: &TrainDpoArgs) -> BquestResult<()> {
     let config = lib::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
     let model_dir = config.model_dir();
@@ -1453,10 +1364,7 @@ pub(crate) fn train_dpo(cli: &Cli, args: &TrainDpoArgs) -> BquestResult<()> {
     }
 }
 
-/// `bquest train rlvr`: reinforcement tuning over scored rollout
-/// groups. The rollouts come from a separate `rollout run` because
-/// the generating stack and the training stack each hold a full copy
-/// of the weights and two do not fit the card.
+/// `bquest train rlvr`: reinforcement tuning over scored groups.
 pub(crate) fn train_rlvr(cli: &Cli, args: &TrainRlvrArgs) -> BquestResult<()> {
     let config = lib::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
     let model_dir = config.model_dir();
@@ -1512,12 +1420,7 @@ pub(crate) fn train_rlvr(cli: &Cli, args: &TrainRlvrArgs) -> BquestResult<()> {
     }
 }
 
-// ---- The post-training stages -------------------------------------
-
-/// The adapter-off forward: the FROZEN base, which is the reference
-/// model a preference objective compares against. Zero-init adapters
-/// are bit-exact to the base and the gate locks that, so no second
-/// copy of the weights exists anywhere in this crate.
+/// The adapter-off forward: the frozen base, with no adapters.
 fn forward_plain<B: Backend>(
     model: &HybridModel<B>,
     mask_inner: &FloatTensor<B, 2>,
@@ -1539,9 +1442,7 @@ fn forward_plain<B: Backend>(
     x
 }
 
-/// A sequence's masked log-probability under the frozen base, with no
-/// autodiff graph anywhere. Chunked over the head so the (n, vocab)
-/// logits never materialize whole.
+/// A sequence's masked log-probability under the frozen base.
 fn reference_logprob<B: Backend>(
     model: &HybridModel<B>,
     mask_inner: &FloatTensor<B, 2>,
@@ -1585,23 +1486,20 @@ fn reference_logprob<B: Backend>(
     Ok(total as f32)
 }
 
-/// One packed supervised row split into what the objective consumes:
-/// inputs, next-token targets, and the target-aligned loss mask.
+/// Split a packed row into inputs, targets, and the target mask.
 fn split_row<'a>(ids: &'a [u32], mask: &'a [u8]) -> (&'a [u32], &'a [u32], &'a [u8]) {
     let width = ids.len();
     (&ids[..width - 1], &ids[1..], &mask[1..])
 }
 
-/// The supervised loop's input: packed rows with their loss masks,
-/// and how many fold into one optimizer step.
+/// The supervised loop's input: rows, masks, and accumulation.
 pub(crate) struct SupervisedBatch<'a> {
     pub(crate) rows: &'a [Vec<u32>],
     pub(crate) masks: &'a [Vec<u8>],
     pub(crate) accumulate: usize,
 }
 
-/// The supervised loop: masked next-token cross-entropy over packed
-/// example rows, `accumulate` rows folded into each optimizer step.
+/// The supervised loop: masked cross-entropy over example rows.
 pub(crate) fn sft_loop<AD: AutodiffBackend>(
     model: &HybridModel<AD::InnerBackend>,
     adapters: &mut ModelAdapters<AD>,
@@ -1704,9 +1602,7 @@ pub(crate) fn sft_loop<AD: AutodiffBackend>(
     })
 }
 
-/// One preference pair, encoded: the two candidate continuations of
-/// a shared prompt, each with its response mask, plus the frozen
-/// base's log-probability for each.
+/// One preference pair, encoded, with its frozen-base log-probs.
 pub(crate) struct EncodedPair {
     pub(crate) chosen: (Vec<u32>, Vec<u8>),
     pub(crate) rejected: (Vec<u32>, Vec<u8>),
@@ -1714,9 +1610,7 @@ pub(crate) struct EncodedPair {
     pub(crate) rejected_reference: f32,
 }
 
-/// The preference loop. Each pair backwards ONCE through a loss that
-/// couples both candidates, yielding a seed gradient per sequence;
-/// the two chains then accumulate into one optimizer step.
+/// The preference loop: one coupled backward per pair.
 pub(crate) fn dpo_loop<AD: AutodiffBackend>(
     model: &HybridModel<AD::InnerBackend>,
     adapters: &mut ModelAdapters<AD>,
@@ -1843,27 +1737,19 @@ pub(crate) fn dpo_loop<AD: AutodiffBackend>(
     })
 }
 
-/// One scored rollout: the full sequence, the response mask, and the
-/// verifier's reward.
+/// One scored rollout: the window, its mask, and the reward.
 pub(crate) struct ScoredRollout {
     pub(crate) ids: Vec<u32>,
     pub(crate) mask: Vec<u8>,
     pub(crate) reward: f32,
 }
 
-/// One prompt's group of rollouts - the unit a group-relative
-/// advantage is computed over.
+/// One prompt's group of rollouts.
 pub(crate) struct RolloutGroup {
     pub(crate) rollouts: Vec<ScoredRollout>,
 }
 
-/// The reinforcement loop: for each group, advantages come from the
-/// group's own reward spread and every rollout contributes a
-/// policy-gradient term; the group folds into one optimizer step.
-///
-/// A group whose rollouts all scored alike yields zero advantages and
-/// is SKIPPED rather than stepped on - there is nothing to prefer,
-/// and stepping on a zero gradient still moves the optimizer state.
+/// The reinforcement loop: one optimizer step per scoring group.
 pub(crate) fn rlvr_loop<AD: AutodiffBackend>(
     model: &HybridModel<AD::InnerBackend>,
     adapters: &mut ModelAdapters<AD>,
