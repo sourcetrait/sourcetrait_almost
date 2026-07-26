@@ -1,5 +1,4 @@
-//! Crate-wide error types: the one era-agnostic error surface every
-//! era implementation raises through.
+//! The one era-agnostic error surface every era raises through.
 
 pub type BridgeResult<T> = Result<T, BridgeError>;
 

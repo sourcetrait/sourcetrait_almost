@@ -1,26 +1,17 @@
-//! The bridge surface every consumer needs: the Era entry trait and
-//! the channel-shaped chat session models.
+//! The bridge surface every consumer needs: the entry trait and the
+//! session.
 use crate::*;
 
-/// An era's end-use entry point. Implementations live in per-era
-/// crates (sourcetrait_quest_bridge_<era>); eon components interact
-/// with an era through this API alone and never see era internals.
+/// An era's end-use entry point, and the only way eon reaches an era.
 pub trait Era {
     /// The era's identity, without loading anything.
     fn info(&self) -> EraInfo;
 
-    /// Open an interactive chat session. The model loads on the
-    /// session's own engine thread: `Ready(EraInfo)` arrives on
-    /// `events` once it is live, `Error` + `Closed` follow a load
-    /// failure.
+    /// Open a chat session; the model loads on its own engine thread.
     fn open_chat(&self, options: &ChatOptions) -> BridgeResult<ChatSession>;
 }
 
-/// One chat session's transport pair. Channels, not callbacks - and
-/// deliberately transport-shaped: the in-process pair later swaps for
-/// a socket/TLS boundary (the dquest server) without touching
-/// consumers. Dropping `requests` closes the session; the engine
-/// answers `Closed` and exits.
+/// One chat session's transport pair: channels rather than callbacks.
 #[derive(Debug)]
 pub struct ChatSession {
     pub requests: tokio::sync::mpsc::Sender<ChatRequest>,
@@ -33,8 +24,7 @@ pub enum ChatRequest {
     /// The next user turn's text (raw; the era renders its own chat
     /// protocol).
     Turn { text: String },
-    /// Stop the in-flight generation early; the turn still reports
-    /// (`TurnDone` with `Cancelled`).
+    /// Stop the in-flight generation early; the turn still reports.
     Cancel,
     /// Drop the whole conversation context - a fresh session on the
     /// same loaded model.
@@ -48,15 +38,13 @@ pub enum ChatRequest {
 pub enum ChatEvent {
     /// The model is loaded and the session accepts turns.
     Ready(EraInfo),
-    /// Streamed generation text, possibly empty while a multi-token
-    /// grapheme is pending.
+    /// Streamed text; may be empty while a grapheme is pending.
     Chunk { text: String },
     /// A turn ended - naturally or by Cancel.
     TurnDone(TurnReport),
     /// A recoverable engine error; the session stays open.
     Error { message: String },
-    /// The session is over: Close honored, the requests sender
-    /// dropped, or the model failed to load.
+    /// The session is over, however it ended.
     Closed,
 }
 
@@ -66,9 +54,7 @@ pub struct EraInfo {
     pub model: String,
 }
 
-/// Session-open options: the suite's -d/-c/-s profile tokens (era
-/// profiles own settings - no knob farm here) plus a decode-budget
-/// override.
+/// Session-open options: the suite's profile tokens and a budget.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChatOptions {
     pub dir: Option<String>,
