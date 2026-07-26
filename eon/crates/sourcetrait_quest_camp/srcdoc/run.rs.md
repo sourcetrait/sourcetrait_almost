@@ -7,12 +7,11 @@ profiles own the settings, so camp exposes no knob farm of its own - a
 decode budget, a sampling posture or a graph toggle is configured where every
 other tool in the suite configures it.
 
-THESE DOC COMMENTS ARE ALSO THE `--help` TEXT, which is the one place in the
-crate where the summary cap has a user-visible consequence: shortening a field
-doc shortens what a user reads at the terminal. The token rules those docs used
-to spell out in full are the suite-wide ones, documented once in the library's
-config module and its mirror, so the loss is duplication rather than
-information.
+THESE DOC COMMENTS ARE ALSO THE `--help` TEXT, and they follow the same rules
+as every other doc comment - there is no product-text exemption. The token
+rules they used to spell out in full are the suite-wide ones, documented once
+in the library's config module and its mirror, so the shorter help loses
+duplication rather than information.
 
 ## fn run
 
