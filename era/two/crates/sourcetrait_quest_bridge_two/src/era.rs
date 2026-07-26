@@ -1,14 +1,11 @@
-//! The era-two entry: identity plus session factories over the
-//! sourcetrait_lib_quest_two engine.
+//! The era-two entry: identity, and the session factory.
 use crate::*;
 
 /// Era two: the Olmo-Hybrid DPO checkpoint on the lib_quest engine.
 pub struct BridgeTwo;
 
 impl bridge::all::Era for BridgeTwo {
-    /// The era's sole-checkpoint identity (the loaded model's actual
-    /// coordinate rides the session's Ready event, where a config
-    /// profile could differ).
+    /// The sole-checkpoint identity, from constants and not a load.
     fn info(&self) -> bridge::all::EraInfo {
         bridge::all::EraInfo {
             era: String::from("two"),

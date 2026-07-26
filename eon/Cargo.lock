@@ -4189,7 +4189,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_quest_bridge_two"
-version = "0.0.0-3"
+version = "0.0.0-4"
 dependencies = [
  "candle-core",
  "snafu",

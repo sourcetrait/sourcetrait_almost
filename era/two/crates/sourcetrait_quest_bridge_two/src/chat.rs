@@ -1,18 +1,12 @@
-//! The channel-shaped chat engine: one named thread constructs and
-//! privately holds the model (OlmoHybrid is not Send - the Rc graph
-//! cache) and drives lib generations off the requests channel; only
-//! Strings and small structs ride the channels.
+//! The channel-shaped chat engine, on one thread that owns the model.
 use crate::*;
 
-/// Event-channel bound: the engine blocks on a full channel, so a
-/// stalled consumer backpressures generation instead of ballooning.
+/// Event-channel bound; a full channel blocks the engine by design.
 const EVENTS_CAPACITY: usize = 256;
 /// Requests are small and consumer-paced.
 const REQUESTS_CAPACITY: usize = 8;
 
 /// Spawn the engine thread and hand back the session's channel pair.
-/// The model loads ON the thread: Ready(EraInfo) follows the load,
-/// Error + Closed follow a load failure.
 pub(crate) fn open_chat(
     options: &bridge::all::ChatOptions,
 ) -> bridge::BridgeResult<bridge::all::ChatSession> {
@@ -38,10 +32,7 @@ enum TurnOutcome {
     Close,
 }
 
-/// The engine loop: load, announce Ready, then serve requests until
-/// Close arrives or the requests sender drops. Post-load failures are
-/// events - the session stays open and the thread never panics for
-/// protocol reasons.
+/// The engine loop: load, announce Ready, then serve requests.
 fn engine(
     options: bridge::all::ChatOptions,
     mut requests: r::mpsc::Receiver<bridge::all::ChatRequest>,
@@ -67,10 +58,6 @@ fn engine(
         return;
     }
 
-    // The consumed-id trail: exactly the cache contents after each
-    // turn (report.context_ids). Turns 2+ continue from it through
-    // generate_from over a constructed RestoredContext - no snapshot
-    // files (the bquest speculate-record precedent).
     let mut trail: Vec<u32> = Vec::new();
     while let Some(request) = requests.blocking_recv() {
         match request {
@@ -81,7 +68,6 @@ fn engine(
                     TurnOutcome::Close => break,
                 }
             }
-            // Nothing is in flight between turns.
             bridge::all::ChatRequest::Cancel => {}
             bridge::all::ChatRequest::Reset => reset(&mut model, &mut trail, &events),
             bridge::all::ChatRequest::Close => break,
@@ -90,11 +76,7 @@ fn engine(
     let _ = events.blocking_send(bridge::all::ChatEvent::Closed);
 }
 
-/// Resolve the profiles and build the model on this thread. Chat is
-/// always capture-off (chained sessions regrow the kv buffers, which
-/// parks captured graph buffers for near-zero replay benefit - the
-/// era-one ruling, enforced era-side); everything else rides the
-/// profile.
+/// Resolve the profiles and build the model on this thread.
 fn load(
     options: &bridge::all::ChatOptions,
 ) -> lib::LibQuestResult<(lib::OlmoHybrid, tokenizers::Tokenizer, String)> {
@@ -124,8 +106,7 @@ fn load(
     Ok((model, tokenizer, config.model))
 }
 
-/// Reset the conversation: clear the trail and the carried caches (a
-/// fresh session on the same loaded model).
+/// Reset the conversation: the trail and the carried caches.
 fn reset(
     model: &mut lib::OlmoHybrid,
     trail: &mut Vec<u32>,
@@ -139,11 +120,7 @@ fn reset(
     }
 }
 
-/// Drive one turn: start the generation (fresh or continued off the
-/// trail), stream Chunks under the bounded events channel, poll
-/// requests between decode steps for Cancel-class interrupts
-/// (dropping the iterator is the clean early stop), then report
-/// TurnDone and advance the trail.
+/// Drive one turn: generate, stream, poll for interrupts, report.
 fn run_turn(
     model: &mut lib::OlmoHybrid,
     tokenizer: &tokenizers::Tokenizer,
@@ -182,14 +159,12 @@ fn run_turn(
                         .blocking_send(bridge::all::ChatEvent::Chunk { text: step.chunk })
                         .is_err()
                 {
-                    // The consumer is gone: stop and close.
                     cancelled = true;
                     outcome = TurnOutcome::Close;
                     break;
                 }
             }
             Err(error) => {
-                // The iterator fused; the turn still reports below.
                 let _ = events.blocking_send(bridge::all::ChatEvent::Error {
                     message: error.to_string(),
                 });
@@ -237,7 +212,6 @@ fn run_turn(
         match report.finish_reason {
             Some(lib::FinishReason::StopToken) => bridge::all::FinishReason::StopToken,
             Some(lib::FinishReason::SampleLen) => bridge::all::FinishReason::SampleLen,
-            // An error-broken turn ended early without a Cancel.
             None => bridge::all::FinishReason::Cancelled,
         }
     };
