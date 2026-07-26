@@ -1,10 +1,7 @@
 //! The generate verb: spawn the pinned driver, split payload from events.
 use crate::*;
 
-/// Run `refquest generate`: drives pysrc/generate.py through the pinned
-/// environment's python. Driver stdout (JSON-lines events) becomes: text
-/// payload on our stdout, terse summaries on stderr, and the full event
-/// record at --record when given. Driver stderr passes through.
+/// Run `refquest generate`: drives pysrc/generate.py, pinned env.
 pub(crate) fn generate(args: &GenerateArgs) -> RefquestResult<()> {
     let model_dir = match &args.model_dir {
         Some(dir) => dir.clone(),
@@ -61,7 +58,6 @@ pub(crate) fn generate(args: &GenerateArgs) -> RefquestResult<()> {
         cmd.arg("--stop").arg(stop);
     }
     if args.device == DevicePick::Cpu {
-        // Keep the cpu grade genuinely cuda-free (fla gating + no context).
         cmd.env("CUDA_VISIBLE_DEVICES", "");
     }
 

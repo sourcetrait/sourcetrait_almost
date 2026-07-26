@@ -13,7 +13,7 @@ const PYSRC_FILES: [(&str, &str); 7] = [
     ("envcheck.py", include_str!("../pysrc/envcheck.py")),
 ];
 
-/// The refquest data home (the venv and materialized pysrc live here).
+/// The refquest data home: the venv and the materialized pysrc.
 pub(crate) fn refquest_home() -> RefquestResult<PathBuf> {
     Ok(checkpoint::data_home()?.join(REFQUEST_DATA_SUBDIR))
 }
@@ -41,8 +41,7 @@ pub(crate) fn envcheck(args: &EnvArgs) -> RefquestResult<()> {
     run_driver(cmd, args.record.as_deref())
 }
 
-/// Write the embedded driver scripts into the data home (only when their
-/// content changed); returns the pysrc dir.
+/// Write the embedded driver scripts out, only where they differ.
 pub(crate) fn materialize_pysrc() -> RefquestResult<PathBuf> {
     let dir = refquest_home()?.join("pysrc");
     fs::create_dir_all(&dir)?;

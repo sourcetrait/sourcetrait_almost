@@ -23,7 +23,7 @@ impl ModelPick {
     }
 }
 
-/// XDG data home, honoring the spec fallback (~/.local/share).
+/// The XDG data home, honouring the spec's own fallback.
 pub(crate) fn data_home() -> RefquestResult<PathBuf> {
     if let Ok(dir) = env::var("XDG_DATA_HOME")
         && !dir.is_empty()
@@ -59,8 +59,6 @@ impl TensorInfo {
 }
 
 /// Parse a safetensors file's JSON header; never reads tensor data.
-///
-/// Entries come back name-sorted (serde_json object ordering).
 pub(crate) fn read_safetensors_header(path: &Path) -> RefquestResult<Vec<TensorInfo>> {
     let mut file = fs::File::open(path)?;
     let mut len_bytes = [0u8; 8];
@@ -107,8 +105,7 @@ pub(crate) fn read_config(model_dir: &Path) -> RefquestResult<serde_json::Value>
     Ok(serde_json::from_slice(&fs::read(model_dir.join("config.json"))?)?)
 }
 
-/// A checkpoint's added-token table from tokenizer.json, id-sorted:
-/// (id, content, special).
+/// A checkpoint's added-token table from tokenizer.json, id-sorted.
 pub(crate) fn read_added_tokens(model_dir: &Path) -> RefquestResult<Vec<(u64, String, bool)>> {
     let value: serde_json::Value =
         serde_json::from_slice(&fs::read(model_dir.join("tokenizer.json"))?)?;

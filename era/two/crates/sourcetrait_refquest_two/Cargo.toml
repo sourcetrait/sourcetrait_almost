@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_refquest_two"
-version = "0.0.0-9"
+version = "0.0.0-10"
 edition = "2024"
 description = "refquest: baselining of the original model and its original tools"
 authors = ["SourceTrait <development@sourcetrait.com>"]

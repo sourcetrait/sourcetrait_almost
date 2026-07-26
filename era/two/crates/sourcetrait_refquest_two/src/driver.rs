@@ -1,8 +1,7 @@
 //! Shared spawn-and-stream plumbing for the pinned python drivers.
 use crate::*;
 
-/// Spawn a prepared driver command: stream its JSON-lines stdout into
-/// payload (stdout) + summaries (stderr), tee everything to `record`.
+/// Spawn a prepared driver command and stream its events three ways.
 pub(crate) fn run_driver(mut cmd: process::Command, record: Option<&Path>) -> RefquestResult<()> {
     cmd.stdout(process::Stdio::piped());
     let mut child = cmd.spawn()?;

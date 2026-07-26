@@ -109,8 +109,7 @@ pub(crate) struct NeedleArgs {
     /// vllm only: skip cuda-graph capture.
     #[arg(long)]
     pub(crate) enforce_eager: bool,
-    /// vllm only: allow max_model_len beyond the config cap (safe on the
-    /// NoPE hybrid; sets VLLM_ALLOW_LONG_MAX_MODEL_LEN=1).
+    /// vllm only: allow max_model_len beyond the config cap.
     #[arg(long)]
     pub(crate) allow_long: bool,
     #[arg(long, value_enum, default_value = "cuda")]

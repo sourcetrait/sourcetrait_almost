@@ -1,8 +1,7 @@
 //! The bench verb: one timed perf row per invocation.
 use crate::*;
 
-/// Run `refquest bench`: hf rows ride the generate driver (its timing +
-/// vram events ARE the row); vllm rows ride the bench_vllm driver.
+/// Run `refquest bench`: one timed row, per backend.
 pub(crate) fn bench(args: &BenchArgs) -> RefquestResult<()> {
     match args.backend {
         BackendPick::Hf => {

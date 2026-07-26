@@ -1,12 +1,7 @@
-//! The diff verb: nmse + per-row argmax comparison of two logits dumps.
-//!
-//! Valid only on same-ids dumps (the era-one lesson: diff same-ids
-//! replays, never two independently generated runs) - the id tensors are
-//! asserted byte-equal before any row math.
+//! The diff verb: nmse and argmax over two same-ids logits dumps.
 use crate::*;
 
-/// Run `refquest diff <candidate> <reference>`: one JSON payload line on
-/// stdout (nmse, argmax agreement, worst rows).
+/// Run `refquest diff <candidate> <reference>`: one JSON payload line.
 pub(crate) fn diff(args: &DiffArgs) -> RefquestResult<()> {
     let candidate_bytes = fs::read(&args.candidate)?;
     let reference_bytes = fs::read(&args.reference)?;
@@ -96,7 +91,7 @@ pub(crate) fn diff(args: &DiffArgs) -> RefquestResult<()> {
     Ok(())
 }
 
-/// A dump's logits view: f32 rows over the raw safetensors buffer.
+/// A dump's logits view: f32 rows over the raw file buffer.
 struct DumpView<'bytes> {
     data: &'bytes [u8],
     rows: usize,
@@ -131,8 +126,6 @@ fn load_dump<'bytes>(bytes: &'bytes [u8], path: &Path) -> RefquestResult<DumpVie
     if shape.len() != 2 {
         snafu::whatever!("{}: logits shape {:?}, expected 2-d", path.display(), shape);
     }
-    // TensorView borrows from the deserialize input, so re-slice the file
-    // bytes at the view's offsets to keep a plain 'bytes lifetime.
     let offset = view.data().as_ptr() as usize - bytes.as_ptr() as usize;
     let len = view.data().len();
     Ok(DumpView {
