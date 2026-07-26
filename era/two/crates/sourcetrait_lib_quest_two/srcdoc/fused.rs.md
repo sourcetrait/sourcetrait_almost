@@ -22,9 +22,60 @@ the gate readings tightened monotonically across the kernel eras.
 
 ## const KERNEL_SRC
 
-The CUDA source carries its own commentary inline, which is left in place: it
-documents a program in another language, and the srcdoc headings here address
-Rust items rather than positions inside a string literal.
+The embedded kernels keep their one-line summaries at their own items; their
+rationale is here, one sub-heading per kernel.
+
+### gdn_fused_step_f32
+
+One block per head, one thread per value column. Pass one reduces the key-value
+memory for that column; pass two updates the state column in place and reduces
+the y readout in the same sweep, which is why the state write and the readout
+share a loop rather than being two passes.
+
+The packed operand's rows are query, key, value, decay and beta - two key
+dimensions, one value dimension, and two scalars per head.
+
+### rms_norm_fused_bf16
+
+One block per row: a strided f32 sum-of-squares reduction over the columns,
+then normalize and weight, all in f32 with ONE rounding to bf16 at the store.
+The classic chain rounds the normalized value to bf16 BEFORE the weight
+multiply, so this is a one-rounding reassociation and the envelope gates
+arbitrate it.
+
+### conv_step_fused_bf16
+
+The four-tap causal convolution decode step, its silu, and the tail shift, one
+thread per channel. History is the f32 tail's three rows plus the packed
+current row.
+
+Taps and accumulation run in f32 where the classic chain rounds the tail
+through bf16 before multiplying - envelope-class, and toward truth. The tail
+rotates IN PLACE inside the launch, which is what removes the separate write.
+
+### rms_norm_gated_fused_bf16
+
+The gated form over per-head rows. The readout and the gate ride ONE packed
+tensor, the gate pre-upcast, so the kernel takes a single operand where the
+classic chain takes two tensors and a cast between them. Norm over the value
+dimension, then silu on the gate in f32, then one rounding out.
+
+### head_prep_f32
+
+The single-token head-prep chain in one launch: the convolution tap's output
+row splits per head, query and key take their f32 l2 norms with the query
+scale folded in, the value upcasts, and the gating scalars compute from the
+dynamic row - writing the operand the recurrence step consumes DIRECTLY. The
+classic chain's casts, norm chains, gate soup and packing concatenation all
+collapse into it.
+
+One block per head with a power-of-two thread count for the two sum-of-squares
+reductions, zero-padded lanes. The math is f32 end to end from bf16 inputs -
+the classic chain's own formulas, reassociated by a reciprocal-multiply for the
+l2 divide, which the component lock pins.
+
+The softplus guard at 20 appears here in its kernel form; `gdn.rs` carries why
+it matters.
 
 ## static MODULE
 

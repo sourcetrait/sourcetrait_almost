@@ -1,5 +1,4 @@
-//! Gated-DeltaNet building blocks: gating scalars, the fla-style l2
-//! norm, the stateless causal conv, and the per-token recurrence step.
+//! Gated-DeltaNet building blocks: gates, norms, conv, and the rule.
 use crate::*;
 
 /// The gated output norm's eps: 1e-5, and NOT rms_norm_eps.

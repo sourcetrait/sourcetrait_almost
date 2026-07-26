@@ -41,8 +41,103 @@ carried cuda bf16 multi-token branch does.
 
 ## const KERNEL_SRC
 
-The CUDA source carries its own commentary inline and keeps it, for the reason
-given in `fused.rs`.
+The embedded kernels keep their one-line summaries at their own items; their
+rationale is here, one sub-heading per kernel.
+
+The geometry the whole family compiles against: one tile-row chunk per block,
+where the tile is prepended per compile, and a substitution block count derived
+from it at sixteen rows per block. A bundle row is a fixed number of f32 cells
+- query, key, w and u as bf16 pairs, then exact-f32 cumulative gate and beta.
+Beta rides the bundle for the solve and the k-cumdecay prep; the state-advance
+pair ignores it. The family is geometry-locked to a key dimension of 96 and a
+value dimension of 192.
+
+### pack_pair and unpack_pair
+
+The bf16 pair packing: the query, key, w and u columns ride two bf16 values per
+f32 cell, so one four-byte load carries two elements and the rule family's
+bandwidth-bound bundle traffic halves. The gate and beta cells stay EXACT f32,
+because those compound through the recurrent state - the same accumulation-order
+lesson that keeps the a and b projections unfused. The even column is the low
+half.
+
+### tri_solve_f32
+
+The intra-chunk solve: build the strictly-lower matrix as the negated
+beta-scaled key product times the decay, run the blocked forward substitution,
+then add the identity. One block per head-and-chunk tile, one thread per row,
+with key, beta and the cumulative gates read from the bundle rows.
+
+THE BLOCKED SUBSTITUTION is the part worth understanding. The sixteen-wide
+diagonal blocks solve CONCURRENTLY, since they are independent regions each
+following the row-serial snapshot shape; then each block row's off-diagonal
+tiles update by shared-memory block products - a sum over the intervening
+blocks, with the in-block inverse applied LAST. That is the same bilinear form
+as the row-serial loop with a regrouped accumulation, so it is
+reassociation-class and the lock re-pins it.
+
+Two details make it cheap. The freed key staging region stages the intermediate
+tiles, being dead once the initial matrix is built. And in-block upper triangles
+stay zero, so the full sixteen-wide sums add exact zeros rather than needing a
+bound check.
+
+### prep_chunk_f32
+
+The per-chunk prep chain in one launch: the carried causal convolution and silu
+in f32 where the classic chain rounds through bf16 per operation, the query and
+key l2 norms with the query scale, the gating scalars, and the per-chunk decay
+cumulative sum - written bundle-direct, plus the beta-scaled value operand for
+the gemm.
+
+The cumulative sum runs SERIALLY on thread zero, deliberately: that reproduces
+candle's own association for the same quantity, and a parallel scan would not.
+
+The dynamic rows arrive in one tensor with a fixed layout - the convolution
+weight taps first, with the gate parameters riding the first tap row's pad
+columns, then the carried tail, then the token rows.
+
+PAD ROWS PAST THE TOKEN COUNT ride the scan as zeros, which keeps the last real
+cumulative sum intact at the tile's end, and write only their gate cell.
+
+The query and key passes RECOMPUTE the convolution rather than holding it -
+two passes over cheap arithmetic - because a 96-wide register array would
+spill, and spilling costs more than the recompute.
+
+### prep_kbg_f32
+
+The k-cumdecay gemm operand, read straight off the bundle. The multiply order
+is the classic one: key times beta, then the exponential.
+
+### state_stage_f32
+
+Pass one of the advance: the serial inter-chunk recurrence ALONE. Per chunk it
+writes that chunk's INITIAL state and its vnew rows to the scratch, then
+advances the carried state. No attention tile and no output rows - pass two
+computes those chunk-parallel.
+
+The grid is heads by four stripes with one thread per value column of its
+stripe, which is the landed register contract rather than an arbitrary shape.
+The vnew and update math is the earlier single-pass form verbatim, same
+per-element accumulation orders, so the split moved no digits.
+
+The state update is the decayed carry plus the decay-scaled key transposed
+against vnew, in the landed row-major order.
+
+### state_out_f32
+
+Pass two: the chunk-PARALLEL output. Every tile reads its chunk's initial state
+and vnew rows from the scratch, builds the decayed local attention against its
+own bundle rows - the query-key product times the gate difference, on and below
+the diagonal and zero above - and writes its output rows independently.
+
+The output row is the gate-scaled inter-chunk term plus the local attention
+against vnew, unrolled full-width because the upper triangle adds exact zeros.
+
+### pack_pairs_bf16
+
+Packs a gemm's f32 output rows into the bundle's pair cells at a fixed offset -
+the w and u columns, and the lock harness's query and key. One thread per pair,
+rounding round-to-nearest-even like every bf16 store in the family.
 
 ## const BUNDLE_CELLS
 

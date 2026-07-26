@@ -27,11 +27,7 @@ __device__ __forceinline__ unsigned short f32_to_bf16(float value) {
     return (unsigned short)(rounded >> 16);
 }
 
-// BundleBf16: the q | k | w | u columns ride bf16 PAIRS packed two
-// per f32 cell (one 4-byte load carries two elements - the rule
-// family's bundle traffic halves), while g | beta stay EXACT f32
-// cells (the gating scalars compound through the recurrent state -
-// the vllm accumulation-order lesson). Even column = low half.
+// The bundle's bf16 pair packing: two values per f32 cell.
 __device__ __forceinline__ void unpack_pair(float cell, float* even, float* odd) {
     unsigned int bits = __float_as_uint(cell);
     *even = bf16_to_f32((unsigned short)(bits & 0xFFFFu));
@@ -44,19 +40,16 @@ __device__ __forceinline__ float pack_pair(float even, float odd) {
     return __uint_as_float(bits);
 }
 
-// The intra-chunk solve: A0 = -(k_beta k^T . decay) strictly below
-// the diagonal, then the blocked forward substitution, then + I. One
-// block per (head, chunk) tile, SA_TILE threads; k, beta, and the
-// cumulative gates read from the bundle rows.
+// The intra-chunk solve, by blocked forward substitution.
 extern "C" __global__ void tri_solve_f32(
     float* a_out,
     const float* bundle
 ) {
     extern __shared__ float shared[];
-    float* sk = shared;                        // [SA_TILE, SA_DK] beta-scaled k
-    float* sa = shared + SA_TILE * SA_DK;      // [SA_TILE, SA_TILE] working matrix
-    float* srow = sa + SA_TILE * SA_TILE;      // [SA_TILE] row snapshot
-    float* sg = srow + SA_TILE;                // [SA_TILE] cumulative gates
+    float* sk = shared;
+    float* sa = shared + SA_TILE * SA_DK;
+    float* srow = sa + SA_TILE * SA_TILE;
+    float* sg = srow + SA_TILE;
     unsigned long long b = blockIdx.x;
     unsigned int r = threadIdx.x;
     const float* rows = bundle + b * (unsigned long long)SA_TILE * SA_CELLS;
@@ -70,8 +63,6 @@ extern "C" __global__ void tri_solve_f32(
         sk[r * SA_DK + 2u * i2 + 1u] = k_odd * beta_r;
     }
     __syncthreads();
-    // A0[r][c] = -(k_beta[r] . k[c]) * exp(g[r] - g[c]) strictly
-    // below the diagonal; zero on and above.
     for (unsigned int c = 0; c < SA_TILE; ++c) {
         float value = 0.f;
         if (c < r) {
@@ -88,17 +79,6 @@ extern "C" __global__ void tri_solve_f32(
         sa[r * SA_TILE + c] = value;
     }
     __syncthreads();
-    // Blocked forward substitution (BlockedSubstitution): the
-    // SA_BLOCKS 16x16 diagonal blocks solve concurrently (independent regions,
-    // the row-serial snapshot shape per block), then each block row's
-    // off-diagonal tiles update by shared-memory block products -
-    // S = A[bi][bj] + sum(k in [bj, bi)) A[bi][k] . M[k][bj], then
-    // M[bi][bj] = S + M[bi][bi] . S (the in-block inverse applied
-    // last). The same bilinear form as the row-serial loop with a
-    // regrouped accumulation - reassociation-class; the lock re-pins.
-    // The freed sk region stages the S tiles (dead after the A0
-    // build); in-block upper triangles stay 0.f, so full 16-sums add
-    // exact zeros.
     unsigned int db = r >> 4u;
     unsigned int dc = r & 15u;
     for (unsigned int s = 1; s < 16u; ++s) {
@@ -148,7 +128,6 @@ extern "C" __global__ void tri_solve_f32(
         }
         __syncthreads();
     }
-    // + I, then the row writes back.
     float* out_row = a_out
         + (b * (unsigned long long)SA_TILE + r) * (unsigned long long)SA_TILE;
     for (unsigned int c = 0; c < SA_TILE; ++c) {
@@ -160,15 +139,7 @@ extern "C" __global__ void tri_solve_f32(
     }
 }
 
-// PrepChunk: the per-chunk prep chain in one launch - the carried
-// causal conv + silu in f32 (the classic chain rounds through bf16
-// per op), the q/k l2 norms + q scale, the gating scalars, and the
-// per-chunk decay cumsum (thread 0 serial - the candle cumsum's
-// association) - writing q | k | g | beta bundle-direct plus the
-// v_beta gemm operand. dyn rows: 0..3 conv-weight taps (A_log/dt in
-// the row-0/row-0 pad columns), 4..6 the carried tail (bf16), 7..
-// the token rows (conv_in | a | b). Pad rows past t ride the scan as
-// zeros (sg[63] keeps the last real cumsum) and write only g.
+// The per-chunk prep chain in one launch, written bundle-direct.
 extern "C" __global__ void prep_chunk_f32(
     float* bundle,
     const unsigned short* dyn_rows,
@@ -215,8 +186,6 @@ extern "C" __global__ void prep_chunk_f32(
     unsigned int q_base = h * SA_DK;
     unsigned int k_base = heads * SA_DK + h * SA_DK;
     unsigned int v_base = 2u * heads * SA_DK + h * SA_DV;
-    // q/k: two passes (sumsq, then normalize + write) with the conv
-    // recomputed - no 96-wide register arrays to spill.
     float q_sumsq = 0.f;
     float k_sumsq = 0.f;
     for (unsigned int i = 0; i < SA_DK; ++i) {
@@ -268,8 +237,7 @@ extern "C" __global__ void prep_chunk_f32(
     }
 }
 
-// PrepKbg: the k_cumdecay gemm operand k * beta * exp(g_cum), read
-// straight off the bundle ((k * beta) * exp - the classic mul order).
+// The k-cumdecay gemm operand, read straight off the bundle.
 extern "C" __global__ void prep_kbg_f32(
     float* kbg,
     const float* bundle
@@ -288,15 +256,7 @@ extern "C" __global__ void prep_kbg_f32(
     }
 }
 
-// StateAdvancePipeline pass 1 (StateStage): the serial inter-chunk
-// recurrence ALONE - per chunk, write the chunk's INITIAL state
-// (scratch rows 0..SA_DK) and its vnew rows (scratch rows
-// SA_DK..SA_DK+64) then advance the carried state; no attention
-// tile, no output rows (pass 2 computes them chunk-parallel). Grid
-// (heads, 4 stripes) = 120 blocks, 48 threads - one thread per
-// v-column of its stripe; the vnew and update math is the fused
-// single-pass form verbatim (same per-element accumulation orders;
-// the VnewUnroll register contract carries).
+// Advance pass one: the serial inter-chunk recurrence alone.
 extern "C" __global__ void state_stage_f32(
     float* state,
     const float* bundle,
@@ -304,13 +264,13 @@ extern "C" __global__ void state_stage_f32(
     unsigned int chunks
 ) {
     extern __shared__ float shared[];
-    float* sk = shared;                        // [SA_TILE, SA_DK] raw k
-    float* sg = shared + SA_TILE * SA_DK;      // [SA_TILE] cumulative gates
-    float* ses = sg + SA_TILE;                 // [SA_TILE] exp(g_last - g)
+    float* sk = shared;
+    float* sg = shared + SA_TILE * SA_DK;
+    float* ses = sg + SA_TILE;
     unsigned long long h = blockIdx.x;
     unsigned int stripe = blockIdx.y;
     unsigned int tid = threadIdx.x;
-    unsigned int j = stripe * SA_COLS + tid;   // this thread's v-column
+    unsigned int j = stripe * SA_COLS + tid;
     const unsigned long long chunk_stride = (unsigned long long)SA_TILE * SA_CELLS;
     const float* bundle_h = bundle + h * (unsigned long long)chunks * chunk_stride;
     float* state_h = state + h * (unsigned long long)SA_DK * SA_DV;
@@ -329,8 +289,6 @@ extern "C" __global__ void state_stage_f32(
         float* chunk_scratch = scratch_h
             + chunk * (unsigned long long)(SA_DK + SA_TILE) * SA_DV;
         __syncthreads();
-        // Stage k + gates (strided over the stripe's threads; k
-        // unpacks from its pair cells).
         for (unsigned int idx = tid; idx < SA_TILE * SA_COLS; idx += SA_COLS) {
             unsigned int r = idx / SA_COLS;
             unsigned int i2 = idx - r * SA_COLS;
@@ -347,15 +305,11 @@ extern "C" __global__ void state_stage_f32(
         for (unsigned int r = tid; r < SA_TILE; r += SA_COLS) {
             ses[r] = expf(sg[SA_TILE - 1u] - sg[r]);
         }
-        // The chunk's INITIAL state column, register-direct.
         #pragma unroll
         for (unsigned int i = 0; i < SA_DK; ++i) {
             chunk_scratch[(unsigned long long)i * SA_DV + j] = s_reg[i];
         }
         __syncthreads();
-        // v_new = u - w @ S over the carried column, written to the
-        // scratch's vnew rows for the output pass (w and u unpack
-        // from their pair cells; per-element order is unchanged).
         #pragma unroll
         for (unsigned int r = 0; r < SA_TILE; ++r) {
             const float* row = rows + r * SA_CELLS;
@@ -373,8 +327,6 @@ extern "C" __global__ void state_stage_f32(
             vnew[r] = ((j & 1u) == 0u ? u_even : u_odd) - acc;
             chunk_scratch[(unsigned long long)(SA_DK + r) * SA_DV + j] = vnew[r];
         }
-        // S = S * exp(g_last) + (k * exp(g_last - g))^T @ v_new -
-        // the landed r-major order.
         float e_last = expf(sg[SA_TILE - 1u]);
         #pragma unroll
         for (unsigned int i = 0; i < SA_DK; ++i) {
@@ -396,13 +348,7 @@ extern "C" __global__ void state_stage_f32(
     }
 }
 
-// StateAdvancePipeline pass 2 (StateOut): the chunk-PARALLEL output
-// pass - grid (heads, chunks, 4 stripes): every tile reads its
-// chunk's initial state and vnew rows from the scratch, builds the
-// decayed local attention against its own bundle rows, and writes
-// its output rows independently - the serial chain is gone from the
-// heavy math. Same per-element accumulation orders as the fused
-// single-pass form (attn tile, inter, full-width out loop).
+// Advance pass two: the chunk-parallel output rows.
 extern "C" __global__ void state_out_f32(
     float* out,
     const float* bundle,
@@ -410,15 +356,15 @@ extern "C" __global__ void state_out_f32(
     unsigned int chunks
 ) {
     extern __shared__ float shared[];
-    float* sk = shared;                        // [SA_TILE, SA_DK] raw k
-    float* sattn = shared + SA_TILE * SA_DK;   // [SA_TILE, SA_TILE] decayed local attn
-    float* sg = sattn + SA_TILE * SA_TILE;     // [SA_TILE] cumulative gates
-    float* seg = sg + SA_TILE;                 // [SA_TILE] exp(g)
+    float* sk = shared;
+    float* sattn = shared + SA_TILE * SA_DK;
+    float* sg = sattn + SA_TILE * SA_TILE;
+    float* seg = sg + SA_TILE;
     unsigned long long h = blockIdx.x;
     unsigned int chunk = blockIdx.y;
     unsigned int stripe = blockIdx.z;
     unsigned int tid = threadIdx.x;
-    unsigned int j = stripe * SA_COLS + tid;   // this thread's v-column
+    unsigned int j = stripe * SA_COLS + tid;
     const unsigned long long chunk_stride = (unsigned long long)SA_TILE * SA_CELLS;
     const float* rows = bundle
         + (h * (unsigned long long)chunks + chunk) * chunk_stride;
@@ -445,8 +391,6 @@ extern "C" __global__ void state_out_f32(
     for (unsigned int r = tid; r < SA_TILE; r += SA_COLS) {
         seg[r] = expf(sg[r]);
     }
-    // The decayed local attention tile: (q[r] . k[c]) *
-    // exp(g[r] - g[c]) on and below the diagonal, zero above.
     for (unsigned int idx = tid; idx < SA_TILE * SA_TILE; idx += SA_COLS) {
         unsigned int r = idx / SA_TILE;
         unsigned int c = idx - r * SA_TILE;
@@ -477,8 +421,6 @@ extern "C" __global__ void state_out_f32(
     for (unsigned int r = 0; r < SA_TILE; ++r) {
         vnew[r] = chunk_scratch[(unsigned long long)(SA_DK + r) * SA_DV + j];
     }
-    // out rows: exp(g_r) * (q[r] . S) + attn_local @ v_new
-    // (full-width unroll; the upper triangle adds exact zeros).
     for (unsigned int r = 0; r < SA_TILE; ++r) {
         const float* q_row = rows + r * SA_CELLS;
         float inter = 0.f;
@@ -499,10 +441,7 @@ extern "C" __global__ void state_out_f32(
     }
 }
 
-// BundleBf16: pack a gemm's f32 output rows into the bundle's bf16
-// pair cells at a fixed cell offset (the w and u columns; also the
-// lock harness's q/k packing). One thread per pair; rounding is the
-// same round-to-nearest-even every bf16 store in the family uses.
+// Pack a gemm's f32 rows into the bundle's bf16 pair cells.
 extern "C" __global__ void pack_pairs_bf16(
     float* bundle,
     const float* src,

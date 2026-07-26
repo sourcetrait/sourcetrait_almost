@@ -3,6 +3,7 @@ use crate::*;
 
 /// The decode-family kernel source, compiled once per process.
 const KERNEL_SRC: &str = r#"
+// One block per head, one thread per value column; state in place.
 extern "C" __global__ void gdn_fused_step_f32(
     float* state,
     const float* packed,
@@ -46,10 +47,7 @@ __device__ __forceinline__ unsigned short f32_to_bf16(float value) {
     return (unsigned short)(rounded >> 16);
 }
 
-// One block per row: strided f32 sum-of-squares reduction over C,
-// then normalize + weight, all in f32, one rounding to bf16 at the
-// store (the classic chain rounds normed to bf16 BEFORE the weight
-// mul - a one-rounding reassociation the envelope gates arbitrate).
+// RMSNorm over a row in f32, with one rounding at the store.
 extern "C" __global__ void rms_norm_fused_bf16(
     unsigned short* out,
     const unsigned short* x,
@@ -81,11 +79,7 @@ extern "C" __global__ void rms_norm_fused_bf16(
     }
 }
 
-// The k=4 causal-conv decode tap + silu + in-place tail shift, one
-// thread per channel: history is the f32 tail's three rows plus the
-// packed current row; taps and accumulation run f32 (the classic
-// chain rounds the tail through bf16 before multiplying -
-// envelope-class); the tail rotates in place inside the launch.
+// The four-tap causal conv decode step; the tail rotates in place.
 extern "C" __global__ void conv_step_fused_bf16(
     unsigned short* out,
     float* tail,
@@ -109,9 +103,7 @@ extern "C" __global__ void conv_step_fused_bf16(
     tail[2ull * channels + c] = h3;
 }
 
-// The gated form over per-head rows: y (f32) and gate (f32,
-// pre-upcast) ride one packed [heads, 2 * dv] tensor; norm over dv,
-// weight [dv], gate = silu(gate) in f32, one rounding to bf16.
+// The gated form over per-head rows, y and gate packed together.
 extern "C" __global__ void rms_norm_gated_fused_bf16(
     unsigned short* out,
     const float* packed,
@@ -145,21 +137,11 @@ extern "C" __global__ void rms_norm_gated_fused_bf16(
     }
 }
 
-// FusedHeadPrep: the t=1 GDN head-prep chain in one launch - the
-// conv tap's bf16 output row splits per head, q/k take the f32 l2
-// norms (+ the q scale), v upcasts, and the gating scalars
-// (softplus-guarded g -> decay, sigmoid beta) compute from the dyn
-// row - writing the [heads, 2dk+dv+2] q | k | v | decay | beta
-// operand GdnFusedStep consumes, directly (the classic chain's
-// casts, norm chains, gate soup, and the packing cat collapse).
-// One block per head, HP_THREADS threads (pow2 tree for the two
-// sumsq reductions, zero-padded lanes); f32 math end-to-end from
-// the bf16 inputs - the classic chain's own formulas, reassociated
-// (reciprocal-mul for the l2 divide; the component lock pins).
 #define HP_DK 96u
 #define HP_DV 192u
 #define HP_ROW (2u * HP_DK + HP_DV + 2u)
 #define HP_THREADS 128u
+// The whole single-token head-prep chain in one launch.
 extern "C" __global__ void head_prep_f32(
     float* packed,
     const unsigned short* conv_out,
