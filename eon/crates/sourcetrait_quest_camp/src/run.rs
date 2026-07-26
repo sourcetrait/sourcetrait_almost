@@ -1,17 +1,13 @@
 use crate::*;
 
-/// camp: the interactive terminal chat (a bridge consumer over the
-/// era-two engine).
+/// camp: the interactive terminal chat, over an era through the bridge.
 #[derive(Debug, clap::Parser)]
 #[command(name = "camp", version, about)]
 struct Cli {
-    /// Profile root override: profile names resolve under
-    /// <dir>/config and <dir>/settings instead of the XDG suite root
+    /// Profile root override for -c and -s name resolution
     #[arg(short = 'd', long = "dir")]
     dir: Option<String>,
-    /// Config profile token: a pure snake resolves under the profile
-    /// root; anything else is a component-toml path; absent = the
-    /// `default` profile with the embedded-base fallback
+    /// Config profile: a snake resolves under the root, else a path
     #[arg(short = 'c', long = "config")]
     config: Option<String>,
     /// Settings profile token: the same rules as --config
@@ -19,9 +15,7 @@ struct Cli {
     settings: Option<String>,
 }
 
-/// Binary entry: parse, run, exit non-zero on error. The TUI owns
-/// stdout once the alternate screen opens; diagnostics before that go
-/// to stderr.
+/// Binary entry: parse, run, exit non-zero on error.
 pub fn run() {
     let cli = <Cli as clap::Parser>::parse();
     if let Err(error) = drive(cli) {
@@ -30,9 +24,7 @@ pub fn run() {
     }
 }
 
-/// Open the session (the engine thread spawns off-runtime), then run
-/// the async chat loop on a current-thread runtime - camp's futures
-/// are channel receives, so no driver features are needed.
+/// Open the session, then run the chat loop on a current-thread runtime.
 fn drive(cli: Cli) -> CampResult<()> {
     let era = bridge_two::BridgeTwo;
     let info = era.info();

@@ -3,8 +3,7 @@ use crate::*;
 /// Cap on the input box's visible text rows (it scrolls beyond this).
 const INPUT_MAX_ROWS: u16 = 8;
 
-/// Terminal-event channel bound (keystrokes and pastes are small and
-/// consumer-paced).
+/// Terminal-event channel bound; keystrokes and pastes are small.
 const INPUT_CAPACITY: usize = 64;
 
 /// Who a transcript turn belongs to (drives the line style).
@@ -20,9 +19,7 @@ pub(crate) struct Turn {
     pub(crate) text: String,
 }
 
-/// One conversation: its base62 nom (the top-right title and the log
-/// file's stem) and the transcript. /new replaces the whole thing and
-/// asks the engine to Reset its context.
+/// One conversation: its base62 nom, its log path and its transcript.
 struct Session {
     nom: String,
     log_path: Option<PathBuf>,
@@ -44,8 +41,7 @@ impl Session {
         })
     }
 
-    /// Rewrite the session log with the whole transcript (each turn
-    /// updates it; cheap at chat sizes).
+    /// Rewrite the session log with the whole transcript.
     fn write_log(&self) -> CampResult<()> {
         if let Some(path) = &self.log_path {
             std::fs::write(path, render_log(&self.turns))?;
@@ -54,10 +50,7 @@ impl Session {
     }
 }
 
-/// The session-log home: camp's OWN cache namespace,
-/// $XDG_CACHE_HOME/sourcetrait/camp/session (the spec fallback
-/// ~/.cache) - camp writes the log, so the home is camp's, not the
-/// quest suite's. Logs are on by default (the_user ruling).
+/// The session-log home, under camp's own XDG cache namespace.
 fn sessions_dir() -> CampResult<PathBuf> {
     let base = match std::env::var("XDG_CACHE_HOME") {
         Ok(dir) if !dir.is_empty() => PathBuf::from(dir),
@@ -108,9 +101,7 @@ pub(crate) fn byte_index(text: &str, char_index: usize) -> usize {
         .unwrap_or(text.len())
 }
 
-/// Greedy space-aware wrap of one logical line into rows of at most
-/// `width` chars; overlong words hard-split. An empty line yields one
-/// empty row (the blank separator between turns).
+/// Greedy space-aware wrap of one logical line, hard-splitting long words.
 pub(crate) fn wrap_line(line: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut rows: Vec<String> = Vec::new();
@@ -219,9 +210,7 @@ fn draw(
     Ok(())
 }
 
-/// The bridge link's view of the session: loading until Ready,
-/// generating between a submitted Turn and its TurnDone, closed when
-/// the engine says so (or its channel drops).
+/// The bridge link's view of the session, as four independent flags.
 struct LinkState {
     ready: bool,
     generating: bool,
@@ -282,10 +271,7 @@ fn apply_event(
     Ok(())
 }
 
-/// Pump blocking crossterm reads into a channel the async loop
-/// selects on. The read has no shutdown handle - the thread ends
-/// with the process (this seam swaps to an async EventStream if
-/// that ever matters).
+/// Pump blocking crossterm reads into a channel the async loop selects on.
 fn spawn_input_pump() -> CampResult<r::mpsc::Receiver<r::term::Event>> {
     let (events_tx, events_rx) = r::mpsc::channel(INPUT_CAPACITY);
     let spawned = std::thread::Builder::new()
@@ -303,21 +289,7 @@ fn spawn_input_pump() -> CampResult<r::mpsc::Receiver<r::term::Event>> {
     Ok(events_rx)
 }
 
-/// Interactive chat TUI over a bridge ChatSession: the transcript
-/// above a multiline input box. Enter submits, shift+enter inserts a
-/// newline (distinguishing the two needs a kitty-protocol terminal;
-/// elsewhere shift+enter arrives as plain Enter and submits), .exit
-/// quits, .new starts a fresh session (new nom + log, engine Reset) -
-/// dot commands count only as the first character of the first line -
-/// PgUp/PgDn scroll the transcript, Esc cancels a generation early,
-/// ctrl+c quits anywhere. The conversation context lives engine-side;
-/// camp only sends turn text and renders events. Sessions log by
-/// default to <cache>/sourcetrait/camp/session/<nom>.txt per turn.
-/// The loop is async and event-driven: a select over the bridge
-/// events channel and a blocking-read input pump, redrawn per event -
-/// no poll cadence. This wraps it in terminal setup/teardown; the
-/// model loads on the engine thread, so the loop opens in a loading
-/// state.
+/// The chat TUI over a bridge session, in terminal setup and teardown.
 pub(crate) async fn chat(link: bridge::all::ChatSession) -> CampResult<()> {
     let session = Session::new()?;
     if let Some(path) = &session.log_path {
@@ -401,8 +373,6 @@ async fn chat_loop(
             },
         }
         if state.closed {
-            // Engine-initiated end (camp's own quits return above
-            // without waiting) - surface it after terminal restore.
             match state.last_error.take() {
                 Some(message) => snafu::whatever!("the engine closed the session: {message}"),
                 None => snafu::whatever!("the engine closed the session"),
@@ -411,8 +381,7 @@ async fn chat_loop(
     }
 }
 
-/// Fold one terminal event into the input buffer / session / bridge
-/// requests.
+/// Fold one terminal event into the input, the session, or a request.
 #[allow(clippy::too_many_arguments)]
 async fn apply_terminal_event(
     terminal_event: r::term::Event,
@@ -435,11 +404,6 @@ async fn apply_terminal_event(
                 }
                 r::term::KeyCode::Enter => {
                     if input.starts_with('.') {
-                        // Dot commands: the dot counts only as the
-                        // FIRST character of the FIRST line; the
-                        // first line is the command. A dot line that
-                        // is no known command notes instead of
-                        // reaching the model.
                         let command = input
                             .split('\n')
                             .next()
