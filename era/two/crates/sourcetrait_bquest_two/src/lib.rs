@@ -114,6 +114,7 @@ pub(crate) use crate::cli::{
     MixInstructArgs,
     MixPackArgs,
     MixRenderArgs,
+    MixRipArgs,
     MixSampleArgs,
     RolloutCommand,
     RolloutRunArgs,
@@ -137,6 +138,7 @@ pub(crate) use crate::mix::{
     SplitMix64,
     mix_pack,
     mix_render,
+    mix_rip,
     mix_sample,
 };
 pub(crate) use crate::doc::doc_cli;

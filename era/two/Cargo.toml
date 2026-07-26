@@ -33,3 +33,4 @@ tokio = { version = "1", features = ["sync"] }
 toml = { version = "0.9" }
 unicode-normalization = { version = "0.1" }
 unicode-properties = { version = "0.1" }
+zstd = { version = "0.13" }

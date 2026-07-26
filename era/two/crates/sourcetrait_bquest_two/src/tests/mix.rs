@@ -280,3 +280,138 @@ fn mix_sample_is_deterministic_and_budget_crossing() {
     assert!(rows.len() < 4, "the budget must not need every document");
     fs::remove_dir_all(&dir).ok();
 }
+
+/// The their-side ingest: a zstd dolma shard decodes into the same
+/// document shape `mix render` produces for our own trees - text
+/// verbatim, identity in metadata alone, a textless row counted
+/// rather than fatal - and the byte budget overshoots on the crossing
+/// document exactly as the sampler does.
+#[test]
+fn mix_rip_decodes_a_shard_into_verbatim_documents() {
+    let root = temp_root("rip");
+    fs::create_dir_all(&root).expect("root");
+
+    let code = "fn main() {\n    println!(\"hi \\\"there\\\"\");\n}\n";
+    let prose = "Prose with\nmultiple lines and a \"quote\".\n";
+    let tail = "c".repeat(64);
+    let quoted = |text: &str| serde_json::to_string(text).expect("json string");
+    let payload = [
+        format!(
+            r#"{{"id": "up/one", "text": {}, "source": "upstream", "added": "2024-01-01"}}"#,
+            quoted(code)
+        ),
+        format!(r#"{{"id": "up/two", "text": {}}}"#, quoted(prose)),
+        // No text field at all, and text that is whitespace only:
+        // both are counted and skipped rather than failing the shard.
+        String::from(r#"{"id": "up/three", "metadata": {"upstream": 1}}"#),
+        String::from(r#"{"id": "up/four", "text": "   \n  "}"#),
+        // No id either - the fallback synthesizes one.
+        format!(r#"{{"text": {}}}"#, quoted(&tail)),
+    ]
+    .join("\n")
+        + "\n";
+    let shard = root.join("shard.jsonl.zst");
+    fs::write(
+        &shard,
+        zstd::encode_all(payload.as_bytes(), 3).expect("compress"),
+    )
+    .expect("shard write");
+
+    let rip = |out: &Path, budget: usize| {
+        mix_rip(&MixRipArgs {
+            shard: shard.clone(),
+            out: out.to_path_buf(),
+            name: String::from("theirside"),
+            hub: String::from("allenai/dolma3_dolmino_mix-100B-1125"),
+            shard_path: None,
+            kind: String::from("docs"),
+            license: String::from("odc-by"),
+            budget_bytes: budget,
+            stamp: Some(String::from("2026-07-26")),
+        })
+        .expect("rip runs");
+    };
+
+    let out = root.join("documents_theirside.nuon");
+    rip(&out, 10_000_000);
+
+    let documents = lib::nu::load_value(&out).expect("documents");
+    lib::nu::conform(
+        &documents,
+        &lib::nu::parse_typedef(&format!("list<{}>", crate::mix::MIX_DOCUMENT_TYPEDEF))
+            .expect("typedef"),
+    )
+    .expect("documents conform");
+    let rows = documents.as_list().expect("rows");
+    assert_eq!(rows.len(), 3, "the two textless rows must not become documents");
+
+    let record_of = |index: usize| rows[index].as_record().expect("row");
+    let field_of = |index: usize, name: &str| {
+        record_of(index).get(name).expect(name).as_str().expect("str").to_string()
+    };
+    let meta_of = |index: usize, name: &str| {
+        record_of(index)
+            .get("metadata")
+            .expect("metadata")
+            .as_record()
+            .expect("record")
+            .get(name)
+            .expect(name)
+            .as_str()
+            .expect("str")
+            .to_string()
+    };
+
+    // Text is the upstream bytes verbatim - nothing prepended, and
+    // the newlines and quotes survive the nuon round-trip.
+    assert_eq!(field_of(0, "text"), code);
+    assert_eq!(field_of(1, "text"), prose);
+    assert_eq!(field_of(2, "text"), tail);
+
+    // Identity rides metadata; `source` carries the STREAM name, which
+    // is what a wayside audit counts by - not the upstream's own
+    // source field.
+    assert_eq!(field_of(0, "id"), "up/one", "an upstream id is preserved");
+    assert_eq!(
+        field_of(2, "id"),
+        "theirside/shard.jsonl.zst#5",
+        "a row without an id gets one synthesized from its position"
+    );
+    for index in 0..3 {
+        assert_eq!(field_of(index, "source"), "theirside");
+        assert_eq!(field_of(index, "added"), "2026-07-26");
+        assert_eq!(meta_of(index, "repo"), "allenai/dolma3_dolmino_mix-100B-1125");
+        assert_eq!(meta_of(index, "path"), "shard.jsonl.zst");
+        assert_eq!(meta_of(index, "license"), "odc-by");
+        assert_eq!(
+            meta_of(index, "kind"),
+            "docs",
+            "their side is never code - its code stream is already FIM-transformed"
+        );
+    }
+
+    let provenance =
+        lib::nu::load_value(&out.with_extension("provenance.nuon")).expect("provenance");
+    let provenance = provenance.as_record().expect("provenance record");
+    let count = |name: &str| provenance.get(name).expect(name).as_int().expect("int");
+    assert_eq!(count("documents_read"), 5);
+    assert_eq!(count("documents_taken"), 3);
+    assert_eq!(count("documents_without_text"), 2);
+    assert_eq!(
+        count("text_bytes"),
+        (code.len() + prose.len() + tail.len()) as i64
+    );
+
+    // The budget stops the READ: one byte of budget takes exactly the
+    // first document, which overshoots it.
+    let small = root.join("documents_small.nuon");
+    rip(&small, 1);
+    let rows = lib::nu::load_value(&small).expect("small");
+    assert_eq!(
+        rows.as_list().expect("rows").len(),
+        1,
+        "the crossing document overshoots and the rest are never read"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}

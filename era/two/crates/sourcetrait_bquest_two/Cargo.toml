@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_bquest_two"
-version = "0.0.0-13"
+version = "0.0.0-14"
 edition = "2024"
 description = "bquest: the training, development, and testing tool"
 authors = ["SourceTrait <development@sourcetrait.com>"]
@@ -42,3 +42,4 @@ sourcetrait_lib_quest_two.workspace = true
 tokenizers.workspace = true
 unicode-normalization.workspace = true
 unicode-properties.workspace = true
+zstd.workspace = true

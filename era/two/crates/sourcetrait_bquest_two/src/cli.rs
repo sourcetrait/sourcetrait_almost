@@ -306,6 +306,47 @@ pub(crate) enum MixCommand {
     /// Pack instruction examples one per row, masking the assistant
     /// turns, for supervised tuning.
     Instruct(MixInstructArgs),
+    /// Stream one zstd dolma shard into a document table, taking
+    /// documents to a byte budget - the their-side replay's ingest.
+    Rip(MixRipArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct MixRipArgs {
+    /// The zstd-compressed dolma JSONL shard.
+    #[arg(long)]
+    pub(crate) shard: PathBuf,
+    /// The document table (.nuon; a provenance sidecar lands beside
+    /// it).
+    #[arg(long)]
+    pub(crate) out: PathBuf,
+    /// The source stream this shard belongs to. It rides every
+    /// document's `source`, which is what a wayside audit counts by.
+    #[arg(long)]
+    pub(crate) name: String,
+    /// The hub dataset the shard came from (rides metadata.repo).
+    #[arg(long)]
+    pub(crate) hub: String,
+    /// The shard's path inside the dataset (rides metadata.path);
+    /// absent = the shard's file name.
+    #[arg(long = "shard-path")]
+    pub(crate) shard_path: Option<String>,
+    /// `docs` or `code` - the same field the render spec takes. Their
+    /// code stream is already infilling-transformed upstream, so
+    /// nothing from this side should ever be marked code.
+    #[arg(long, default_value = "docs")]
+    pub(crate) kind: String,
+    /// The upstream license (rides metadata.license).
+    #[arg(long, default_value = "odc-by")]
+    pub(crate) license: String,
+    /// Stop once cumulative text bytes cross this budget; the
+    /// crossing document overshoots, exactly as `mix sample` does.
+    #[arg(long)]
+    pub(crate) budget_bytes: usize,
+    /// Verbatim added/created stamp carried into every document
+    /// (deterministic; absent = empty).
+    #[arg(long)]
+    pub(crate) stamp: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]

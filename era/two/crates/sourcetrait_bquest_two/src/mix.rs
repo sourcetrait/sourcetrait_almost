@@ -7,6 +7,8 @@
 //! refuses, so the lines form is reserved for logs.
 use crate::*;
 
+use std::io::BufRead;
+
 /// The render spec (`--spec`): one row per corpus tree.
 pub(crate) const MIX_SPEC_TYPEDEF: &str = "table<name: string, corpus_dir: string, \
      repo: string, license: string, kind: string>";
@@ -509,6 +511,155 @@ pub(crate) fn mix_render(args: &MixRenderArgs) -> BquestResult<()> {
     let summary = lib::nu::Value::record(
         lib::nu::record! {
             "rendered" => lib::nu::Value::list(summary_rows, span()),
+            "out" => v_str(&args.out.display().to_string()),
+            "seconds" => v_float(started.elapsed().as_secs_f64()),
+        },
+        span(),
+    );
+    println!("{}", lib::nu::to_nuon_text(&summary)?);
+    Ok(())
+}
+
+/// `bquest mix rip`: one zstd-compressed dolma JSONL shard -> a
+/// document table, taking documents until a text-byte budget is
+/// crossed. The their-side replay's ingest, in the same document
+/// shape `mix render` produces for our own corpus trees, so both
+/// sides feed `mix sample` and `mix pack` unchanged.
+///
+/// ## DEV
+/// THE DECODER LIVES HERE because the box ships no zstd binary and
+/// nushell reads none, so the harness previously drove a throwaway
+/// Rust bin built per session and lost to the session prune. bquest
+/// already carries Rust and already reads these shards at pack time,
+/// so folding it in removes the replay leg's only external
+/// dependency.
+///
+/// DECOMPRESSION IS STREAMED, and that is a storage requirement
+/// rather than a refinement. The caller's loop fetches one shard,
+/// rips it, and deletes it, which bounds peak storage at one
+/// compressed file; materializing the decompressed shard first
+/// multiplies that several-fold for no gain. So the reader decodes
+/// line by line and stops reading the moment the budget is crossed.
+///
+/// IDENTITY RIDES METADATA, never the text. That is the lineage's own
+/// presentation - ai2's renderers put the repository, path and
+/// license in a sidecar and let the text field carry raw file bytes -
+/// and departing from it would teach a header convention their model
+/// never saw.
+///
+/// `source` carries the STREAM name rather than the upstream's own
+/// source field, because a wayside audit counts documents per source
+/// stream and that count is the evidence the excluded topics
+/// contributed nothing.
+pub(crate) fn mix_rip(args: &MixRipArgs) -> BquestResult<()> {
+    let started = std::time::Instant::now();
+    let file = fs::File::open(&args.shard)?;
+    let decoder = match zstd::stream::read::Decoder::new(file) {
+        Ok(decoder) => decoder,
+        Err(e) => snafu::whatever!("{}: zstd decode failed: {e}", args.shard.display()),
+    };
+    let document_type = lib::nu::parse_typedef(MIX_DOCUMENT_TYPEDEF)?;
+    let shard_path = match &args.shard_path {
+        Some(path) => path.clone(),
+        None => args
+            .shard
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string(),
+    };
+    let stamp = args.stamp.clone().unwrap_or_default();
+
+    let mut documents: Vec<lib::nu::Value> = Vec::new();
+    let mut text_bytes = 0usize;
+    let mut seen = 0usize;
+    let mut without_text = 0usize;
+    for line in io::BufReader::new(decoder).lines() {
+        // The budget gates the READ, so a met budget stops
+        // decompressing rather than merely stops collecting.
+        if text_bytes >= args.budget_bytes {
+            break;
+        }
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        seen += 1;
+        let row: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(row) => row,
+            Err(e) => {
+                snafu::whatever!("{}:{seen}: JSON parse failed: {e}", args.shard.display())
+            }
+        };
+        let text = match row.get("text").and_then(|text| text.as_str()) {
+            Some(text) if !text.trim().is_empty() => text,
+            _ => {
+                without_text += 1;
+                continue;
+            }
+        };
+        let id = match row.get("id").and_then(|id| id.as_str()) {
+            Some(id) => id.to_string(),
+            None => format!("{}/{shard_path}#{seen}", args.name),
+        };
+        let document = lib::nu::Value::record(
+            lib::nu::record! {
+                "id" => v_str(&id),
+                "text" => v_str(text),
+                "source" => v_str(&args.name),
+                "added" => v_str(&stamp),
+                "created" => v_str(&stamp),
+                "metadata" => lib::nu::Value::record(
+                    lib::nu::record! {
+                        "repo" => v_str(&args.hub),
+                        "path" => v_str(&shard_path),
+                        "language" => v_str("text"),
+                        "license" => v_str(&args.license),
+                        "kind" => v_str(&args.kind),
+                    },
+                    span(),
+                ),
+            },
+            span(),
+        );
+        lib::nu::conform(&document, &document_type)?;
+        text_bytes += text.len();
+        documents.push(document);
+    }
+
+    let taken = documents.len();
+    snafu::ensure_whatever!(
+        taken > 0,
+        "{}: no documents carried text (read {seen} rows)",
+        args.shard.display()
+    );
+    lib::nu::save_value(&args.out, &lib::nu::Value::list(documents, span()))?;
+
+    let provenance = lib::nu::Value::record(
+        lib::nu::record! {
+            "shard" => v_str(&args.shard.display().to_string()),
+            "shard_path" => v_str(&shard_path),
+            "name" => v_str(&args.name),
+            "hub" => v_str(&args.hub),
+            "kind" => v_str(&args.kind),
+            "budget_bytes" => v_int(args.budget_bytes as i64),
+            "documents_read" => v_int(seen as i64),
+            "documents_taken" => v_int(taken as i64),
+            "documents_without_text" => v_int(without_text as i64),
+            "text_bytes" => v_int(text_bytes as i64),
+            "bquest_version" => v_str(env!("CARGO_PKG_VERSION")),
+        },
+        span(),
+    );
+    lib::nu::save_value(&args.out.with_extension("provenance.nuon"), &provenance)?;
+
+    let summary = lib::nu::Value::record(
+        lib::nu::record! {
+            "name" => v_str(&args.name),
+            "documents_taken" => v_int(taken as i64),
+            "documents_read" => v_int(seen as i64),
+            "text_bytes" => v_int(text_bytes as i64),
+            "met" => v_bool(text_bytes >= args.budget_bytes),
             "out" => v_str(&args.out.display().to_string()),
             "seconds" => v_float(started.elapsed().as_secs_f64()),
         },
