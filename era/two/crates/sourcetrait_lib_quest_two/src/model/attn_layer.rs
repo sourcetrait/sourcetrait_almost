@@ -1,32 +1,21 @@
-//! The full-attention decoder layer - fully POST-norm, carrying the
-//! reserved attention-KV store, the KvEviction score machinery, and
-//! the GraphDecode staged step.
+//! The full-attention decoder layer, fully POST-norm, with its KV store.
 use crate::*;
 
-/// The reserve grain for the carried KV buffers: growth happens in
-/// KV_RESERVE_STEP-token steps (one copy per grow, amortized), reads
-/// narrow to the live length, and clear keeps the capacity - the
-/// cat-per-append copy2d tax (12.6% of 32K prefill GPU time) dies.
+/// The reserve grain for the carried KV buffers.
 pub(crate) const KV_RESERVE_STEP: usize = 1024;
 
-/// Carried attention KV: capacity-reserved [heads, capacity,
-/// head_dim] buffers plus the live length.
+/// Carried attention KV: capacity-reserved buffers plus the live length.
 pub(crate) struct AttnKv {
     pub(crate) k: candle_core::Tensor,
     pub(crate) v: candle_core::Tensor,
     pub(crate) len: usize,
 }
 
-/// A full-attention decoder layer - fully POST-norm, olmo2/3 style
-/// (raw hidden enters attention, no input norm):
-/// h = x + post_attention_layernorm(attn(x)), then
-/// out = h + post_feedforward_layernorm(mlp(h)).
+/// A full-attention decoder layer, post-norm on both halves.
 pub(crate) struct AttnLayer {
     post_attention_layernorm: candle_core::Tensor,
     post_feedforward_layernorm: candle_core::Tensor,
-    /// q/k/v projections row-fused at load ([3 * width, hidden]; row
-    /// order q | k | v); o stays separate (its input is the attention
-    /// output, not x).
+    /// q/k/v row-fused at load; o stays separate, taking a different input.
     qkv_proj: candle_nn::Linear,
     o_proj: candle_nn::Linear,
     q_norm: candle_core::Tensor,
@@ -35,41 +24,28 @@ pub(crate) struct AttnLayer {
     pub(crate) num_heads: usize,
     head_dim: usize,
     rms_eps: f64,
-    /// Drives the flash prefill dispatch; only read under the
-    /// flash-attn feature (dead by construction on cuda-only builds).
+    /// Drives the flash prefill dispatch, under that feature alone.
     #[cfg_attr(not(feature = "flash-attn"), allow(dead_code))]
     use_flash_attn: bool,
-    /// GdnChainFusion armed: decode norms ride the fused kernel on
-    /// cuda (the stateless path always runs the classic chain).
+    /// Fusion armed: decode norms ride the fused kernel on cuda.
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     fused_gdn: bool,
     pub(crate) kv: Option<AttnKv>,
-    /// The KV buffers are baked into a captured decode graph: their
-    /// eventual replacement must PARK them (mem::forget), never free
-    /// them - ever-captured buffers refuse cuMemFreeAsync (the
-    /// captured-buffer free law).
+    /// A captured graph baked these buffers, so replacing them PARKS them.
     pub(crate) buffers_captured: bool,
-    /// Latched by a reserve that parked captured buffers; the model
-    /// collects it and retires capture for its lifetime.
+    /// Latched by a reserve that parked buffers; the model collects it.
     parked_graphs: bool,
-    /// KvEviction armed (settings.eviction present at construction).
+    /// Eviction armed at construction.
     evict: bool,
-    /// The armed observation window (tail queries per prefill-chunk
-    /// re-score pass); the SCORE_TAIL default when unarmed.
+    /// The armed observation window, or the default when unarmed.
     score_tail: usize,
-    /// Query rows per scoring matmul (the peak-transient lever); the
-    /// SCORE_SLICE default when unarmed.
+    /// Query rows per scoring matmul, or the default when unarmed.
     score_slice: usize,
-    /// Last-pass scores beside the KV: [heads, capacity, 1] f32,
-    /// reserved/parked in lockstep with the KV buffers (captured
-    /// graphs bake its address too).
+    /// Last-pass scores, reserved and parked in lockstep with the KV.
     pub(crate) scores: Option<candle_core::Tensor>,
-    /// Persistent (heads, 1, 1) f32 zero row - the self-slot score
-    /// reset's source, address-stable for captured graphs.
+    /// A persistent zero row: the self-slot reset's stable source.
     score_zero: Option<candle_core::Tensor>,
-    /// DensityProfile observation accumulator; Some only while a
-    /// profile battery is armed (interior mutability: attention runs
-    /// under &self).
+    /// The density accumulator, Some only while a profile is armed.
     #[cfg(feature = "attn-profile")]
     pub(crate) profile: std::cell::RefCell<Option<profile::ProfileAccum>>,
 }
@@ -136,8 +112,7 @@ impl AttnLayer {
             .unwrap_or(0)
     }
 
-    /// Host bookkeeping for a staged decode step (the device write
-    /// already happened in-graph).
+    /// Host bookkeeping for a staged step; the device write is done.
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     pub(crate) fn advance_len(&mut self) {
         if let Some(kv) = &mut self.kv {
@@ -183,12 +158,7 @@ impl AttnLayer {
         self.close_halves(x, attended, self.fused_gdn)
     }
 
-    /// The armed last-pass scoring after a carried forward: prefill
-    /// chunks re-score the whole store from their tail queries (by the
-    /// final chunk that is the question window); a decode row
-    /// overwrites with its own attention masses and zeroes its own
-    /// slot (recent protection covers the fresh token - a large
-    /// self-attention score must not outlive the recent window).
+    /// The armed last-pass scoring after a carried forward.
     fn score_pass(&mut self, q: &candle_core::Tensor, added: usize) -> LibQuestResult<()> {
         let Some(kv) = &self.kv else {
             return Ok(());
@@ -218,12 +188,7 @@ impl AttnLayer {
         Ok(())
     }
 
-    /// Compact the store to the per-head keep-sets (order-preserving;
-    /// all sets one length). `shrink_to` re-homes the survivors into
-    /// fresh capacity-sized buffers (the post-prefill residency win) -
-    /// only legal while nothing captured the buffers; otherwise (and
-    /// at overflow epochs) the gather packs IN PLACE, keeping every
-    /// baked address alive.
+    /// Compact the store to the per-head keep-sets, optionally shrinking.
     pub(crate) fn compact(
         &mut self,
         keep: &[Vec<u32>],
@@ -271,13 +236,7 @@ impl AttnLayer {
         Ok(())
     }
 
-    /// Ensure the KV buffers hold `added` more rows: within the
-    /// standing capacity this is a no-op - an exact ReserveGrainTrim
-    /// pre-reserve is not a grain multiple, so rounding BEFORE the
-    /// capacity check would demand a spurious regrow at the last
-    /// grain boundary under it (mid-final-prefill-chunk, at the
-    /// KV-maxed moment). A genuine grow allocates at the next
-    /// KV_RESERVE_STEP multiple and copies the live prefix once.
+    /// Ensure the KV buffers hold `added` more rows, growing by grain.
     fn reserve(
         &mut self,
         added: usize,
@@ -291,11 +250,7 @@ impl AttnLayer {
         self.reserve_capacity(capacity, template.dtype(), template.device())
     }
 
-    /// Ensure the KV buffers hold at least `capacity` rows (the graph
-    /// arm's pre-grow; also the append path's grow core). Replaced
-    /// buffers that a captured graph baked are PARKED, never freed -
-    /// the armed score buffer rides the same lifecycle (captured
-    /// graphs bake its address too).
+    /// Ensure at least `capacity` rows; captured buffers park, never free.
     pub(crate) fn reserve_capacity(
         &mut self,
         capacity: usize,
@@ -352,8 +307,7 @@ impl AttnLayer {
         Ok(())
     }
 
-    /// The post-norm block's residual adds shared by both paths;
-    /// `fused` arms the decode norm kernel (carried callers only).
+    /// The post-norm block's residual adds, shared by both paths.
     fn close_halves(
         &self,
         x: &candle_core::Tensor,
@@ -376,10 +330,7 @@ impl AttnLayer {
         Ok((h + mlp_out)?)
     }
 
-    /// One fused projection gemv split into q/k/v, with the
-    /// full-projection-width q/k RMSNorm BEFORE the head reshape;
-    /// [heads, t, head_dim] matmul-ready. `fused` arms the decode
-    /// norm kernel (carried callers only).
+    /// One fused gemv split to q/k/v, normed before the head reshape.
     fn qkv(
         &self,
         x: &candle_core::Tensor,
@@ -405,14 +356,7 @@ impl AttnLayer {
         Ok((heads(q)?, heads(k)?, heads(v)?))
     }
 
-    /// Eager MHA, NoPE: q [heads, t, d] against the given k/v span
-    /// (its own chunk stateless, the whole cache carried); softmax in
-    /// f32 cast back. A single-row query (decode) runs mask-free.
-    /// With the flash-attn feature compiled, an eligible prefill
-    /// (cuda, bf16/f16, q_len > 1) dispatches to the flash kernel
-    /// instead - decode stays eager (candle-flash-attn 0.11 has no
-    /// split-kv kernel; the era-one measured gate), and cpu/f32 legs
-    /// never dispatch, so they stay bitwise-identical either way.
+    /// Eager MHA with no positional encoding; decode runs mask-free.
     fn attend(
         &self,
         q: &candle_core::Tensor,
@@ -420,8 +364,6 @@ impl AttnLayer {
         v: &candle_core::Tensor,
         mask: Option<&candle_core::Tensor>,
     ) -> LibQuestResult<candle_core::Tensor> {
-        // An armed profile forces the sliced eager path regardless of
-        // flash settings - the observation needs materialized weights.
         #[cfg(feature = "attn-profile")]
         if self.profile.borrow().is_some() {
             return self.attend_profiled(q, k, v, mask);
@@ -458,10 +400,7 @@ impl AttnLayer {
         Ok(self.o_proj.forward(&out)?)
     }
 
-    /// The profile-armed attention: eager math in PROFILE_ROW_SLICE
-    /// row slices (value-identical - softmax and the weighted sum are
-    /// row-independent) so the f32 softmax transient stays bounded at
-    /// 32K, folding each slice's masses into the armed accumulator.
+    /// The profile-armed attention: the same eager math, row-sliced.
     #[cfg(feature = "attn-profile")]
     fn attend_profiled(
         &self,
@@ -504,10 +443,7 @@ impl AttnLayer {
         Ok(self.o_proj.forward(&out)?)
     }
 
-    /// The flash prefill: q the tail block of the k/v span, causal
-    /// with the kernel's bottom-right alignment (absolute-position
-    /// causality over the carried prefix - the era-one R1 finding).
-    /// Layout: flash takes [batch, seq, heads, head_dim].
+    /// The flash prefill, causal by the kernel's bottom-right alignment.
     #[cfg(feature = "flash-attn")]
     fn attend_flash(
         &self,
@@ -516,11 +452,6 @@ impl AttnLayer {
         v: &candle_core::Tensor,
     ) -> LibQuestResult<candle_core::Tensor> {
         let seq_len = q.dim(1)?;
-        // q packs (chunk-sized, cheap); k/v stay VIEWS - the flash
-        // kernels take strided rows (last dim contiguous), and a
-        // contiguous() here would copy the WHOLE carried span per
-        // chunk per layer (~2 GiB-class transients late in a 32K
-        // prefill, and the top copy share on the prefill path).
         let block = |t: &candle_core::Tensor| -> LibQuestResult<candle_core::Tensor> {
             Ok(t.transpose(0, 1)?.unsqueeze(0)?.contiguous()?)
         };
@@ -540,11 +471,7 @@ impl AttnLayer {
         Ok(self.o_proj.forward(&out)?)
     }
 
-    /// Restore the carried KV from snapshot rows [heads, len,
-    /// head_dim]: reserve (park-aware - a restore-forced regrow on a
-    /// captured model parks) and write in place; the live length
-    /// becomes len. Stale rows beyond it stay hidden (reads narrow to
-    /// the live length). Returns len.
+    /// Restore the carried KV from snapshot rows, park-aware.
     pub(crate) fn restore_kv(
         &mut self,
         k: &candle_core::Tensor,
@@ -575,18 +502,14 @@ impl AttnLayer {
         Ok(len)
     }
 
-    /// Length resets; reserved capacity stays (the era-one semantic).
+    /// Length resets; the reserved capacity stays.
     pub(crate) fn clear_cache(&mut self) {
         if let Some(kv) = &mut self.kv {
             kv.len = 0;
         }
     }
 
-    /// The staged decode step (batch-1, t=1): the same math as the
-    /// classic mask-free decode, over a static bucket width - the new
-    /// k/v scatter to a device-resident slot, the pad mask hides the
-    /// bucket's tail (exactly zero post-softmax mass), and every
-    /// per-step value rides a staged buffer.
+    /// The staged decode step: the classic math over a static bucket.
     #[cfg(feature = "cuda")]
     pub(crate) fn forward_graph(
         &self,
@@ -608,13 +531,6 @@ impl AttnLayer {
         let probs_f32 =
             candle_nn::ops::softmax_last_dim(&scores.to_dtype(candle_core::DType::F32)?)?;
         if self.evict {
-            // The in-graph last-pass write: the row's masses over the
-            // static bucket (pad columns write ~0 to slots beyond the
-            // live length - overwritten when those slots fill), then
-            // the staged self-slot zero (recent protection covers the
-            // fresh token). Bucket-static shapes; the score buffer +
-            // zero row are address-stable, so capture bakes them
-            // safely.
             let score_buffer = self
                 .scores
                 .as_ref()

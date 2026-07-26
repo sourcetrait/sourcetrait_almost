@@ -1,44 +1,7 @@
-//! PrefillDispatch building blocks: the fused chunked-GDN prefill
-//! family. PrepChunk collapses the per-chunk prep chain (the carried
-//! causal conv + silu, the q/k l2 norms + scale, and the gating
-//! scalars with the per-chunk decay cumsum) into ONE launch per
-//! layer-call, writing q | k | g | beta into the StateAdvance bundle
-//! DIRECTLY (PackTrim: no transpose/pad/cat pipeline exists at all);
-//! TriSolve folds the intra-chunk decay-mask build, beta-scaled kkt
-//! matmul, and the blocked-substitution triangular inversion into one
-//! launch reading the same bundle; the StateAdvancePipeline splits
-//! the inter-chunk recurrence in two - StateStage runs the SERIAL
-//! state math alone, materializing each chunk's initial state and
-//! vnew rows to a scratch, and StateOut computes every chunk's
-//! output rows chunk-PARALLEL from that scratch. BundleBf16: the
-//! bundle's q | k | w | u columns ride bf16 pairs packed two per
-//! f32 cell (halving the rule family's bandwidth-bound bundle
-//! traffic) while g | beta and the recurrence state stay exact f32
-//! (the vllm accumulation-order lesson); PackPairs packs the gemm
-//! outputs into the w/u cells. SmallT: the module compiles once per
-//! tile via a prepended SA_TILE define - 64 the prefill default, 32
-//! the small-span variant (a <= 17-row speculation verify/readvance
-//! span computes a quarter of the tile-64 pad waste; final prefill
-//! chunks at or under 32 rows ride it too). Raw pointer args on the
-//! model's own stream, operands addressed at their layout offsets
-//! (the offset-leak lock).
-//!
-//! Numerics: the prep kernel runs the conv/silu/l2 chain in f32 where
-//! the classic chain rounds through bf16 per op (the FusedDecodeConv
-//! precedent - envelope-class, toward truth; the prep lock pins it);
-//! the rule kernels run the same f32 math as gdn::chunk_rule with
-//! reassociation-class deltas (the rule lock pins those). The cpu
-//! path, the stateless parity form, and decode never dispatch here;
-//! only the CARRIED cuda bf16 multi-token chunk branch does.
+//! The fused chunked-GDN prefill family: prep, solve, and the advance.
 use crate::*;
 
-/// Kernel geometry: one SA_TILE-row chunk tile per block (SmallT:
-/// SA_TILE is prepended per compile - 64 or 32; SA_BLOCKS is the
-/// blocked-substitution 16-row block count). A bundle row is
-/// SA_CELLS f32 cells: q | k | w | u as bf16 pairs (BundleBf16) at
-/// SA_QC/SA_KC/SA_WC/SA_UC, then exact-f32 g | beta at SA_GC/SA_BC
-/// (beta rides for TriSolve/PrepKbg; the StateAdvancePipeline
-/// ignores it). The family is geometry-locked to dk 96 / dv 192.
+/// The prefill-family kernel source, compiled once per tile variant.
 const KERNEL_SRC: &str = r#"
 #define SA_BLOCKS (SA_TILE / 16u)
 #define SA_DK 96u
@@ -559,15 +522,9 @@ extern "C" __global__ void pack_pairs_bf16(
 }
 "#;
 
-/// The bundle row width in f32 CELLS the kernels are compiled
-/// against (BundleBf16): q | k | w | u ride bf16 pairs packed two
-/// per cell (48 + 48 + 48 + 96 cells), g | beta stay exact f32
-/// cells - halving the rule family's bundle traffic while the
-/// gating scalars and the recurrence state keep full precision.
+/// The bundle row width in f32 CELLS the kernels compile against.
 pub(crate) const BUNDLE_CELLS: usize = 48 + 48 + 48 + 96 + 2;
-/// Pair-cell offsets of the packed columns (the kernel-side
-/// SA_QC/SA_KC/SA_WC/SA_UC/SA_GC/SA_BC mirror; Q/K/B are
-/// harness-side - the lock rig packs q/k and slice_sets beta).
+/// Cell offsets of the packed columns, mirroring the kernel's own.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const CELL_Q: usize = 0;
 #[cfg_attr(not(test), allow(dead_code))]
@@ -578,19 +535,12 @@ pub(crate) const CELL_G: usize = 240;
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const CELL_B: usize = 241;
 
-/// The dispatch tile for a t-row span (SmallT): spans at or under 32
-/// rows ride the tile-32 module - a <= 17-row speculation verify or
-/// readvance span computes a quarter of the tile-64 pad waste -
-/// everything larger keeps the tile-64 default, so 512-token prefill
-/// chunks and 33-63-row final chunks are untouched.
+/// The dispatch tile for a t-row span; 32 rows or fewer take tile 32.
 pub(crate) fn tile_for(t: usize) -> usize {
     if t <= 32 { 32 } else { 64 }
 }
 
-/// Lazily nvrtc-compiled modules, one per tile variant (SmallT;
-/// single-device box). Both variants compile from the SAME source
-/// with SA_TILE prepended, so tile-64 codegen is byte-for-byte the
-/// pre-SmallT module.
+/// Lazily compiled modules, one per tile variant, from one source.
 static MODULE_TILE_64: std::sync::OnceLock<std::sync::Arc<cudarc::driver::CudaModule>> =
     std::sync::OnceLock::new();
 static MODULE_TILE_32: std::sync::OnceLock<std::sync::Arc<cudarc::driver::CudaModule>> =
@@ -635,13 +585,7 @@ fn kernel(
     }
 }
 
-/// `a.inplace_op2(&bundle, &TriSolve { tile })`: a (blocks, tile,
-/// tile) f32 - WRITTEN by the kernel (the inverted-and-identity-added
-/// intra-chunk matrix); bundle (heads, chunks, tile, BUNDLE_CELLS)
-/// with blocks == heads * chunks (k unpacked from its pair cells;
-/// cumulative g and beta at their f32 cells). The tile field names
-/// the compiled module (SmallT: 32 or 64). All contiguous, all
-/// addressed at their layout offsets.
+/// `a.inplace_op2(&bundle, &TriSolve { tile })`; `a` is the output.
 pub(crate) struct TriSolve {
     pub(crate) tile: usize,
 }
@@ -719,16 +663,7 @@ impl candle_core::InplaceOp2 for TriSolve {
     }
 }
 
-/// `bundle.inplace_op3(&dyn_rows, &v_beta, &PrepChunk { .. })`:
-/// bundle (heads, chunks, tile, BUNDLE_CELLS) f32 zeros - q | k
-/// (packed pairs) and g | beta WRITTEN by the kernel (the w | u
-/// cells stay zero for the gemm PackPairs);
-/// dyn_rows (tokens + 7, conv_width + 2 * heads) bf16 -
-/// rows 0..3 the conv-weight taps (A_log | dt_bias in the row-0 pad
-/// columns), 4..6 the carried tail, 7.. the token rows
-/// (conv_in | a | b); v_beta (heads, chunks, tile, 192) f32 - WRITTEN
-/// (candle tensors mutate through shared storage by design).
-/// Geometry-locked to dk 96 / dv 192; tile names the module (SmallT).
+/// `bundle.inplace_op3(&dyn_rows, &v_beta, &PrepChunk { .. })`.
 pub(crate) struct PrepChunk {
     pub(crate) tokens: usize,
     pub(crate) q_scale: f32,
@@ -835,9 +770,7 @@ impl candle_core::InplaceOp3 for PrepChunk {
     }
 }
 
-/// `kbg.inplace_op2(&bundle, &PrepKbg { tile })`: kbg (heads, chunks,
-/// tile, 96) f32 - WRITTEN with (k * beta) * exp(g_cum) per row, read
-/// straight off the bundle.
+/// `kbg.inplace_op2(&bundle, &PrepKbg { tile })`; kbg is the output.
 pub(crate) struct PrepKbg {
     pub(crate) tile: usize,
 }
@@ -910,18 +843,7 @@ impl candle_core::InplaceOp2 for PrepKbg {
     }
 }
 
-/// `state.inplace_op3(&bundle, &scratch, &StateStage { tile })`:
-/// pass 1 of the StateAdvancePipeline - state (heads, dk, dv) f32,
-/// the carried state, advanced IN PLACE across every chunk (the
-/// serial recurrence lives here alone); bundle (heads, chunks, tile,
-/// BUNDLE_CELLS) rows q | k | w | u | g | beta (q and beta unused
-/// in this pass); scratch (heads, chunks, dk + tile, dv) f32 -
-/// WRITTEN with each chunk's INITIAL state (rows 0..dk) and vnew
-/// rows (rows dk..dk+tile) for the parallel output pass (candle
-/// tensors mutate through shared storage by design). All contiguous,
-/// all addressed at their layout offsets. Geometry-locked to dk 96 /
-/// dv 192; grid (heads, 4 stripes) x 48 threads - the landed
-/// register contract.
+/// `state.inplace_op3(&bundle, &scratch, &StateStage { tile })`.
 pub(crate) struct StateStage {
     pub(crate) tile: usize,
 }
@@ -1022,14 +944,7 @@ impl candle_core::InplaceOp3 for StateStage {
     }
 }
 
-/// `out.inplace_op3(&bundle, &scratch, &StateOut { tile })`: pass 2
-/// of the StateAdvancePipeline - out (heads, chunks, tile, dv) f32
-/// WRITTEN chunk-PARALLEL (grid (heads, chunks, 4 stripes) x 48
-/// threads): every tile reads its chunk's initial state and vnew
-/// rows from the scratch, builds the decayed local attention against
-/// its own bundle rows, and writes its output rows independently -
-/// no serial dependency remains in the heavy math. Same per-element
-/// accumulation orders as the fused single-pass form.
+/// `out.inplace_op3(&bundle, &scratch, &StateOut { tile })`.
 pub(crate) struct StateOut {
     pub(crate) tile: usize,
 }
@@ -1127,13 +1042,7 @@ impl candle_core::InplaceOp3 for StateOut {
     }
 }
 
-/// `bundle.inplace_op2(&src, &PackPairs { cell_offset })`: pack an
-/// f32 tensor's rows into the bundle's bf16 pair cells at a fixed
-/// cell offset - the w/u gemm outputs, and the lock harness's q/k.
-/// dst (h, n, tile, BUNDLE_CELLS) f32; src (h, n, tile, width) f32
-/// with width even and the packed span inside the pair-cell region.
-/// Tile-agnostic (row-flat kernel; the chunk dims just have to
-/// agree).
+/// `bundle.inplace_op2(&src, &PackPairs { cell_offset })`, row-flat.
 pub(crate) struct PackPairs {
     pub(crate) cell_offset: usize,
 }
@@ -1183,8 +1092,6 @@ impl candle_core::InplaceOp2 for PackPairs {
 
         let device = bundle.device.clone();
         let stream = device.cuda_stream();
-        // The pack kernel is row-flat, so either module serves it;
-        // the tile-64 module always exists once anything prefills.
         let function = match kernel(&device, "pack_pairs_bf16", 64) {
             Ok(function) => function,
             Err(error) => candle_core::bail!("{error}"),
@@ -1220,16 +1127,7 @@ impl candle_core::InplaceOp2 for PackPairs {
     }
 }
 
-/// The rule back half over a filled bundle: TriSolve, the two cublas
-/// gemms, the BundleBf16 w/u pair packing, and the
-/// StateAdvancePipeline (StateStage serial, StateOut chunk-parallel
-/// over the scratch). The tile rides the bundle's chunk dim (SmallT:
-/// the caller sized it via tile_for); `pooled` carries the reused
-/// kbg/attn/scratch/out set on a full span
-/// (PrefillScratchReuse - every cell rewrites below, TriSolve and
-/// the writers covering their whole outputs, so pooled and fresh
-/// zeros are value-identical). Returns (out [t, heads, dv] f32,
-/// final state).
+/// The rule back half over a filled bundle: solve, gemms, advance.
 fn rule_over_bundle(
     bundle: &candle_core::Tensor,
     v_beta: &candle_core::Tensor,
@@ -1288,19 +1186,7 @@ fn rule_over_bundle(
     Ok((out, carried))
 }
 
-/// PrefillScratchReuse: the six per-layer-call prefill tensors for
-/// ONE standing chunk shape, allocated once and shared by every GDN
-/// layer (they run sequentially; Rc single-thread by the same
-/// contract as the graph cache). Only FULL spans reuse
-/// (t == chunks * tile): there every cell of every tensor is
-/// rewritten each pass - PrepChunk covers q/k/g/beta and v_beta,
-/// PackPairs the w/u cells, TriSolve/PrepKbg/StateStage/StateOut
-/// their whole outputs - so reuse is value-identical to fresh zeros
-/// by construction, and no re-zeroing exists at all. Ragged and
-/// small spans keep per-call allocation (the pad-row discipline
-/// stays the allocator's). A shape change (a different chunks/tile)
-/// reallocates the set; prefill tensors are never graph-captured,
-/// so the replaced set frees legally.
+/// The six per-layer-call prefill tensors for one standing shape.
 pub(crate) struct PrefillScratch {
     shape: ScratchShape,
     bundle: candle_core::Tensor,
@@ -1311,8 +1197,7 @@ pub(crate) struct PrefillScratch {
     out: candle_core::Tensor,
 }
 
-/// One standing pool geometry (the full-span shape a checkout
-/// serves).
+/// One standing pool geometry: the full-span shape it serves.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct ScratchShape {
     heads: usize,
@@ -1322,8 +1207,7 @@ struct ScratchShape {
     dv: usize,
 }
 
-/// The checked-out pooled set: bundle, v_beta, kbg, attn, scratch,
-/// out (clones sharing the pool's storage).
+/// The checked-out set, as clones sharing the pool's storage.
 type PooledSet = (
     candle_core::Tensor,
     candle_core::Tensor,
@@ -1357,10 +1241,7 @@ impl PrefillScratch {
         })
     }
 
-    /// The pooled set for a FULL span, (re)allocated on a shape
-    /// change; None for any span the pool does not serve. The clones
-    /// share storage (the kernels write in place), so no RefCell
-    /// borrow outlives this call.
+    /// The pooled set for a FULL span; None for anything else.
     fn checkout(
         pool: Option<&SharedPrefillScratch>,
         shape: ScratchShape,
@@ -1389,11 +1270,7 @@ impl PrefillScratch {
     }
 }
 
-/// The PrepFusion pipeline's tensor operands: conv_in [t, 2*key +
-/// value] bf16 (a view is fine); a_rows/b_rows [t, heads] bf16 (the
-/// cublas gate projections); static_rows [4, cw + 2h] bf16 (the
-/// layer's prestored conv-weight rows with A_log | dt_bias in the
-/// row-0 pad); conv_tail [3, cw] f32; state [heads, dk, dv] f32.
+/// The prep pipeline's tensor operands, gathered into one argument.
 pub(crate) struct PrepInputs<'a> {
     pub(crate) conv_in: &'a candle_core::Tensor,
     pub(crate) a_rows: &'a candle_core::Tensor,
@@ -1403,11 +1280,7 @@ pub(crate) struct PrepInputs<'a> {
     pub(crate) state: &'a candle_core::Tensor,
 }
 
-/// The PrepFusion chunk pipeline: pack the dyn rows (weights + tail +
-/// conv_in | a | b), run PrepChunk into a fresh bundle, then the rule
-/// back half. Returns (out [t, heads, dv] f32, final state, new tail
-/// [3, cw] f32 - the last 3 raw history rows, classic-exact through
-/// the bf16 round-trip).
+/// The chunk pipeline: pack the dyn rows, prep, then the back half.
 pub(crate) fn prep_chunk_rule(
     parts: PrepInputs<'_>,
     q_scale: f64,
@@ -1474,9 +1347,6 @@ pub(crate) fn prep_chunk_rule(
     })?;
 
     let (out, carried) = rule_over_bundle(&bundle, &v_beta, state, t, pooled_rest)?;
-    // The new tail: the last kernel-1 rows of [tail; tokens] - dyn
-    // rows [4 + t, 7 + t), conv columns only (classic-exact: the
-    // same bf16 round-trip conv_with_tail's history takes).
     let new_tail = dyn_rows
         .narrow(0, 4 + t, 3)?
         .narrow(1, 0, conv_width)?
@@ -1485,12 +1355,7 @@ pub(crate) fn prep_chunk_rule(
     Ok((out, carried, new_tail))
 }
 
-/// The rule kernels driven from pre-prepped q/k/v/g/beta tensors (the
-/// classic chunk_rule contract: q/k l2-normed, q pre-scaled, all f32,
-/// initial-state carry) - the lock rig's harness: PackPairs and
-/// slice_set fill the bundle the way PrepChunk writes it (q/k as bf16
-/// pairs, g/beta exact f32), then the back half runs. The tile
-/// derives from t exactly like the live paths (SmallT).
+/// The rule kernels driven from pre-prepped tensors: the lock harness.
 #[cfg(test)]
 pub(crate) fn rule_from_parts(
     q: &candle_core::Tensor,

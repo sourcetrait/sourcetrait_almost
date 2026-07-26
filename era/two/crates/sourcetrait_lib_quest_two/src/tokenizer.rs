@@ -9,10 +9,7 @@ pub fn load_tokenizer(model_dir: &Path) -> LibQuestResult<tokenizers::Tokenizer>
     }
 }
 
-/// Verify the live tokenizer carries the DPO artifact's channel/tool
-/// token ids the engine leans on; drift is a hard error. (The BASE
-/// checkpoint intentionally fails this - its 100266-100275 range holds
-/// extra_id_1..10 instead of the tool markers.)
+/// Lock the twelve added-token ids the engine leans on; drift raises.
 pub fn verify_token_map(tokenizer: &tokenizers::Tokenizer) -> LibQuestResult<()> {
     let expectations: [(&str, u32); 12] = [
         ("<|extra_id_0|>", consts::TOKEN_EXTRA_ID_0),

@@ -1,21 +1,10 @@
-//! PrefixSnapshots: the saved-context file format (one safetensors
-//! file carrying every carried cache + the consumed-id trail) and the
-//! three-tier snapshot token resolution.
-//!
-//! Snapshots are SETTINGS-AGNOSTIC - state is state: a file saved
-//! under any settings combination restores under any other (fused,
-//! graph, eviction posture); settings live with the Model, never the
-//! file. Eviction-armed saves are supported (the compacted store IS
-//! the model's state); last-pass scores are never persisted - the
-//! next prefill's whole-store re-score rebuilds them.
+//! The saved-context file format and its three-tier token resolution.
 use crate::*;
 
 /// The era-two snapshot format version (metadata "version").
 pub(crate) const SNAPSHOT_VERSION: &str = "1";
 
-/// What restore_caches hands back: the restored context length (the
-/// live cache rows) and the full consumed-id trail (>= context_len;
-/// longer exactly when the save was eviction-compacted).
+/// What restore_caches hands back: the live length and the id trail.
 pub struct RestoredContext {
     pub context_len: usize,
     pub context_ids: Vec<u32>,
@@ -30,11 +19,7 @@ fn is_bare_relative(token: &str) -> bool {
         || token.starts_with('$'))
 }
 
-/// The three-tier snapshot token resolution: a pure snake resolves to
-/// <snapshots_dir>/<snake>.safetensors; a bare relative path resolves
-/// relative to the snapshots dir; anything else is a normal path with
-/// `~`/`$VAR` expansion (`$VAR` covers the XDG family with spec
-/// fallbacks).
+/// The three-tier snapshot token resolution.
 pub fn snapshot_path(snapshots_dir: &Path, token: &str) -> LibQuestResult<PathBuf> {
     if config::is_profile_name(Path::new(token)) {
         return Ok(snapshots_dir.join(format!("{token}.safetensors")));
@@ -45,8 +30,7 @@ pub fn snapshot_path(snapshots_dir: &Path, token: &str) -> LibQuestResult<PathBu
     config::expand_path(token)
 }
 
-/// A parsed + format-validated snapshot: the cache tensors (loaded to
-/// the target device), the consumed-id trail, and the context length.
+/// A parsed, format-validated snapshot ready for a model to consume.
 pub(crate) struct SnapshotFile {
     tensors: HashMap<String, candle_core::Tensor>,
     pub(crate) context_ids: Vec<u32>,
@@ -62,10 +46,7 @@ impl SnapshotFile {
     }
 }
 
-/// Write one snapshot file: the named cache tensors plus the
-/// context_ids trail, metadata {version, model_id, context_len}.
-/// Creates the parent directory; the trail must cover context_len
-/// (the caller-bug guard the read side re-checks).
+/// Write one snapshot file: the cache tensors plus the id trail.
 pub(crate) fn write_snapshot(
     path: &Path,
     tensors: Vec<(String, candle_core::Tensor)>,
@@ -100,11 +81,7 @@ pub(crate) fn write_snapshot(
     }
 }
 
-/// Read + format-validate one snapshot file: version, model id, a
-/// parseable context_len, the trail present and covering context_len.
-/// Cache tensors load to `device`; the trail loads host-side. Layer
-/// shape/dtype validation is the restoring model's job (it owns the
-/// expected geometry).
+/// Read and format-validate one snapshot file onto `device`.
 pub(crate) fn read_snapshot(
     path: &Path,
     expected_model_id: &str,

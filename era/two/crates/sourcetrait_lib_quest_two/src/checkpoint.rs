@@ -1,9 +1,8 @@
+//! The checkpoint's config.json, its policy validation, and its home.
 #[allow(unused_imports)]
 use crate::*;
 
-/// Checkpoint config.json model (transformers 5.x flat format for
-/// model_type olmo_hybrid: explicit layer_types, linear_* GDN fields,
-/// and a rope_parameters block whose null rope_theta is the NoPE gate).
+/// The config.json model, in the transformers 5.x flat format.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct OlmoHybridConfig {
     pub vocab_size: usize,
@@ -53,9 +52,7 @@ impl OlmoHybridConfig {
         self.linear_num_value_heads * self.linear_value_head_dim
     }
 
-    /// The NoPE gate, exactly as the pinned upstream runtime reads it:
-    /// rope exists only when rope_parameters.rope_theta is non-null.
-    /// Both era-two checkpoints ship null (rope_type is dead metadata).
+    /// The NoPE gate: rope exists only when rope_theta is non-null.
     pub fn is_nope(&self) -> bool {
         self.rope_parameters
             .as_ref()
@@ -66,9 +63,7 @@ impl OlmoHybridConfig {
         self.layer_types[layer_idx]
     }
 
-    /// Sole-checkpoint policy checks every loaded config must pass
-    /// before model construction: MHA, per-layer kinds present and
-    /// counted, head geometry divisible.
+    /// The sole-checkpoint policy checks, run before construction.
     pub fn validate(&self) -> LibQuestResult<()> {
         if self.num_kv_heads() != self.num_attention_heads {
             snafu::whatever!(
@@ -123,9 +118,7 @@ pub enum LayerKind {
     FullAttention,
 }
 
-/// The config.json rope_parameters block. Kept whole even though both
-/// era-two checkpoints null the theta: the null IS the load-bearing
-/// signal (is_nope), and a future non-null theta must be visible.
+/// The config.json rope_parameters block, whose null theta is a signal.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct RopeParameters {
     #[serde(default)]
@@ -147,8 +140,7 @@ pub(crate) fn data_home() -> LibQuestResult<PathBuf> {
     Ok(PathBuf::from(home).join(".local/share"))
 }
 
-/// A checkpoint's local directory (the XDG data-home layout: data not
-/// cache, the author as a subdirectory).
+/// A checkpoint's local directory under the XDG data home.
 pub fn model_dir(model_name: &str) -> LibQuestResult<PathBuf> {
     Ok(data_home()?
         .join(consts::MODELS_HOME_RELATIVE)

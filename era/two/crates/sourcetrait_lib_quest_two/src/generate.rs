@@ -1,47 +1,22 @@
-//! The generation surface: pull-based token production over the
-//! carried forward path (era-one's settled API shape, era-two
-//! implementation).
-//!
-//! The caller drives the loop: `Model::generate` prefills chunked and
-//! samples the first token; each `Generation::next` yields one
-//! `GenerationStep` (per-step errors ride the Item and fuse the
-//! iterator); `finish` flushes the detokenizer tail and reports.
-//! Dropping the iterator early is a clean stop. A sampled stop token
-//! is never consumed into the caches, so a saved context stays
-//! transcript-complete mid assistant turn.
+//! The generation surface: pull-based tokens over the carried path.
 use crate::*;
 
 /// The prefill chunk fed per forward on the generate path.
 pub(crate) const PREFILL_CHUNK: usize = 512;
 
-/// Sampling posture + budget for one generation. The defaults are the
-/// checkpoint card's recommended posture (temperature 0.6, top_p
-/// 0.95) with the model-card decode budget; None temperature = greedy.
-/// NoPE leaves the hybrid without a position ceiling, so sample_len
-/// is a plain budget - VRAM is the real bound (the era-one 65536
-/// clamp deliberately does not carry).
+/// Sampling posture and budget for one generation; no temperature is
+/// greedy.
 #[derive(Debug, Clone)]
 pub struct GenerateOptions {
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
     pub seed: u64,
     pub sample_len: usize,
-    /// Render the prompt through the chat template; false feeds the
-    /// text verbatim (the parity/battery rig).
+    /// Render through the chat template; false feeds text verbatim.
     pub chat: bool,
-    /// Consume stop tokens like any other id and decode the full
-    /// budget - the bench posture (the incumbent rows force their
-    /// decode length the same way). Never a chat behavior.
+    /// Consume stop tokens and decode the full budget; never in chat.
     pub ignore_stops: bool,
-    /// SpeculationPort lookup speculation: draft continuations from
-    /// earlier context occurrences, verify in one batched carried
-    /// forward. Greedy-only (verification rides the same argmax
-    /// sampler - token-exact vs plain greedy at f32); keeps the
-    /// classic decode path (graphs never arm on a speculative run).
-    /// EvictionMarriage: an armed capped store composes - overflow
-    /// epochs run between rounds, a partial accept keeps the
-    /// verify's kept rows and their in-chunk score writes, and the
-    /// rejected tail's stale scores hide behind kv.len.
+    /// Lookup speculation; greedy-only, and never under a graph.
     pub speculate: bool,
 }
 
@@ -60,7 +35,7 @@ impl Default for GenerateOptions {
 }
 
 impl GenerateOptions {
-    /// Greedy argmax with a tight budget - the battery/parity rig.
+    /// Greedy argmax with a tight budget: the battery and parity rig.
     pub fn greedy(sample_len: usize) -> Self {
         Self {
             temperature: None,
@@ -71,8 +46,7 @@ impl GenerateOptions {
     }
 }
 
-/// One produced token and the text it detokenized to (possibly empty
-/// while a multi-token grapheme is pending).
+/// One produced token and the text it detokenized to, possibly empty.
 pub struct GenerationStep {
     pub token_id: u32,
     pub chunk: String,
@@ -80,7 +54,7 @@ pub struct GenerationStep {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FinishReason {
-    /// A stop token was sampled (and not consumed into the caches).
+    /// A stop token was sampled, and not consumed into the caches.
     StopToken,
     /// The sample_len budget was spent.
     SampleLen,
@@ -88,28 +62,22 @@ pub enum FinishReason {
 
 /// The end-of-generation accounting `finish` returns.
 pub struct GenerationReport {
-    /// None when the caller stopped early (dropped before an end).
+    /// None when the caller stopped early by dropping the iterator.
     pub finish_reason: Option<FinishReason>,
     pub prompt_token_count: usize,
     pub generated_token_count: usize,
-    /// SpeculationPort tallies (zero when speculation was off or
-    /// never fired).
+    /// Speculation tallies; zero when it was off or never fired.
     pub drafted_token_count: usize,
     pub accepted_draft_token_count: usize,
     pub prefill_seconds: f64,
     pub decode_seconds: f64,
     /// Detokenizer tail not yet emitted through the steps.
     pub rest: String,
-    /// The consumed-id trail: prompt ids + consumed decode ids =
-    /// exactly the cache contents (what a snapshot save wants). A
-    /// stop-token end is transcript-complete (the stop is sampled,
-    /// never consumed); a sample_len end leaves the final emitted
-    /// token out of the KV.
+    /// The consumed-id trail, which is exactly the cache contents.
     pub context_ids: Vec<u32>,
 }
 
-/// The pull-based generation iterator, borrowing the model (whose
-/// caches hold the growing context) and the tokenizer.
+/// The pull-based generation iterator over a borrowed model.
 pub struct Generation<'a> {
     model: &'a mut OlmoHybrid,
     tokenizer: &'a tokenizers::Tokenizer,
@@ -117,14 +85,11 @@ pub struct Generation<'a> {
     stop_ids: Vec<u32>,
     ignore_stops: bool,
     generated_ids: Vec<u32>,
-    /// The consumed-id trail (prompt + consumed decode ids); grows in
-    /// lockstep with the caches.
+    /// The consumed-id trail, growing in lockstep with the caches.
     context_ids: Vec<u32>,
     emitted_bytes: usize,
     pending_id: Option<u32>,
-    /// SpeculationPort: verification-accepted tokens awaiting
-    /// emission - already consumed into the caches and the trail, so
-    /// their yields owe no forward.
+    /// Accepted tokens awaiting emission; their yields owe no forward.
     queued: VecDeque<u32>,
     speculate: bool,
     index: speculate::LookupIndex,
@@ -140,8 +105,7 @@ pub struct Generation<'a> {
 }
 
 impl OlmoHybrid {
-    /// Clear the caches, render + encode the prompt, prefill it
-    /// chunked, sample the first token, and hand back the iterator.
+    /// Clear, render, prefill chunked, and hand back the iterator.
     pub fn generate<'a>(
         &'a mut self,
         tokenizer: &'a tokenizers::Tokenizer,
@@ -157,16 +121,7 @@ impl OlmoHybrid {
         self.start_generation(tokenizer, &rendered, Vec::new(), options)
     }
 
-    /// PrefixSnapshots ContinueSurface: continue a RESTORED context.
-    /// The suffix renders as the next chat turn (chat_continue: close
-    /// the open assistant turn, user turn, assistant opener) unless
-    /// options.chat is false (verbatim suffix - the parity/battery
-    /// rig). It prefills chunked AT THE RESTORED OFFSET, then the
-    /// normal post-prefill sequence runs (KvEviction compaction when
-    /// restored + suffix exceeds the cap - the whole-store re-score
-    /// rebuilt the scores during the suffix prefill - and the graph
-    /// arm). The same Generation iterator comes back; its trail is
-    /// seeded restored.context_ids + suffix.
+    /// Continue a RESTORED context, prefilling at its offset.
     pub fn generate_from<'a>(
         &'a mut self,
         tokenizer: &'a tokenizers::Tokenizer,
@@ -188,12 +143,7 @@ impl OlmoHybrid {
         self.start_generation(tokenizer, &rendered, restored.context_ids.clone(), options)
     }
 
-    /// The shared generation core: encode `rendered`, prefill it
-    /// chunked at the CURRENT offset (zero for a fresh generate, the
-    /// restored length for a continuation), run the post-prefill
-    /// sequence, and sample the first token. `carried_trail` seeds
-    /// the consumed-id trail (the restored trail for continuations,
-    /// empty for fresh).
+    /// The shared core: encode, prefill at the current offset, sample.
     fn start_generation<'a>(
         &'a mut self,
         tokenizer: &'a tokenizers::Tokenizer,
@@ -247,15 +197,10 @@ impl OlmoHybrid {
             tokenizer,
         };
         if generation.speculate {
-            // The whole committed context (a carried trail included)
-            // seeds the index; the emitted tokens join per round.
             generation.index.extend(&generation.context_ids);
         }
 
         let prefill_started = std::time::Instant::now();
-        // The known-length pre-reserve: the whole run's KV capacity
-        // in one allocation, ahead of the first chunk (the carried
-        // context included on a continuation).
         let context_before = generation.model.context_len();
         generation
             .model
@@ -269,9 +214,6 @@ impl OlmoHybrid {
                 len,
                 generation.model.device(),
             )?;
-            // PrefillLogitsSkip: intermediate chunks advance the
-            // caches without computing logits; only the final chunk
-            // pays the norm + head, over its last row alone.
             if start + len == prompt_ids.len() {
                 last_logits = Some(generation.model.forward_chunk_last(&chunk)?);
             } else {
@@ -280,16 +222,9 @@ impl OlmoHybrid {
             start += len;
         }
         let last_logits = last_logits.expect("non-empty prompt");
-        // KvEviction: the one-shot post-prefill compaction precedes
-        // graph arming, so graphs capture against the compacted store.
         if let Some(evict) = generation.model.settings().eviction.clone() {
             generation.model.evict_post_prefill(&evict)?;
         }
-        // Arm the staged graph decode after prefill (settings.graph;
-        // cuda builds only - Model::new already rejected the rest).
-        // Speculation keeps the classic path silently (the era-one
-        // scoping): variable-length verify chunks would churn buckets
-        // (graph coexistence stays design-listed).
         if generation.model.settings().graph && !generation.speculate {
             let expected_total =
                 context_before + generation.prompt_token_count + generation.sample_len;
@@ -311,9 +246,7 @@ impl Generation<'_> {
         Ok(self.processor.sample(&row)?)
     }
 
-    /// The incremental detokenizer: the skip-special decode of all
-    /// generated ids, minus what earlier steps already emitted. Stays
-    /// prefix-consistent with the final full decode by construction.
+    /// The incremental detokenizer, as a diff of full decodes.
     fn emit_chunk(&mut self) -> LibQuestResult<String> {
         let full = match self.tokenizer.decode(&self.generated_ids, true) {
             Ok(text) => text,
@@ -323,9 +256,6 @@ impl Generation<'_> {
             return Ok(String::new());
         }
         let chunk = full[self.emitted_bytes..].to_string();
-        // Hold back a chunk that ends mid-replacement-character (a
-        // pending multi-token grapheme decodes as U+FFFD until its
-        // continuation arrives).
         if chunk.ends_with('\u{fffd}') {
             return Ok(String::new());
         }
@@ -357,16 +287,8 @@ impl Generation<'_> {
             return Ok(Some(GenerationStep { token_id, chunk }));
         }
         if from_queue {
-            // SpeculationPort: a verification-accepted token - already
-            // consumed into the caches and the trail; no forward owed.
             return Ok(Some(GenerationStep { token_id, chunk }));
         }
-        // KvEviction overflow epoch: decode outgrew the cap by the
-        // slack - re-compact between rounds (uncaptured host work; an
-        // armed graph keeps replaying at the unchanged bucket, and a
-        // speculative round's verify span stays well inside the
-        // slack, so the round-start check bounds the store either
-        // way - EvictionMarriage).
         if let Some(evict) = self.model.settings().eviction.clone()
             && self.model.context_len() >= evict.decode_cap + evict::OVERFLOW_SLACK
         {
@@ -377,8 +299,6 @@ impl Generation<'_> {
             return Ok(Some(GenerationStep { token_id, chunk }));
         }
         let logits = if self.model.graph_armed() {
-            // A decode outrunning the armed capacity falls to the
-            // classic path (the capacity epoch).
             self.model.graph_disarm_when_full()?;
             if self.model.graph_armed() {
                 self.model.graph_decode_step(token_id)?
@@ -392,26 +312,13 @@ impl Generation<'_> {
                 candle_core::Tensor::from_vec(vec![token_id], 1, self.model.device())?;
             self.model.forward_chunk(&step_ids)?
         };
-        // The token is consumed into the caches now - the trail
-        // advances in lockstep.
         self.context_ids.push(token_id);
         self.pending_id = Some(self.sample(&logits)?);
         Ok(Some(GenerationStep { token_id, chunk }))
     }
 
-    /// One SpeculationPort round for the emitted token: index it,
-    /// probe the ladder, and either verify [token ++ draft] in one
-    /// batched carried forward or fall to the plain single step. On a
-    /// partial accept the verify's accepted-prefix attention rows are
-    /// KEPT (a length reset) and the GDN caches re-advance from the
-    /// rule inputs captured during the verify - one weight pass per
-    /// round (KernelAccept); a full accept keeps the caches as-is.
-    /// Token-exact vs plain greedy: every row rides the same argmax
-    /// sampler.
+    /// One speculation round: index, probe, verify or step plainly.
     fn stage_or_speculate(&mut self, token_id: u32) -> LibQuestResult<()> {
-        // The emitted token is committed context NOW - it must join
-        // the index before drafting, or every draft continues the
-        // pre-token tail and competes with the token itself.
         self.index.extend(&[token_id]);
         let budget = self.sample_len.saturating_sub(self.generated_ids.len());
         let draft = if budget > 0 {
@@ -427,8 +334,6 @@ impl Generation<'_> {
             None
         };
         let Some(draft) = draft else {
-            // Plain single step (classic path; speculation never arms
-            // graphs).
             let step_ids =
                 candle_core::Tensor::from_vec(vec![token_id], 1, self.model.device())?;
             let logits = self.model.forward_chunk(&step_ids)?;
@@ -470,19 +375,11 @@ impl Generation<'_> {
         let bonus = greedy_next[consumed - 1];
 
         if consumed < span {
-            // KernelAccept partial: keep the verify's accepted-prefix
-            // attention rows, re-advance the GDN caches from the
-            // captured rule inputs (the bonus row is already in hand
-            // from the verification logits).
             self.model.spec_accept(&mark, consumed)?;
         } else {
-            // Full accept: every cache row is already correct; the
-            // round's captures release.
             self.model.spec_release();
         }
         self.context_ids.extend_from_slice(&accepted);
-        // token_id is already indexed; the verified continuation
-        // joins now.
         self.index.extend(&accepted[1..]);
 
         let mut queued: Vec<u32> = accepted[1..].to_vec();
@@ -498,8 +395,7 @@ impl Generation<'_> {
         Ok(())
     }
 
-    /// Close the generation: decode timing, the detokenizer tail, and
-    /// the accounting.
+    /// Close the generation: timing, the tail, and the accounting.
     pub fn finish(self) -> GenerationReport {
         let decode_seconds = if self.generated_ids.is_empty() {
             0.0

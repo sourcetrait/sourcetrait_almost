@@ -1,9 +1,4 @@
 //! RMSNorm variants with the pinned upstream dtype choreography.
-//!
-//! The order of casts is semantics, not style: variance and normalize
-//! run in f32, the weight multiplies AFTER the downcast to the input
-//! dtype, and the gated form applies silu(gate) in f32 after the
-//! weight (matching torch's promotion in the upstream modeling).
 use crate::*;
 
 /// Plain RMSNorm (rms_norm_eps everywhere it appears in this model).
@@ -20,15 +15,7 @@ pub(crate) fn rms_norm(
     Ok(weight.broadcast_mul(&normed.to_dtype(dtype)?)?)
 }
 
-/// rms_norm with the GdnChainFusion/PrefillNormFusion dispatch: the
-/// fused single-launch kernel (one block per row) on CONTIGUOUS 2-D
-/// bf16 cuda input when the caller is a CARRIED path with fusion
-/// armed - decode rows and multi-row prefill chunks alike; the
-/// classic chain otherwise. The contiguity gate is load-bearing: the
-/// attention q/k norms feed multi-row NARROWS of the fused qkv
-/// projection (contiguous only at t = 1), and those legs stay
-/// classic rather than paying a pack copy. Stateless/parity callers
-/// pass fused = false by construction, so their digits never move.
+/// rms_norm, dispatching to the fused kernel where it is eligible.
 pub(crate) fn rms_norm_auto(
     x: &candle_core::Tensor,
     weight: &candle_core::Tensor,
@@ -55,10 +42,7 @@ pub(crate) fn rms_norm_auto(
     rms_norm(x, weight, eps)
 }
 
-/// Gated RMSNorm over the GDN value-head dim: norm-before-gate, weight
-/// in input dtype, gate = silu(gate) in f32, result back in input
-/// dtype. Eps here is 1e-5 (the fla FusedRMSNormGated default), NOT
-/// rms_norm_eps - the one eps exception in the model.
+/// Gated RMSNorm over the GDN value-head dim: norm before gate.
 pub(crate) fn rms_norm_gated(
     x: &candle_core::Tensor,
     gate: &candle_core::Tensor,

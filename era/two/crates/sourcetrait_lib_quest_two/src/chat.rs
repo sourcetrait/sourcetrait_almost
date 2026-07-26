@@ -1,47 +1,16 @@
-//! Chat rendering, byte-exact to the checkpoint's chat_template.jinja
-//! (byte-identical to era-one olmo3's - the one sanctioned code carry).
-//!
-//! Two surfaces. `chat_wrap` / `chat_continue` are the single-shape
-//! inference helpers the engine and the battery rigs drive.
-//! `chat_render` is the message-list form the trainer needs: it
-//! returns the rendered text AND the byte span of every assistant
-//! turn, so a training example's loss boundary is exact by
-//! construction from ONE render.
-//!
-//! ## DEV
-//! The span form exists because the alternative - re-rendering the
-//! conversation prefix and taking its token count - is measurably
-//! wrong against THIS template. The assistant turn renders
-//! differently by position (eos when last, `<|im_end|>` plus a
-//! newline when interior), so a prefix ending at an assistant turn
-//! measures one token short, once per interior assistant turn. One
-//! render plus spans has no positional invariant to maintain and
-//! costs one pass instead of n+1.
-//!
-//! A span COVERS its turn's terminator (`<|im_end|>` or the eos
-//! token) and STOPS there: the newline after an interior
-//! `<|im_end|>` opens the next turn rather than closing this one, and
-//! our harness re-renders the whole conversation each turn, so the
-//! model is never asked to produce it. That exclusion is a decision,
-//! not the inherited off-by-one.
-//! ##
+//! Chat rendering, byte-exact to the checkpoint's chat_template.jinja.
 use crate::*;
 
-/// The system text the template injects when the conversation
-/// carries no system message of its own.
+/// The system text the template injects when none is supplied.
 const INJECTED_SYSTEM: &str = "You are a helpful function-calling AI assistant. \
 You do not currently have access to any functions. <functions></functions>";
 
-/// Byte-exact default rendering (no system message, no tools, generation
-/// prompt appended) of the checkpoint's chat_template.jinja.
+/// The byte-exact default rendering: one user turn, generation prompt.
 pub fn chat_wrap(user_prompt: &str) -> String {
     chat_render(&[ChatMessage::user(user_prompt)], true).text
 }
 
-/// Continuation rendering for a standing context that ended mid
-/// assistant turn (every post-decode save does - the stop token is
-/// sampled but never consumed): close that turn, open a user turn with
-/// the prompt, and open the next assistant turn.
+/// Continuation rendering for a context that ended mid assistant turn.
 pub fn chat_continue(user_prompt: &str) -> String {
     let mut wrapped = String::new();
     wrapped.push_str("<|im_end|>\n");
@@ -52,8 +21,7 @@ pub fn chat_continue(user_prompt: &str) -> String {
     wrapped
 }
 
-/// Stop-token ids resolved by string, so tokenizer truth wins over any
-/// config-side id drift.
+/// Stop-token ids resolved by string, so tokenizer truth wins.
 pub fn resolve_stop_ids(tokenizer: &tokenizers::Tokenizer) -> Vec<u32> {
     consts::STOP_TOKENS
         .iter()
@@ -61,9 +29,7 @@ pub fn resolve_stop_ids(tokenizer: &tokenizers::Tokenizer) -> Vec<u32> {
         .collect()
 }
 
-/// A message's role. `Tool` is the template's own alias for
-/// `Environment` and renders identically; it exists so foreign data
-/// carrying that role round-trips without the caller rewriting it.
+/// A message's role; `Tool` is the template's alias for `Environment`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatRole {
     System,
@@ -85,9 +51,7 @@ impl ChatRole {
         }
     }
 
-    /// Parse the on-disk spelling; anything else is a hard error at
-    /// the caller (training data must not carry a role we silently
-    /// drop).
+    /// Parse the on-disk spelling; an unknown role raises.
     pub fn parse(role: &str) -> LibQuestResult<Self> {
         Ok(match role {
             "system" => Self::System,
@@ -100,12 +64,8 @@ impl ChatRole {
     }
 }
 
-/// One conversation turn. `content` is optional because the template
-/// tests presence rather than truthiness: absent renders nothing,
-/// while an EMPTY string renders an empty body (both engines agree).
-/// `functions` rides a system message and `function_calls` an
-/// assistant one; both are the template's STRING paths, which is what
-/// the checkpoint's own data populates.
+/// One conversation turn; every field is optional as the template tests
+/// presence.
 #[derive(Debug, Clone, Default)]
 pub struct ChatMessage {
     pub role: Option<ChatRole>,
@@ -144,9 +104,7 @@ impl ChatMessage {
     }
 }
 
-/// One assistant turn's byte range in the rendered text: the body
-/// (content plus any function-call block) through its terminator,
-/// exclusive of the newline that opens the next turn.
+/// One assistant turn's byte range: the body through its terminator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AssistantSpan {
     pub start: usize,
@@ -163,24 +121,14 @@ impl AssistantSpan {
     }
 }
 
-/// A render plus the assistant spans within it, in message order. A
-/// trailing generation prompt produces no span - there is no content
-/// behind it yet.
+/// A render plus its assistant spans, in message order.
 #[derive(Debug, Clone)]
 pub struct ChatRender {
     pub text: String,
     pub assistant_spans: Vec<AssistantSpan>,
 }
 
-/// Render a message list byte-exactly per the checkpoint template,
-/// reporting each assistant turn's span. `add_generation_prompt`
-/// appends the assistant opener after the final message, whatever its
-/// role - the template's own behavior.
-///
-/// The structured `tools` argument is deliberately unrepresentable
-/// here: the checkpoint's own data and our runtime both populate the
-/// `functions` / `function_calls` STRING fields, so that branch is
-/// dead for every path this crate takes.
+/// Render a message list byte-exactly, reporting each assistant span.
 pub fn chat_render(messages: &[ChatMessage], add_generation_prompt: bool) -> ChatRender {
     let mut text = String::new();
     let mut assistant_spans = Vec::new();
@@ -255,16 +203,14 @@ pub fn chat_render(messages: &[ChatMessage], add_generation_prompt: bool) -> Cha
     ChatRender { text, assistant_spans }
 }
 
-/// One assistant turn as a token range over the whole render's ids
-/// (half-open, in token positions).
+/// One assistant turn as a half-open token range over the render's ids.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TokenSpan {
     pub start: usize,
     pub end: usize,
 }
 
-/// A render encoded once, with every assistant span carried through
-/// to token positions.
+/// A render encoded once, its spans carried to token positions.
 #[derive(Debug, Clone)]
 pub struct EncodedRender {
     pub ids: Vec<u32>,
@@ -272,13 +218,6 @@ pub struct EncodedRender {
 }
 
 /// Encode a render and map its byte spans onto token positions.
-///
-/// A span boundary that does not coincide with a token boundary is a
-/// HARD ERROR rather than a rounded one: the mask it feeds decides
-/// which positions carry training signal, and a silently-shifted
-/// boundary trains the wrong thing without any symptom. The whole
-/// render encodes as ONE string, matching how the same text is
-/// encoded at inference.
 pub fn encode_render(
     tokenizer: &tokenizers::Tokenizer,
     render: &ChatRender,
@@ -290,8 +229,6 @@ pub fn encode_render(
     let ids = encoding.get_ids().to_vec();
     let offsets = encoding.get_offsets();
 
-    // Byte offset -> token index, for every token START, plus the
-    // end-of-text sentinel. A boundary must land in this map.
     let mut boundary: HashMap<usize, usize> = HashMap::with_capacity(offsets.len() + 1);
     for (index, (start, _)) in offsets.iter().enumerate() {
         boundary.entry(*start).or_insert(index);

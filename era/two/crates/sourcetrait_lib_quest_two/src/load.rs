@@ -10,8 +10,7 @@ pub struct TensorInfo {
     pub byte_len: u64,
 }
 
-/// Parse the single shard's JSON header (never reads tensor data);
-/// entries come back name-sorted.
+/// Parse the shard's JSON header, name-sorted; no tensor data is read.
 pub fn tensor_inventory(model_dir: &Path) -> LibQuestResult<Vec<TensorInfo>> {
     let mut file = fs::File::open(model_dir.join("model.safetensors"))?;
     let mut len_bytes = [0u8; 8];
@@ -55,8 +54,7 @@ pub fn tensor_inventory(model_dir: &Path) -> LibQuestResult<Vec<TensorInfo>> {
     Ok(tensors)
 }
 
-/// Mmap the shard into a VarBuilder at the requested dtype/device.
-/// Tensors materialize lazily per get().
+/// Mmap the shard into a VarBuilder; tensors materialize per get().
 pub fn mmap_weights(
     model_dir: &Path,
     dtype: candle_core::DType,

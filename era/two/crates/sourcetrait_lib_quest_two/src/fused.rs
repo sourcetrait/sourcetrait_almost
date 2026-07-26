@@ -1,23 +1,7 @@
-//! GdnChainFusion building blocks: the fused gated-delta decode step -
-//! the per-token recurrence (decay, kv memory, delta, state update,
-//! y readout) as ONE raw nvrtc kernel over the f32 [heads, dk, dv]
-//! state IN PLACE, replacing the ~7-kernel candle chain per GDN layer
-//! per step. Raw pointer args on the model's own stream, operands
-//! addressed at their layout offsets (the offset-leak lock) -
-//! capture-legal exactly like slot_write.
-//!
-//! Numerics: the same per-element math as gdn::recurrent_step with two
-//! deliberate reassociations - the decay fold (decay * sum(state * k)
-//! for sum((state * decay) * k)) and serial in-thread reductions over
-//! dk (candle sums tree-wise) - so cuda readings move within the bf16
-//! envelope class; the cpu path never dispatches here and stays
-//! bit-stable by construction.
+//! The fused gated-delta decode kernels, and the norms around them.
 use crate::*;
 
-/// One block per head, one thread per value column: pass 1 reduces the
-/// kv memory for column j, pass 2 updates the state column in place
-/// and reduces the y readout. packed rows are q | k | v | decay | beta
-/// (2*dk + dv + 2 columns).
+/// The decode-family kernel source, compiled once per process.
 const KERNEL_SRC: &str = r#"
 extern "C" __global__ void gdn_fused_step_f32(
     float* state,
@@ -264,17 +248,10 @@ fn kernel(
     }
 }
 
-/// The norm kernels' block width (power of two - the tree reduction
-/// requires it; shared memory is one f32 per thread).
+/// The norm kernels' block width; a power of two for the reduction.
 const NORM_BLOCK: u32 = 256;
 
-/// `state.inplace_op3(&packed, &y, &GdnFusedStep)`: state
-/// (heads, dk, dv) f32 updated IN PLACE; packed
-/// (heads, 2*dk + dv + 2) f32 rows q | k | v | decay | beta; y
-/// (heads, dv) f32 - WRITTEN by the kernel (the third operand is an
-/// output; candle tensors mutate through shared storage by design,
-/// same as slice_set). All f32, all contiguous, all addressed at
-/// their layout offsets.
+/// `state.inplace_op3(&packed, &y, &GdnFusedStep)`; y is an output.
 pub(crate) struct GdnFusedStep;
 
 impl candle_core::InplaceOp3 for GdnFusedStep {
@@ -362,11 +339,7 @@ impl candle_core::InplaceOp3 for GdnFusedStep {
     }
 }
 
-/// `out.inplace_op3(&x, &weight, &RmsNormFused { eps })`: out and x
-/// (rows, columns) bf16, weight (columns,) bf16; the whole
-/// cast/sqr/mean/rsqrt/normalize/weight chain in one launch per call,
-/// one rounding to bf16 at the store (the classic chain rounds normed
-/// before the weight mul - an envelope-class reassociation).
+/// `out.inplace_op3(&x, &weight, &RmsNormFused { eps })`, all bf16.
 pub(crate) struct RmsNormFused {
     pub(crate) eps: f32,
 }
@@ -453,13 +426,7 @@ impl candle_core::InplaceOp3 for RmsNormFused {
     }
 }
 
-/// `out.inplace_op3(&tail, &packed, &ConvStepFused)`: out (1, C)
-/// bf16; tail (3, C) f32 - READ AND ROTATED IN PLACE inside the
-/// launch (the second operand is mutated; candle tensors mutate
-/// through shared storage by design, and the tail buffer's address
-/// stability is the graph-capture contract anyway); packed (5, C)
-/// bf16 rows x | w0 | w1 | w2 | w3 (the conv weight prestored
-/// row-major per layer, the x row catted per step).
+/// `out.inplace_op3(&tail, &packed, &ConvStepFused)`; the tail rotates.
 pub(crate) struct ConvStepFused;
 
 impl candle_core::InplaceOp3 for ConvStepFused {
@@ -543,11 +510,7 @@ impl candle_core::InplaceOp3 for ConvStepFused {
     }
 }
 
-/// `out.inplace_op3(&packed, &weight, &RmsNormGatedFused { eps })`:
-/// out (heads, dv) bf16, packed (heads, 2 * dv) f32 rows y | gate
-/// (gate pre-upcast; y raw f32 from the fused step - the classic
-/// path's y->bf16 round-trip before the variance disappears), weight
-/// (dv,) bf16. Norm-then-gate with silu in f32, one rounding out.
+/// `out.inplace_op3(&packed, &weight, &RmsNormGatedFused { eps })`.
 pub(crate) struct RmsNormGatedFused {
     pub(crate) eps: f32,
 }
@@ -634,14 +597,7 @@ impl candle_core::InplaceOp3 for RmsNormGatedFused {
     }
 }
 
-/// `packed.inplace_op3(&conv_out, &dyn_row, &HeadPrepFused { .. })`:
-/// packed (heads, 2*dk + dv + 2) f32 - WRITTEN (the GdnFusedStep
-/// operand, q | k | v | decay | beta; candle tensors mutate through
-/// shared storage by design); conv_out (1, 2*key + value) bf16 (the
-/// decode conv tap's output row); dyn_row (1, 4 * heads) bf16
-/// columns a | b | A_log | dt_bias (the two gemv outputs catted
-/// with the layer's packed static). Geometry-locked to dk 96 /
-/// dv 192; all contiguous, all addressed at their layout offsets.
+/// `packed.inplace_op3(&conv_out, &dyn_row, &HeadPrepFused { .. })`.
 pub(crate) struct HeadPrepFused {
     pub(crate) q_scale: f32,
     pub(crate) beta_scale: f32,

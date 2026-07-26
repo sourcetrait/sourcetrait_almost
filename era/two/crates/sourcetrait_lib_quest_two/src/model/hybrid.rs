@@ -1,13 +1,4 @@
-//! The era-two hybrid model driver over the 32 layers (24 pre-norm
-//! GDN + 8 post-norm NoPE attention): forward_all (stateless
-//! whole-sequence, the parity instrument), the carried forward_chunk
-//! path (chunked prefill + decode over the layers' internal caches),
-//! the KvEviction compaction epochs, and the GraphDecode staged path
-//! that CUDA graphs capture and replay.
-//!
-//! The recurrence and its gates ride f32 regardless of model dtype
-//! (the pinned upstream discipline); attention softmax computes in
-//! f32 and casts back.
+//! The hybrid model driver over its 24 GDN and 8 attention layers.
 use crate::*;
 
 enum Layer {
@@ -15,29 +6,18 @@ enum Layer {
     Attn(AttnLayer),
 }
 
-/// SpeculationPort: the pre-verification cache mark. Attention rows
-/// are prefix-correct, so acceptance is a length reset recorded
-/// here; the GDN caches are cumulative, so the mark shadows them per
-/// layer and arms the rule-input capture - a partial accept restores
-/// the shadows and re-advances from the captured rows (spec_accept).
+/// The pre-verification cache mark a speculation round accepts against.
 pub(crate) struct SpecMark {
     pub(crate) context_len: usize,
 }
 
-/// The public handle mark_context returns (an opaque wrapper over the
-/// speculation mark).
+/// The public handle mark_context returns.
 pub struct ContextMark(SpecMark);
 
-/// The margin a graph arm pre-reserves past the live length when the
-/// sample budget exceeds it (the 32768 default budget would
-/// otherwise pre-grow gigabytes a typical decode never touches).
+/// The margin a graph arm pre-reserves past the live length.
 const RESERVE_DECODE_MARGIN: usize = 256;
 
-/// The era-two hybrid model: forward_all (stateless whole-sequence,
-/// the parity instrument) plus the carried forward_chunk path
-/// (chunked prefill + decode over the layers' internal caches), and,
-/// under settings.graph on a cuda build, the staged decode path that
-/// CUDA graphs capture and replay.
+/// The era-two hybrid model and its three forward paths.
 pub struct OlmoHybrid {
     embed_tokens: candle_core::Tensor,
     layers: Vec<Layer>,
@@ -89,8 +69,6 @@ impl OlmoHybrid {
                 )?),
             });
         }
-        // PrefillScratchReuse: one shared pool serves every GDN
-        // layer's fused prefill chunks (they run sequentially).
         #[cfg(feature = "cuda")]
         if settings.fused_prefill {
             let shared: fused_prefill::SharedPrefillScratch =
@@ -123,9 +101,7 @@ impl OlmoHybrid {
         &self.settings
     }
 
-    /// All-position logits for one unbatched id sequence: [T] u32 in,
-    /// [T, vocab] out in the model dtype (row r predicts token r+1).
-    /// STATELESS - never touches the carried caches.
+    /// All-position logits for one sequence; STATELESS by construction.
     pub fn forward_all(
         &self,
         input_ids: &candle_core::Tensor,
@@ -143,10 +119,7 @@ impl OlmoHybrid {
         Ok(self.lm_head.forward(&hidden)?)
     }
 
-    /// The carried advance every chunk form shares: embed, the layer
-    /// loop (offset causal mask for multi-token chunks; decode t == 1
-    /// is mask-free), context-length advance, park collection. Returns
-    /// the post-layer hidden [t, hidden] BEFORE the final norm.
+    /// The carried advance every chunk form shares, before the norm.
     fn advance_chunk(
         &mut self,
         input_ids: &candle_core::Tensor,
@@ -174,15 +147,7 @@ impl OlmoHybrid {
         Ok(hidden)
     }
 
-    /// FlashMaskSkip: whether a multi-token carried chunk needs the
-    /// additive mask tensor. The flash prefill dispatch takes
-    /// causality as a kernel parameter and never reads the tensor,
-    /// so an all-flash forward skips the host-side mask build (~2 GB
-    /// of fills, uploads, and casts across a 32K prefill). Eager
-    /// grades (cpu, f32, feature-off, flash disarmed) and a
-    /// profile-armed pass keep it; the eager path hard-errors on a
-    /// missing multi-token mask rather than attending
-    /// full-visibility.
+    /// Whether a multi-token carried chunk needs the mask tensor built.
     fn needs_prefill_mask(&self) -> bool {
         #[cfg(feature = "attn-profile")]
         {
@@ -203,11 +168,7 @@ impl OlmoHybrid {
         !flash_covers
     }
 
-    /// One CARRIED forward over the next chunk of the context: [t] u32
-    /// in, [t, vocab] all-position logits out; every layer's cache
-    /// (GDN state + conv tails, attention KV) advances by t. Decode is
-    /// t == 1 (mask-free); prefill chunks any t. Chunk boundaries are
-    /// logit-exact to f32 rounding against the stateless path.
+    /// One CARRIED forward over the next chunk, advancing every cache.
     pub fn forward_chunk(
         &mut self,
         input_ids: &candle_core::Tensor,
@@ -218,12 +179,7 @@ impl OlmoHybrid {
         Ok(self.lm_head.forward(&hidden)?)
     }
 
-    /// PrefillLogitsSkip: the final-prefill-chunk form - advance, then
-    /// norm + head over the LAST row alone -> [1, vocab]. Per-row math
-    /// (RMSNorm and the head are row-independent), so the row is
-    /// value-identical to forward_chunk's last row at f32; bf16 kernel
-    /// shapes differ (1-row vs t-row gemm) - kin-class deltas ride the
-    /// gates.
+    /// The final-chunk form: advance, then norm and head on one row.
     pub fn forward_chunk_last(
         &mut self,
         input_ids: &candle_core::Tensor,
@@ -236,9 +192,7 @@ impl OlmoHybrid {
         Ok(self.lm_head.forward(&last)?)
     }
 
-    /// PrefillLogitsSkip: the intermediate-prefill-chunk form - the
-    /// caches advance, no logits are computed (no norm, no head) -
-    /// where the skipped head traffic lives.
+    /// The intermediate-chunk form: caches advance, no logits at all.
     pub fn forward_chunk_carry(
         &mut self,
         input_ids: &candle_core::Tensor,
@@ -247,10 +201,7 @@ impl OlmoHybrid {
         Ok(())
     }
 
-    /// Collect the layers' park latches: a grow replaced
-    /// ever-captured KV buffers, so every cached graph is stale and
-    /// capture retires for this Model (one parked buffer set per
-    /// lifetime stays the bound).
+    /// Collect the layers' park latches, retiring capture if any fired.
     #[cfg(feature = "cuda")]
     fn contain_parked_grows(&mut self) {
         let mut parked = false;
@@ -274,10 +225,7 @@ impl OlmoHybrid {
     #[cfg(not(feature = "cuda"))]
     fn contain_parked_grows(&mut self) {}
 
-    /// Reset every carried cache (GDN states, conv tails, attention
-    /// KV) and the context length; the next forward_chunk starts a
-    /// fresh context. A staged graph stage disarms (an epoch) - its
-    /// buffers and cached graphs survive for the next arm.
+    /// Reset every carried cache and the context length.
     pub fn clear_cache(&mut self) -> LibQuestResult<()> {
         for layer in &mut self.layers {
             match layer {
@@ -293,15 +241,7 @@ impl OlmoHybrid {
         Ok(())
     }
 
-    /// Known-length KV pre-reserve (generate calls this before its
-    /// prefill loop): one allocation at EXACTLY prompt + decode
-    /// margin, instead of ~one regrow per reserve step of prefill -
-    /// each regrow holds old+new buffers during its copy and frees an
-    /// odd-sized block into the raw cudaMalloc heap (the
-    /// fragmentation that inflates the 32K peak). ReserveGrainTrim:
-    /// with no regrows to amortize, the KV_RESERVE_STEP rounding was
-    /// pure padding (~170-235 MiB at 32K). A decode outrunning the
-    /// margin regrows coarsely as before.
+    /// The known-length KV pre-reserve: one allocation for the run.
     pub fn reserve_for_generation(&mut self, prompt_tokens: usize) -> LibQuestResult<()> {
         let device = self.device().clone();
         let dtype = self.embed_tokens.dtype();
@@ -320,13 +260,7 @@ impl OlmoHybrid {
         self.context_len
     }
 
-    /// PrefixSnapshots: persist every carried cache (GDN state + conv
-    /// tails, attention KV narrowed to the live length) plus the
-    /// consumed-id trail as ONE safetensors file at the resolved
-    /// token; returns the written path. Settings-agnostic - state is
-    /// state (an eviction-compacted store saves as-is; the last-pass
-    /// scores are never persisted). The trail must cover context_len
-    /// (equal in the exact configuration, longer after compaction).
+    /// Persist every carried cache plus the id trail as one file.
     pub fn snapshot_caches(
         &self,
         snapshots_dir: &Path,
@@ -374,13 +308,7 @@ impl OlmoHybrid {
         Ok(path)
     }
 
-    /// PrefixSnapshots: load a saved context into the carried caches
-    /// at the resolved token. Format validation (version, model id,
-    /// trail) rides the read; layer geometry and the model dtype
-    /// validate here; writes land in place (GDN) or through the
-    /// park-aware reserve (attention KV). An armed graph stage
-    /// disarms (a restore is a clear-class epoch; the next arm
-    /// revalidates).
+    /// Load a saved context into the carried caches, validating geometry.
     pub fn restore_caches(
         &mut self,
         snapshots_dir: &Path,
@@ -427,11 +355,7 @@ impl OlmoHybrid {
         })
     }
 
-    /// A public carried-context mark for shared-prefix scoring loops
-    /// (the bquest capability runner's MC continuations): shadow the GDN
-    /// caches, record the length; rewind with rollback_context. The
-    /// same classic-path-only constraints as speculation apply (never
-    /// under an armed graph; eviction never fires outside generate()).
+    /// A carried-context mark for shared-prefix scoring loops.
     pub fn mark_context(&mut self) -> LibQuestResult<ContextMark> {
         Ok(ContextMark(self.spec_mark()?))
     }
@@ -441,9 +365,7 @@ impl OlmoHybrid {
         self.spec_rollback(&mark.0)
     }
 
-    /// SpeculationPort: shadow every GDN layer's carried caches, arm
-    /// their rule-input captures (shadow_save), and record the live
-    /// length - the mark a verification forward accepts against.
+    /// Shadow every GDN cache, arm its capture, record the length.
     pub(crate) fn spec_mark(&mut self) -> LibQuestResult<SpecMark> {
         for layer in &mut self.layers {
             if let Layer::Gdn(gdn) = layer {
@@ -455,12 +377,7 @@ impl OlmoHybrid {
         })
     }
 
-    /// SpeculationPort: the FULL rewind to the mark - GDN shadows
-    /// restore in place (their captures release), attention KV
-    /// lengths and the context length reset (rows past the mark
-    /// become invisible). Partial accepts ride spec_accept instead.
-    /// Classic-path only by construction (speculation never arms
-    /// graphs and refuses eviction).
+    /// The FULL rewind to a mark; partial accepts ride spec_accept.
     pub(crate) fn spec_rollback(&mut self, mark: &SpecMark) -> LibQuestResult<()> {
         for layer in &mut self.layers {
             match layer {
@@ -479,16 +396,7 @@ impl OlmoHybrid {
         Ok(())
     }
 
-    /// KernelAccept: the 1-pass partial accept - keep the verify
-    /// chunk's accepted-prefix work instead of replaying it. The
-    /// accepted-prefix rows of a verify chunk compute identically to
-    /// a plain advance (causal attention + recurrence order), so the
-    /// attention KV rows written during the verify ARE the accepted
-    /// rows - acceptance is a length reset to mark + consumed with
-    /// zero recompute - while the cumulative GDN caches restore
-    /// their shadows and re-advance over the captured rule inputs
-    /// (no projections, no weight traffic). Classic-path only, like
-    /// every speculation surface.
+    /// The one-pass partial accept: keep the verify chunk's own work.
     pub(crate) fn spec_accept(
         &mut self,
         mark: &SpecMark,
@@ -511,8 +419,7 @@ impl OlmoHybrid {
         Ok(())
     }
 
-    /// KernelAccept: a full accept keeps every cache row as-is; the
-    /// round's captured rule inputs release.
+    /// A full accept keeps every cache row; the captures release.
     pub(crate) fn spec_release(&mut self) {
         for layer in &mut self.layers {
             if let Layer::Gdn(gdn) = layer {
@@ -521,9 +428,7 @@ impl OlmoHybrid {
         }
     }
 
-    /// KvEviction keep-sets from the live last-pass scores, one per
-    /// attention layer (host-side ranking; per-head sets, all
-    /// decode_cap long).
+    /// Keep-sets from the live last-pass scores, one per layer.
     fn evict_keep_sets(
         &self,
         evict: &EvictionSettings,
@@ -554,12 +459,7 @@ impl OlmoHybrid {
         Ok(sets)
     }
 
-    /// KvEviction: the one-shot post-prefill compaction (generate
-    /// calls this between prefill and graph arming): rank by the
-    /// FINAL scoring pass (the question window), compact every
-    /// attention layer to the cap, and - buffers never yet captured -
-    /// SHRINK them to the decode-bounded capacity, cashing the
-    /// KV-residency win. GDN layers are untouched (constant state).
+    /// The one-shot post-prefill compaction, shrinking the buffers.
     pub(crate) fn evict_post_prefill(
         &mut self,
         evict: &EvictionSettings,
@@ -568,11 +468,6 @@ impl OlmoHybrid {
             return Ok(());
         }
         let keep_sets = self.evict_keep_sets(evict)?;
-        // Overflow epochs bound decode length at cap + slack, so this
-        // capacity never regrows classic; a graph arm may pre-grow it
-        // once more (pre-capture, a cap-sized copy - trivial).
-        // ReserveGrainTrim: exact - the grain rounding was pure
-        // padding here too.
         let capacity = evict.decode_cap + evict::OVERFLOW_SLACK + RESERVE_DECODE_MARGIN;
         let mut sets = keep_sets.into_iter();
         for layer in &mut self.layers {
@@ -585,11 +480,7 @@ impl OlmoHybrid {
         Ok(())
     }
 
-    /// A decode-overflow re-compaction epoch (uncaptured host work
-    /// between steps): pack the store back to the cap IN PLACE (every
-    /// baked address stays alive) and re-point an armed graph stage's
-    /// mask at the shrunk length (stale columns re-hide; the bucket
-    /// is unchanged, so the same captured graph replays on).
+    /// A decode-overflow re-compaction epoch, packing in place.
     pub(crate) fn evict_overflow(&mut self, evict: &EvictionSettings) -> LibQuestResult<()> {
         let keep_sets = self.evict_keep_sets(evict)?;
         let mut sets = keep_sets.into_iter();
@@ -609,10 +500,7 @@ impl OlmoHybrid {
         Ok(())
     }
 
-    /// Arm the DensityProfile observation pass on every attention
-    /// layer; `window` is the recency width the middle-mass metric
-    /// excludes. Armed attention runs the sliced eager path (flash
-    /// never dispatches).
+    /// Arm the density observation pass on every attention layer.
     #[cfg(feature = "attn-profile")]
     pub fn arm_attn_profile(&mut self, window: usize) {
         for layer in &mut self.layers {
@@ -623,8 +511,7 @@ impl OlmoHybrid {
         }
     }
 
-    /// Collect + disarm the observation pass; reports carry absolute
-    /// layer indices.
+    /// Collect and disarm; reports carry absolute layer indices.
     #[cfg(feature = "attn-profile")]
     pub fn take_attn_profile(&mut self) -> Vec<profile::LayerProfile> {
         let mut reports = Vec::new();
@@ -643,9 +530,7 @@ impl OlmoHybrid {
         self.embed_tokens.device()
     }
 
-    /// The uniform attention KV length graph staging derives from
-    /// (uniform by construction - every layer sees every token;
-    /// asserted at arming).
+    /// The uniform attention KV length graph staging derives from.
     #[cfg(feature = "cuda")]
     fn graph_kv_state(&self) -> LibQuestResult<(usize, usize)> {
         let mut kv_len: Option<usize> = None;
@@ -670,11 +555,7 @@ impl OlmoHybrid {
         Ok((kv_len, capacity))
     }
 
-    /// GraphDecode: arm the staged graph-mode decode path (generate()
-    /// calls this after prefill). Pre-grows every attention layer's KV
-    /// once to the run's bucket ceiling - so later bucket crossings
-    /// never reallocate under a captured graph - then builds or
-    /// re-arms the staged buffers from the live cache state.
+    /// Arm the staged graph decode path, pre-growing KV to its ceiling.
     #[cfg(feature = "cuda")]
     pub(crate) fn arm_graph_decode(&mut self, expected_total: usize) -> LibQuestResult<()> {
         snafu::ensure_whatever!(
@@ -690,9 +571,6 @@ impl OlmoHybrid {
             self.context_len
         );
         let grain = self.settings.graph_bucket_grain;
-        // The run ceiling: the sample budget's contribution clamps to
-        // the reserve margin; a decode that outruns the armed
-        // capacity falls to the classic path (the capacity epoch).
         let ceiling = expected_total
             .min(kv_len + 1 + RESERVE_DECODE_MARGIN)
             .max(kv_len + 1);
@@ -724,15 +602,13 @@ impl OlmoHybrid {
         Ok(())
     }
 
-    /// Non-cuda builds carry no graph path; arming is a hard error
-    /// (settings.graph is already rejected at Model::new).
+    /// Non-cuda builds carry no graph path; arming is a hard error.
     #[cfg(not(feature = "cuda"))]
     pub(crate) fn arm_graph_decode(&mut self, _expected_total: usize) -> LibQuestResult<()> {
         snafu::whatever!("this build carries no cuda support (decode graphs need --features cuda)")
     }
 
-    /// Whether the staged graph-mode decode path is armed for the
-    /// current cache state.
+    /// Whether the staged decode path is armed for this cache state.
     #[cfg(feature = "cuda")]
     pub(crate) fn graph_armed(&self) -> bool {
         self.graph_stage.as_ref().is_some_and(|stage| stage.armed)
@@ -743,8 +619,7 @@ impl OlmoHybrid {
         false
     }
 
-    /// Gate-side switch between capture+replay and uncaptured staged
-    /// stepping (the gates' reference legs); dead outside test builds.
+    /// The gates' switch between capture-replay and uncaptured stepping.
     #[cfg(feature = "cuda")]
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn set_graph_capture(&mut self, enabled: bool) -> LibQuestResult<()> {
@@ -761,19 +636,13 @@ impl OlmoHybrid {
         snafu::whatever!("this build carries no cuda support (decode graphs need --features cuda)")
     }
 
-    /// GraphDecode capacity epoch: when the next staged append would
-    /// exceed the armed KV capacity, disarm and retire capture for
-    /// this Model - the remaining steps take the classic path, whose
-    /// append growth applies the park containment.
+    /// The capacity epoch: disarm when the next append would overrun.
     #[cfg(feature = "cuda")]
     pub(crate) fn graph_disarm_when_full(&mut self) -> LibQuestResult<()> {
         if !self.graph_armed() {
             return Ok(());
         }
         let (kv_len, capacity) = self.graph_kv_state()?;
-        // The BUCKET the next step needs is the binding width (it
-        // rounds up by the grain, so it can overshoot a capacity the
-        // grain does not divide before the raw length would).
         let next_bucket = graph::bucket_for(kv_len + 1, self.settings.graph_bucket_grain);
         if next_bucket > capacity {
             self.flush_captured_graphs();
@@ -791,8 +660,7 @@ impl OlmoHybrid {
         Ok(())
     }
 
-    /// Drop every captured decode graph (the staged buffers and masks
-    /// stay) and trim the driver's cached graph pools.
+    /// Drop every captured graph and trim the driver's cached pools.
     #[cfg(feature = "cuda")]
     pub(crate) fn flush_captured_graphs(&mut self) {
         if let Some(stage) = &mut self.graph_stage {
@@ -805,10 +673,7 @@ impl OlmoHybrid {
     #[allow(dead_code)]
     pub(crate) fn flush_captured_graphs(&mut self) {}
 
-    /// One staged decode step: consume `token`, return the persistent
-    /// (1, vocab) f32 logits buffer (valid until the next step
-    /// overwrites it). Host bookkeeping (KV lengths, context length)
-    /// advances in lockstep with the device writes.
+    /// One staged decode step, returning the persistent logits buffer.
     #[cfg(feature = "cuda")]
     pub(crate) fn graph_decode_step(
         &mut self,
@@ -819,8 +684,6 @@ impl OlmoHybrid {
             Some(stage) => stage,
             None => snafu::whatever!("graph decode step without an armed stage"),
         };
-        // Run the step with the stage held out, then ALWAYS put it
-        // back - an error must not destroy the persistent staging.
         let step_result = self.graph_step_with(&mut stage, token, kv_len);
         let out = stage.logits_out.clone();
         self.graph_stage = Some(stage);
@@ -842,10 +705,7 @@ impl OlmoHybrid {
         snafu::whatever!("this build carries no cuda support (decode graphs need --features cuda)")
     }
 
-    /// One staged step against a held-out stage: stage the dynamics,
-    /// then either replay the bucket's captured graph (capturing it
-    /// first if uncached) or run the sequence as ordinary ops (the
-    /// uncaptured reference mode).
+    /// One staged step against a held-out stage: replay, or capture.
     #[cfg(feature = "cuda")]
     fn graph_step_with(
         &mut self,
@@ -870,15 +730,8 @@ impl OlmoHybrid {
                 }
             }
             None => {
-                // First step at this bucket: the capture's WARMUP run
-                // performs this step's real work (and populates
-                // candle's param cache); the recording that follows
-                // only records - launching here would execute the
-                // step twice.
                 let captured = self.capture_decode_graph(stage)?;
                 stage.graphs.insert(key, captured);
-                // The KV buffers are baked into a captured graph now:
-                // their eventual replacement must PARK them.
                 for layer in self.layers.iter_mut() {
                     if let Layer::Attn(attn) = layer {
                         attn.buffers_captured = true;
@@ -889,17 +742,7 @@ impl OlmoHybrid {
         Ok(())
     }
 
-    /// Capture the current bucket's decode sequence into an
-    /// instantiated CUDA graph on candle's created stream. The pinned
-    /// recipe: hold candle's param-cache guard, WARMUP-run the
-    /// sequence uncaptured (populating the content-keyed dims/strides
-    /// cache, whose miss during active capture is a designed hard
-    /// error, and performing this step's real work), then record; the
-    /// recording performs no work and its intermediates drop as
-    /// in-graph free nodes. THREAD_LOCAL capture fails loudly on
-    /// capture-illegal calls from this thread; AUTO_FREE_ON_LAUNCH is
-    /// the relaunch semantic for in-graph memory nodes, and the exec
-    /// is pre-uploaded explicitly (UPLOAD is WithParams-only).
+    /// Capture this bucket's decode sequence into a CUDA graph.
     #[cfg(feature = "cuda")]
     fn capture_decode_graph(
         &mut self,
@@ -911,7 +754,6 @@ impl OlmoHybrid {
         };
         let stream = cuda_device.cuda_stream();
         let _htod_cache = cuda_device.enable_cuda_graph_htod_cache();
-        // Warmup: the real step, param cache populated.
         self.graph_forward_sequence(stage)?;
         if let Err(error) = stream.begin_capture(
             cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL,
@@ -934,12 +776,7 @@ impl OlmoHybrid {
         Ok(graph)
     }
 
-    /// The captured region: embed -> layers -> norm -> lm_head -> f32
-    /// cast -> the persistent logits_out write. GDN layers run their
-    /// classic t=1 carried step (fixed shapes, in-place state - the
-    /// captured form by construction); attention layers run the
-    /// staged bucket form. Every per-step value rides a staged
-    /// buffer; no host constant is baked.
+    /// The captured region, from embedding to the logits write.
     #[cfg(feature = "cuda")]
     fn graph_forward_sequence(
         &mut self,

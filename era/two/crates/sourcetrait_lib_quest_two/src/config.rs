@@ -1,14 +1,4 @@
-//! The suite's -d/-c/-s profile framework: core model types stay
-//! format-free, serde TOML shells bridge via TryFrom (a future format
-//! adds a shell without touching the core model), and profiles are
-//! DIRECTORIES holding one file per suite component (lib/cli/tui/
-//! tool/baseline .toml) under config/ and settings/ roots.
-//!
-//! Name rules: `defaults` is reserved for the embedded base every
-//! load merges onto; `default` is the user's standing profile - the
-//! implied choice when no token is given, falling back to the
-//! embedded base when its file is absent. Any other explicit token
-//! errors when missing.
+//! The suite's profile framework: config and settings, by directory.
 use crate::*;
 
 /// The embedded base (the reserved `defaults` profile), one per kind.
@@ -20,8 +10,7 @@ const DEFAULT_PROFILE: &str = "default";
 /// The reserved embedded-base profile name (never touches the fs).
 const DEFAULTS_PROFILE: &str = "defaults";
 
-/// A $VAR value for path expansion; the XDG family falls back per
-/// the basedir spec when unset, anything else errors.
+/// A $VAR value for path expansion; the XDG family has spec fallbacks.
 fn xdg_or_env(name: &str) -> LibQuestResult<String> {
     if let Ok(value) = env::var(name)
         && !value.is_empty()
@@ -43,9 +32,7 @@ fn xdg_or_env(name: &str) -> LibQuestResult<String> {
     }
 }
 
-/// Expand a path STRING's leading `~` (HOME) or `$VAR` segment so
-/// config files carry portable strings; other paths pass through
-/// literally.
+/// Expand a path string's leading `~` or `$VAR` segment.
 pub(crate) fn expand_path(raw: &str) -> LibQuestResult<PathBuf> {
     if let Some(rest) = raw.strip_prefix("~") {
         let Ok(home) = env::var("HOME") else {
@@ -73,9 +60,7 @@ fn suite_config_root() -> LibQuestResult<PathBuf> {
     Ok(config_home()?.join(consts::SUITE_CONFIG_RELATIVE))
 }
 
-/// A -c/-s token is a profile NAME when it is a pure snake; anything
-/// else is a filesystem path (snapshot tokens share the same snake
-/// rule).
+/// A token is a profile NAME when it is a pure snake, else a path.
 pub(crate) fn is_profile_name(token: &Path) -> bool {
     let Some(text) = token.to_str() else {
         return false;
@@ -86,17 +71,11 @@ pub(crate) fn is_profile_name(token: &Path) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
-/// A resolved config-profile DIRECTORY; the component accessors name
-/// the file inside it. A pure-snake token resolves under the suite's
-/// XDG config root (config/<name>); any other token is used as the
-/// directory itself. Exact component-FILE tokens bypass profiles
-/// entirely (the load fns take them directly).
+/// A resolved config-profile DIRECTORY; accessors name its files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigProfile(PathBuf);
 
-/// The shared -c token resolution (coherence forbids one generic
-/// TryFrom<P: AsRef<Path>> beside std's blanket, so the concrete
-/// impls below each delegate here).
+/// The shared config-token resolution the TryFrom impls delegate to.
 fn resolve_config_profile(token: &Path) -> LibQuestResult<ConfigProfile> {
     if is_profile_name(token) {
         Ok(ConfigProfile(
@@ -140,9 +119,7 @@ impl TryFrom<String> for ConfigProfile {
 }
 
 impl ConfigProfile {
-    /// Resolve against a custom root (-d) instead of the XDG config
-    /// root: <dir>/config/<name> for a snake, the token as-is
-    /// otherwise.
+    /// Resolve a name against a custom root instead of the XDG one.
     pub fn try_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(
         dir: P1,
         token: P2,
@@ -184,13 +161,11 @@ impl ConfigProfile {
     }
 }
 
-/// A resolved settings-profile DIRECTORY (the settings/ sibling of
-/// ConfigProfile; same token rules).
+/// A resolved settings-profile DIRECTORY, the ConfigProfile sibling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsProfile(PathBuf);
 
-/// The shared -s token resolution (the same concrete-impl shape as
-/// ConfigProfile, for the same coherence reason).
+/// The shared settings-token resolution, shaped like the config one.
 fn resolve_settings_profile(token: &Path) -> LibQuestResult<SettingsProfile> {
     if is_profile_name(token) {
         Ok(SettingsProfile(
@@ -234,9 +209,7 @@ impl TryFrom<String> for SettingsProfile {
 }
 
 impl SettingsProfile {
-    /// Resolve against a custom root (-d) instead of the XDG config
-    /// root: <dir>/settings/<name> for a snake, the token as-is
-    /// otherwise.
+    /// Resolve a name against a custom root instead of the XDG one.
     pub fn try_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(
         dir: P1,
         token: P2,
@@ -278,10 +251,7 @@ impl SettingsProfile {
     }
 }
 
-/// The lib component's config file shape (TOML format layer).
-/// models_dir/snapshots_dir are STRINGS so files stay portable - a
-/// leading `~` or `$VAR` expands at load (the XDG family with spec
-/// fallbacks).
+/// The lib component's config file shape (the TOML format layer).
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LibConfigToml {
@@ -292,16 +262,7 @@ pub struct LibConfigToml {
     pub adapter: Option<String>,
 }
 
-/// The lib component's GENERAL OPERATION - the stable choices: the
-/// checkpoint as an author-qualified coordinate (`author/name`,
-/// joined beneath models_dir), where models live (models_dir defaults
-/// to the XDG data-home models root), where snapshots live
-/// (snapshots_dir defaults to the XDG cache-home snapshots root -
-/// snapshots are regenerable), and the optional ADAPTER (a trained
-/// artifact token under adapters_dir, the snapshot-token tiers;
-/// None = the plain base load, bit-exact by omission - AdapterLoad).
-/// Nuance and tweaks (flash, graphs, the generation posture) are
-/// LibSettings.
+/// The lib component's GENERAL OPERATION - the stable choices.
 #[derive(Debug, Clone)]
 pub struct LibConfig {
     pub model: String,
@@ -339,8 +300,7 @@ impl TryFrom<LibConfigToml> for LibConfig {
 }
 
 impl LibConfig {
-    /// The configured checkpoint's directory: the author-qualified
-    /// coordinate joined beneath the models home.
+    /// The configured checkpoint's directory under the models home.
     pub fn model_dir(&self) -> PathBuf {
         self.models_dir.join(&self.model)
     }
@@ -355,25 +315,19 @@ impl Default for LibConfig {
 }
 
 impl LibConfig {
-    /// Load from an explicit component-toml file path; an absent file
-    /// is an error (explicit tokens never fall back).
+    /// Load an explicit component-toml path; an absent file errors.
     pub fn from_config_path(path: &Path) -> LibQuestResult<Self> {
         let text = fs::read_to_string(path)?;
         let shell: LibConfigToml = toml::from_str(&text)?;
         shell.try_into()
     }
 
-    /// Resolve + load per the -c token rules against the XDG root:
-    /// None -> the `default` profile (absent file falls to the
-    /// embedded base); `defaults` -> the embedded base alone; another
-    /// snake -> that profile's lib.toml (absent = error); a path ->
-    /// that component toml file (absent = error).
+    /// Resolve and load per the token rules against the XDG root.
     pub fn load<P: AsRef<Path>>(token: Option<P>) -> LibQuestResult<Self> {
         Self::load_from_dir(None::<&Path>, token)
     }
 
-    /// The -d variant of load: profile names resolve under `dir`
-    /// instead of the XDG config root; path tokens are unaffected.
+    /// The custom-root variant of load; path tokens are unaffected.
     pub fn load_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(
         dir: Option<P1>,
         token: Option<P2>,
@@ -407,10 +361,7 @@ impl LibConfig {
     }
 }
 
-/// The [eviction] table of a lib settings file: presence (with
-/// decode_cap) arms KvEviction stage-2-only attention-KV eviction;
-/// absent = the exact configuration, bit-identical to an
-/// eviction-free build.
+/// The [eviction] table; its presence with a cap is what arms eviction.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvictionToml {
@@ -421,15 +372,7 @@ pub struct EvictionToml {
     pub score_slice: Option<usize>,
 }
 
-/// Armed KvEviction stage-2-only eviction: one post-prefill
-/// compaction of every attention layer's KV to `decode_cap` rows per
-/// head (last-pass ranked, sink prefix + recent suffix protected),
-/// then overflow re-compactions as decode outgrows the cap.
-/// score_tail is the per-prefill-chunk observation window (tail
-/// queries per re-score pass; the RescoreTuning prefill-cost lever)
-/// and score_slice the query rows per scoring matmul (the
-/// peak-transient lever) - both riding the settings surface as the
-/// prototyping home while tuning.
+/// Armed eviction: the cap, its protected bands, and the two levers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvictionSettings {
     pub decode_cap: usize,
@@ -443,9 +386,7 @@ pub struct EvictionSettings {
 const EVICTION_RECENT_DEFAULT: usize = 512;
 const EVICTION_SINK_DEFAULT: usize = 4;
 
-/// Merge + validate the [eviction] table: a table without decode_cap
-/// is an error (stage-2-only surface - the cap IS the arm), and the
-/// cap must clear the protected rows.
+/// Merge and validate the [eviction] table; a capless table errors.
 fn merged_eviction(
     user: Option<EvictionToml>,
     base: Option<EvictionToml>,
@@ -491,10 +432,7 @@ fn merged_eviction(
     Ok(Some(settings))
 }
 
-/// The [generation] table of a lib settings file; every field
-/// optional (absent fields fall through the embedded base to the
-/// code defaults). greedy = true forces argmax by zeroing
-/// temperature and top_p, whatever else the file says.
+/// The [generation] table; absent fields fall through to the defaults.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationToml {
@@ -522,31 +460,21 @@ pub struct LibSettingsToml {
 }
 
 /// The lib component's NUANCE - the execution and posture tweaks.
-/// use_flash_attn arms the flash prefill dispatch where eligible (a
-/// flash-attn build on cuda at bf16/f16 - ineligible runs stay
-/// eager); graph arms CUDA-graph decode capture and
-/// graph_bucket_grain is its static attention-width grain (pad
-/// columns carry zero softmax mass - at most one grain of padded
-/// compute per step); generation is the sampling/budget posture.
 #[derive(Debug, Clone)]
 pub struct LibSettings {
     pub use_flash_attn: bool,
     pub graph: bool,
     pub graph_bucket_grain: usize,
-    /// The GdnChainFusion decode-step kernel (cuda decode only; the
-    /// cpu path always runs the classic candle chain).
+    /// The fused decode-step kernels; cuda decode only.
     pub fused_gdn: bool,
-    /// The PrefillDispatch chunk kernels (cuda multi-token prefill
-    /// chunks only; the cpu path and the stateless parity form always
-    /// run the classic candle chain).
+    /// The fused prefill kernels; cuda multi-token chunks only.
     pub fused_prefill: bool,
     pub generation: GenerateOptions,
-    /// KvEviction stage-2-only; None = the exact configuration.
+    /// None is the exact configuration, with no eviction at all.
     pub eviction: Option<EvictionSettings>,
 }
 
-/// Overlay chain per field: the user file, then the embedded base,
-/// then the code defaults; greedy wins over sampling params.
+/// Overlay per field: the user file, the embedded base, then code.
 fn merged_generation(user: GenerationToml, base: GenerationToml) -> GenerateOptions {
     let code = GenerateOptions::default();
     let greedy = user.greedy.or(base.greedy).unwrap_or(false);
@@ -601,22 +529,19 @@ impl Default for LibSettings {
 }
 
 impl LibSettings {
-    /// Load from an explicit component-toml file path; an absent file
-    /// is an error (explicit tokens never fall back).
+    /// Load an explicit component-toml path; an absent file errors.
     pub fn from_settings_path(path: &Path) -> LibQuestResult<Self> {
         let text = fs::read_to_string(path)?;
         let shell: LibSettingsToml = toml::from_str(&text)?;
         shell.try_into()
     }
 
-    /// Resolve + load per the -s token rules against the XDG root
-    /// (the same name rules as LibConfig::load).
+    /// Resolve and load per the same name rules as LibConfig::load.
     pub fn load<P: AsRef<Path>>(token: Option<P>) -> LibQuestResult<Self> {
         Self::load_from_dir(None::<&Path>, token)
     }
 
-    /// The -d variant of load: profile names resolve under `dir`
-    /// instead of the XDG config root; path tokens are unaffected.
+    /// The custom-root variant of load; path tokens are unaffected.
     pub fn load_from_dir<P1: AsRef<Path>, P2: AsRef<Path>>(
         dir: Option<P1>,
         token: Option<P2>,

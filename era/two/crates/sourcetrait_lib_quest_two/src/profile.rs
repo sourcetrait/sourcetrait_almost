@@ -1,14 +1,4 @@
-//! The A2 observation instrument (attn-profile feature): per-head
-//! attention-mass accumulation on the profile-armed attention path.
-//!
-//! Masses per query row at absolute position p, eligible when
-//! p >= window + 1 (so a middle exists): sink = column 0, recent = the
-//! trailing `window` columns [p-window+1, p], middle = everything
-//! between - a 3-way partition of each eligible row's unit mass
-//! (columns past p carry exactly zero softmax mass and fold into
-//! recent harmlessly). The armed path computes attention in row slices
-//! so the f32 softmax transient stays bounded at 32K; slicing is
-//! value-identical (row-independent ops).
+//! The attention-density observation instrument (attn-profile feature).
 use crate::*;
 
 /// Rows per profiled attention slice (the sliced-transient lever).
@@ -22,8 +12,7 @@ pub struct HeadMasses {
     pub recent: f64,
 }
 
-/// One attention layer's profile: per-head prefill and decode means
-/// plus the eligible-row counts behind them.
+/// One layer's per-head means, with the row counts behind them.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LayerProfile {
     pub layer_index: usize,
@@ -34,8 +23,7 @@ pub struct LayerProfile {
     pub decode: Vec<HeadMasses>,
 }
 
-/// Per-layer accumulator; lives on the layer while armed (interior
-/// mutability - attention runs under &self).
+/// Per-layer accumulator, living on the layer while armed.
 #[derive(Debug)]
 pub(crate) struct ProfileAccum {
     window: usize,
@@ -66,10 +54,7 @@ impl ProfileAccum {
         }
     }
 
-    /// Fold one probability slice in: probs [heads, rows, width] f32,
-    /// whose first row sits at absolute position `first_position`.
-    /// Decode rows (a 1-row slice at the live tail) accumulate into
-    /// the decode set; everything else is prefill.
+    /// Fold one probability slice into the prefill or decode set.
     pub(crate) fn accumulate(
         &mut self,
         probs: &candle_core::Tensor,
@@ -83,8 +68,6 @@ impl ProfileAccum {
             self.heads
         );
         let device = probs.device();
-        // Row eligibility + the recent-band threshold, host-built
-        // (rows-sized only; the column masks derive on device).
         let mut thresholds = Vec::with_capacity(rows);
         let mut eligible = Vec::with_capacity(rows);
         let mut eligible_rows = 0u64;
@@ -111,8 +94,6 @@ impl ProfileAccum {
         let columns = candle_core::Tensor::arange(0f32, width as f32, device)?
             .reshape((1, width))?;
 
-        // recent: column >= threshold; middle: 1 <= column < threshold.
-        // Integer-valued f32 arithmetic + clamp keeps the masks exact.
         let recent_mask = (columns.broadcast_sub(&thresholds)? + 1.0)?
             .clamp(0f64, 1f64)?
             .broadcast_mul(&eligible_col)?;

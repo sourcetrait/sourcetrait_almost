@@ -1,42 +1,24 @@
 //! The linear-attention (GDN) decoder layer - fully PRE-norm.
 use crate::*;
 
-/// A linear-attention (GDN) decoder layer - fully PRE-norm:
-/// h = x + mixer(input_layernorm(x)), then
-/// out = h + mlp(post_attention_layernorm(h)).
-/// Carries the StateCarry cross-chunk cache: the f32 recurrent state
-/// plus the three raw pre-conv tails (kernel-1 rows each, stored f32).
+/// A linear-attention (GDN) decoder layer, pre-norm on both halves.
 pub(crate) struct GdnLayer {
     input_layernorm: candle_core::Tensor,
     post_attention_layernorm: candle_core::Tensor,
-    /// q/k/v/g projections row-fused at load ([2*key + 2*value,
-    /// hidden]; row order q | k | v | g, so the first 2*key + value
-    /// columns of the output are exactly the batched conv's input).
-    /// a_proj/b_proj deliberately stay separate: folding them into
-    /// the fused gemv changes the gating scalars' accumulation order,
-    /// and that drift compounds through the recurrent state.
+    /// q/k/v/g row-fused at load; a and b deliberately stay separate.
     qkvg_proj: candle_nn::Linear,
     a_proj: candle_nn::Linear,
     b_proj: candle_nn::Linear,
     o_proj: candle_nn::Linear,
-    /// The three depthwise conv weights concatenated along channels
-    /// ([2*key + value, 1, kernel]) - one batched conv pass per
-    /// forward instead of three; per-channel math is bit-identical.
+    /// The three depthwise conv weights concatenated along channels.
     conv_weight: candle_core::Tensor,
-    /// The same weights prestored row-major ([kernel, channels]) for
-    /// the fused decode tap's packed layout; Some only when fusion is
-    /// armed.
+    /// The same weights row-major, for the fused decode tap's layout.
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     conv_weight_rows: Option<candle_core::Tensor>,
-    /// PrepFusion static rows ([kernel, conv_width + 2 * heads] bf16):
-    /// the conv-weight tap rows with A_log | dt_bias riding the row-0
-    /// pad columns - the prep kernel's per-layer constant operand;
-    /// Some only when fused_prefill is armed.
+    /// The prefill kernel's per-layer constant operand.
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     prefill_static: Option<candle_core::Tensor>,
-    /// FusedHeadPrep static ([1, 2 * heads] bf16, A_log | dt_bias) -
-    /// the tail of the decode step's dyn row; Some only when
-    /// fused_gdn is armed (independent of fused_prefill by design).
+    /// The decode step's static row tail, armed independently.
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     decode_static: Option<candle_core::Tensor>,
     a_log: candle_core::Tensor,
@@ -50,34 +32,22 @@ pub(crate) struct GdnLayer {
     value_width: usize,
     allow_neg_eigval: bool,
     rms_eps: f64,
-    /// GdnChainFusion armed: the decode step rides the fused kernel
-    /// on cuda (the cpu path is always the classic chain).
+    /// Fusion armed: the decode step rides the fused kernel on cuda.
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     fused_gdn: bool,
-    /// PrefillDispatch armed: multi-token chunks ride the fused
-    /// prefill kernels on cuda (the cpu path and the stateless
-    /// parity form always run the classic chain).
+    /// Prefill fusion armed: multi-token chunks ride the kernels.
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     fused_prefill: bool,
-    /// PrefillScratchReuse: the pool shared by every GDN layer (the
-    /// model installs one handle post-construction when
-    /// fused_prefill is armed; layers run sequentially, so one set
-    /// serves all 24).
+    /// The scratch pool shared by every GDN layer; they run in turn.
     #[cfg(feature = "cuda")]
     prefill_scratch: Option<fused_prefill::SharedPrefillScratch>,
     state: candle_core::Tensor,
     conv_tail: candle_core::Tensor,
-    /// SpeculationPort shadow buffers (state + conv tail), built at
-    /// the first spec mark; plain device copies - speculation rides
-    /// the classic path only, so no capture/address constraints bind.
+    /// Shadow buffers for a speculation mark, built at first use.
     spec_shadow: Option<(candle_core::Tensor, candle_core::Tensor)>,
-    /// KernelAccept capture arm, set by shadow_save (the spec mark):
-    /// the next multi-token carried chunk stashes its rule inputs.
+    /// Set by shadow_save: the next chunk stashes its rule inputs.
     spec_capture: bool,
-    /// The captured rule-input rows (conv_in [span, 2*key + value],
-    /// a_rows / b_rows [span, heads], model dtype) - what a partial
-    /// accept re-advances the recurrence from without a replay
-    /// forward.
+    /// The captured rule-input rows a partial accept re-advances from.
     spec_rows: Option<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)>,
 }
 
@@ -189,8 +159,7 @@ impl GdnLayer {
         })
     }
 
-    /// PrefillScratchReuse: install the model's shared pool handle
-    /// (post-construction; only when fused_prefill is armed).
+    /// Install the model's shared scratch-pool handle.
     #[cfg(feature = "cuda")]
     pub(crate) fn install_prefill_scratch(
         &mut self,
@@ -199,10 +168,7 @@ impl GdnLayer {
         self.prefill_scratch = Some(shared);
     }
 
-    /// One fused gemv, split by the load-time row order: the packed
-    /// conv input (q|k|v - the batched conv weight's channel order)
-    /// and the raw gate span (consumed by finish_mixer after the
-    /// recurrence).
+    /// One fused gemv, split into the conv input and the gate span.
     fn project_fused(
         &self,
         x: &candle_core::Tensor,
@@ -245,8 +211,7 @@ impl GdnLayer {
         self.close_halves(x, mixed, fused)
     }
 
-    /// The pre-norm block's residual adds shared by both paths;
-    /// `fused` arms the decode norm kernel (carried callers only).
+    /// The pre-norm block's residual adds, shared by both paths.
     fn close_halves(
         &self,
         x: &candle_core::Tensor,
@@ -260,11 +225,7 @@ impl GdnLayer {
         Ok((h + mlp_out)?)
     }
 
-    /// Post-conv prep shared by both mixer paths: head reshape, the
-    /// recurrence's f32 upcast discipline, l2 norms, the q scale, and
-    /// the gating scalars from the hoisted a/b gemv rows (callers
-    /// project them - the KernelAccept capture stashes the same rows).
-    /// Returns (q, k, v, g, beta) rule-ready.
+    /// Post-conv prep shared by both mixer paths, returning rule inputs.
     #[allow(clippy::type_complexity)]
     fn heads_and_gates(
         &self,
@@ -303,11 +264,7 @@ impl GdnLayer {
         Ok((q, k, v, g, beta))
     }
 
-    /// The gated output norm + o_proj tail shared by both mixer paths;
-    /// gate is the fused projection's raw g span. A carried decode row
-    /// with fusion armed rides the single-launch gated kernel over the
-    /// RAW f32 y (the classic path's y -> bf16 round-trip before the
-    /// variance disappears; envelope-class).
+    /// The gated output norm and output projection, shared by both paths.
     fn finish_mixer(
         &self,
         y: candle_core::Tensor,
@@ -354,9 +311,7 @@ impl GdnLayer {
             .forward(&y.reshape((seq_len, self.num_heads * self.head_v_dim))?)?)
     }
 
-    /// The GDN mixer, STATELESS sequential form (the StatelessCore
-    /// parity instrument): zero-seeded per-token recurrence, no state
-    /// kept.
+    /// The GDN mixer, STATELESS: zero-seeded, keeping no state.
     fn mixer_stateless(&self, x: &candle_core::Tensor) -> LibQuestResult<candle_core::Tensor> {
         let (seq_len, _) = x.dims2()?;
         let (conv_in, gate) = self.project_fused(x)?;
@@ -383,15 +338,7 @@ impl GdnLayer {
         self.finish_mixer(y, gate, seq_len, false)
     }
 
-    /// The GDN mixer, CARRIED form (the StateCarry engine path): conv
-    /// tails prepend the chunk, the persisted state seeds the rule, and
-    /// both advance. Decode (seq 1) rides the recurrent step; larger
-    /// chunks ride the chunked rule - the upstream's own path split.
-    /// The carried caches (state, conv tail) update IN PLACE via
-    /// slice_set - never rebind - so their device addresses stay
-    /// stable for the lifetime of the layer. Captured decode graphs
-    /// bake those addresses; a rebind anywhere (this path, clear)
-    /// would leave every cached graph reading dead memory.
+    /// The GDN mixer, CARRIED: tails prepend and the state advances.
     fn mixer_carried(&mut self, x: &candle_core::Tensor) -> LibQuestResult<candle_core::Tensor> {
         let (seq_len, _) = x.dims2()?;
         #[cfg(feature = "cuda")]
@@ -429,13 +376,7 @@ impl GdnLayer {
         self.finish_mixer(y, gate, seq_len, self.fused_gdn)
     }
 
-    /// The PrepFusion chunk branch: one prep launch (the carried
-    /// conv, l2 norms, and gates written bundle-direct) plus the rule
-    /// kernels and the two cublas gemms replace the classic prep
-    /// chain. The a/b gemvs stay cublas (the accumulation-order
-    /// rule); the carried caches still update IN PLACE via slice_set
-    /// (address-stable). The cpu path, the stateless parity form, and
-    /// decode never come here.
+    /// The fused chunk branch: one prep launch plus the rule kernels.
     #[cfg(feature = "cuda")]
     fn mixer_carried_fused_chunk(
         &mut self,
@@ -473,12 +414,7 @@ impl GdnLayer {
         self.finish_mixer(y, gate, seq_len, self.fused_gdn)
     }
 
-    /// The FusedHeadPrep decode step (t == 1, cuda bf16, fused_gdn):
-    /// conv tap -> ONE head-prep launch (l2 norms + q scale + gates
-    /// written straight into the packed operand) -> GdnFusedStep.
-    /// The a/b gemvs stay cublas (the accumulation-order rule); the
-    /// dyn row is their outputs catted with the packed static. The
-    /// classic paths (cpu, non-bf16, fused off) never come here.
+    /// The fused decode step: conv tap, one head prep, one rule launch.
     #[cfg(feature = "cuda")]
     fn fused_decode_step(
         &mut self,
@@ -512,10 +448,7 @@ impl GdnLayer {
         self.finish_mixer(y.unsqueeze(0)?, gate, 1, true)
     }
 
-    /// One carried multi-token chunk on the CLASSIC chain (the
-    /// PrefillDispatch kernel family dispatches earlier, in
-    /// mixer_carried; cpu and non-bf16 grades stay here). Advances
-    /// the persisted state IN PLACE (address-stable).
+    /// One carried multi-token chunk on the CLASSIC chain.
     fn carried_chunk(
         &mut self,
         q: &candle_core::Tensor,
@@ -529,9 +462,7 @@ impl GdnLayer {
         Ok(out)
     }
 
-    /// One carried decode step (t == 1) on the CLASSIC chain; the
-    /// armed cuda bf16 path rides fused_decode_step (FusedHeadPrep)
-    /// and never comes here. Returns the [1, heads, dv] f32 readout.
+    /// One carried decode step on the CLASSIC chain.
     fn carried_decode_step(
         &mut self,
         q: &candle_core::Tensor,
@@ -552,9 +483,7 @@ impl GdnLayer {
         Ok(y_t.unsqueeze(0)?)
     }
 
-    /// The carried conv over one chunk: the fused single-launch tap
-    /// on a cuda decode row (the tail rotates in place INSIDE the
-    /// kernel - no slice_set), the classic chain otherwise.
+    /// The carried conv over one chunk, fused on an eligible decode row.
     fn conv_carried(
         &mut self,
         conv_in: &candle_core::Tensor,
@@ -584,16 +513,12 @@ impl GdnLayer {
         Ok(conv_out)
     }
 
-    /// The carried caches as snapshot handles (cheap clones sharing
-    /// storage; the writer serializes them immediately): (state f32
-    /// [heads, dk, dv], conv tail f32 [kernel-1, channels]).
+    /// The carried caches as snapshot handles sharing their storage.
     pub(crate) fn cache_snapshot(&self) -> (candle_core::Tensor, candle_core::Tensor) {
         (self.state.clone(), self.conv_tail.clone())
     }
 
-    /// Overwrite the carried caches from restored tensors, in place
-    /// (address-stable; see mixer_carried). Shapes and the f32
-    /// discipline are validated here - the layer owns its geometry.
+    /// Overwrite the carried caches in place, validating geometry here.
     pub(crate) fn restore_cache(
         &mut self,
         state: &candle_core::Tensor,
@@ -620,8 +545,7 @@ impl GdnLayer {
         Ok(())
     }
 
-    /// Zero the carried caches in place (address-stable; see
-    /// mixer_carried).
+    /// Zero the carried caches in place.
     pub(crate) fn clear_cache(&mut self) -> LibQuestResult<()> {
         self.state.slice_set(&self.state.zeros_like()?, 0, 0)?;
         self.conv_tail
@@ -629,10 +553,7 @@ impl GdnLayer {
         Ok(())
     }
 
-    /// SpeculationPort: snapshot the carried caches into the shadow
-    /// buffers (lazily allocated fresh storage - slice_set refuses
-    /// shared storage), drop any stale captured rows, and arm the
-    /// KernelAccept capture for the coming verify chunk.
+    /// Shadow the carried caches and arm the rule-input capture.
     pub(crate) fn shadow_save(&mut self) -> LibQuestResult<()> {
         self.spec_rows = None;
         self.spec_capture = true;
@@ -647,8 +568,7 @@ impl GdnLayer {
         Ok(())
     }
 
-    /// SpeculationPort: restore the carried caches from the shadow
-    /// buffers, in place (address-stable like every cache write).
+    /// Restore the carried caches from the shadow buffers, in place.
     pub(crate) fn shadow_restore(&mut self) -> LibQuestResult<()> {
         let Some((state_shadow, tail_shadow)) = &self.spec_shadow else {
             snafu::whatever!("shadow restore without a saved shadow");
@@ -658,21 +578,13 @@ impl GdnLayer {
         Ok(())
     }
 
-    /// KernelAccept: drop the captured rule inputs and disarm the
-    /// capture (a full accept or a full rewind ends the round).
+    /// Drop the captured rule inputs and disarm the capture.
     pub(crate) fn spec_release(&mut self) {
         self.spec_rows = None;
         self.spec_capture = false;
     }
 
-    /// KernelAccept: re-advance the carried caches over the first
-    /// `accepted` captured rule-input rows from the SHADOW-RESTORED
-    /// state and tail (the caller runs shadow_restore first) - pure
-    /// recurrence math over cached post-projection operands, no
-    /// projections and no weight traffic. Rides the verify chunk's
-    /// own grade dispatch (the fused prefill pipeline on armed cuda
-    /// bf16, the classic chain otherwise); y/gate/finish are skipped
-    /// entirely - only the caches matter.
+    /// Re-advance the caches over the first `accepted` captured rows.
     pub(crate) fn spec_readvance(&mut self, accepted: usize) -> LibQuestResult<()> {
         let Some((conv_in, a_rows, b_rows)) = self.spec_rows.take() else {
             snafu::whatever!("spec re-advance without captured rule inputs");
@@ -703,8 +615,6 @@ impl GdnLayer {
                 },
                 (self.head_k_dim as f64).powf(-0.5),
                 self.allow_neg_eigval,
-                // A readvance span (<= 16 rows) is never a full
-                // span; keep it off the pool for clarity.
                 None,
             )?;
             self.state.slice_set(&next_state, 0, 0)?;

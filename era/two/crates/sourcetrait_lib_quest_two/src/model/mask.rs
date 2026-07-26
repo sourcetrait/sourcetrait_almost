@@ -1,8 +1,7 @@
 //! Additive causal masks for the prefill paths (decode is mask-free).
 use crate::*;
 
-/// Additive causal mask [T, T]: 0 on and below the diagonal, -inf
-/// above (exp saturates to exactly 0 either way upstream renders it).
+/// Additive causal mask [T, T]: 0 on and below the diagonal, -inf above.
 pub(crate) fn causal_mask(
     seq_len: usize,
     dtype: candle_core::DType,
@@ -11,8 +10,7 @@ pub(crate) fn causal_mask(
     offset_causal_mask(seq_len, 0, dtype, device)
 }
 
-/// Additive causal mask for a chunk at an offset: [t, past + t], row
-/// r sees every column through past + r, -inf beyond.
+/// The same mask for a chunk at an offset: [t, past + t] rows.
 pub(crate) fn offset_causal_mask(
     seq_len: usize,
     past: usize,

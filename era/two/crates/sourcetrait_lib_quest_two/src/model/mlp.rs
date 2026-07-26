@@ -1,10 +1,7 @@
 //! The SwiGLU MLP shared by both block families.
 use crate::*;
 
-/// SwiGLU MLP, present on every layer: down(silu(gate(x)) * up(x)).
-/// gate/up ride one row-fused projection ([2 * intermediate, hidden],
-/// row order gate | up); down stays separate (its input is the
-/// product, not x).
+/// SwiGLU MLP, on every layer: down(silu(gate(x)) * up(x)).
 pub(crate) struct Mlp {
     gate_up_proj: candle_nn::Linear,
     down_proj: candle_nn::Linear,

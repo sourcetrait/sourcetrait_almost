@@ -1,14 +1,4 @@
-//! The needle battery engine (the QualityGatedCuts instrument):
-//! spec-driven passkey grids over a live model, single and
-//! multi-distractor modes, per-cell results serializable for the
-//! ratchet artifacts.
-//!
-//! The method is the refquest needle instrument (C3) as library code: LCG word
-//! filler seeded per target length, a 4-round calibration loop that
-//! converges the chat-wrapped token count onto the target, greedy
-//! decode, substring match. Multi mode plants two distractor needles
-//! (the next keys in the spec pool, at offset depths) and asks only
-//! the target - the lost-in-the-middle probe single mode cannot see.
+//! The needle battery engine: spec-driven passkey grids over a model.
 use crate::*;
 
 /// One passkey the spec can plant ({key}/{value} template slots).
@@ -39,8 +29,7 @@ impl NeedleSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NeedleMode {
     Single,
-    /// Two distractors (the next keys cyclically) planted at
-    /// (depth + 33)% and (depth + 67)%; the question asks the target.
+    /// Two distractors planted at offset depths; only the target is asked.
     Multi,
 }
 
@@ -53,8 +42,7 @@ impl NeedleMode {
     }
 }
 
-/// One battery cell's outcome. `found` is the target-value substring
-/// match; `distractor_hits` records leaked distractor values (multi).
+/// One battery cell's outcome, including any leaked distractor values.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct NeedleCellResult {
     pub mode: String,
@@ -73,8 +61,7 @@ pub(crate) struct CellPrompt {
     pub(crate) distractor_values: Vec<String>,
 }
 
-/// The spec's LCG: state = (state * 1103515245 + 12345) mod 2^31,
-/// word = words[state mod pool]. Seeded filler_seed + target length.
+/// The spec's LCG filler, seeded per target length.
 pub(crate) fn lcg_words(words: &[String], count: usize, seed: u64) -> Vec<String> {
     let mut state = seed;
     let pool = words.len() as u64;
@@ -86,8 +73,7 @@ pub(crate) fn lcg_words(words: &[String], count: usize, seed: u64) -> Vec<String
         .collect()
 }
 
-/// Join `words` with each plant's text inserted at its word index
-/// (plants sorted ascending, indices strictly increasing).
+/// Join `words`, inserting each plant's text at its word index.
 pub(crate) fn splice(words: &[String], plants: &[(usize, &str)]) -> String {
     let mut out = String::new();
     let mut cursor = 0usize;
@@ -102,9 +88,7 @@ pub(crate) fn splice(words: &[String], plants: &[(usize, &str)]) -> String {
     out
 }
 
-/// The (depth, key_index) plan for a cell: the target first, then the
-/// mode's distractors at fixed depth offsets so cells stay
-/// deterministic and internally comparable.
+/// A cell's plants as (depth, key_index), the target first.
 pub(crate) fn cell_plan(
     mode: NeedleMode,
     key_count: usize,
@@ -121,8 +105,7 @@ pub(crate) fn cell_plan(
     }
 }
 
-/// Cell-prompt builder over one spec + tokenizer (calibration needs
-/// live token counts).
+/// Cell-prompt builder over one spec and tokenizer.
 pub(crate) struct NeedleRig<'a> {
     pub(crate) spec: &'a NeedleSpec,
     pub(crate) tokenizer: &'a tokenizers::Tokenizer,
@@ -143,8 +126,7 @@ impl NeedleRig<'_> {
             .replace("{value}", &key.value)
     }
 
-    /// Build one cell's calibrated content (the 4-round loop from the
-    /// C3 method, generalized to N plants).
+    /// Build one cell's calibrated content over N plants.
     pub(crate) fn cell_prompt(
         &self,
         mode: NeedleMode,
@@ -178,8 +160,6 @@ impl NeedleRig<'_> {
         let mut content = String::new();
         for _ in 0..4 {
             let words = &base_words[..(count as usize).min(base_words.len())];
-            // Depth -> word index; equal indices bump forward so every
-            // plant lands (strictly increasing for the splice).
             let mut indexed: Vec<(usize, &str)> = plan
                 .iter()
                 .zip(&needles)
@@ -213,8 +193,7 @@ impl NeedleRig<'_> {
     }
 }
 
-/// Run one mode's full grid (keys x depths per length) greedy, one
-/// generation per cell over the model's carried caches.
+/// Run one mode's full grid greedily, one generation per cell.
 pub fn run_needle_cells(
     model: &mut OlmoHybrid,
     tokenizer: &tokenizers::Tokenizer,

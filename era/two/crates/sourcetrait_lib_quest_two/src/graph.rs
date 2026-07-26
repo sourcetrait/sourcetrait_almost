@@ -1,24 +1,7 @@
-//! E4 decode-graph building blocks: the staged device buffers every
-//! per-step dynamic rides (token id, the shared attention append
-//! slot, the width-pooled pad mask, the logits output), the raw
-//! slot-write scatter the KV append uses inside a capture, and the
-//! bucket-keyed cache of instantiated graphs.
-//!
-//! The GDN layers need none of this: their carried state is
-//! fixed-shape and updates in place on every path (model.rs
-//! mixer_carried), so the classic t=1 step IS the captured form.
-//! Only the 8 attention layers stage - one slot and one mask serve
-//! all of them (every layer sees every token, so the lengths are
-//! uniform by construction).
+//! Decode-graph building blocks: staged buffers, the scatter, the cache.
 use crate::*;
 
-/// The KV append inside a captured graph: a scatter of one
-/// (heads, 1, dim) row into a (heads, capacity, dim) buffer at a
-/// device-resident slot index - raw pointer args on the model's own
-/// stream (safe-slice args wait per-slice events, which is
-/// CAPTURE_ISOLATION inside an active capture when the events
-/// predate it). Kernels are element-size generic, so bf16/f16 and
-/// f32/u32 share two entry points.
+/// The KV append inside a captured graph, as a raw slot scatter.
 const KERNEL_SRC: &str = r#"
 extern "C" __global__ void slot_write_16(
     unsigned short* dst,
@@ -89,11 +72,6 @@ fn launch_slot_write<T: candle_core::cuda::CudaDType>(
 ) -> candle_core::Result<()> {
     use cudarc::driver::{DevicePtr, PushKernelArg};
 
-    // A candle view's start_offset is part of its address: a
-    // "contiguous" tensor derived from a narrow (size-1 dims skip the
-    // stride check) still points mid-storage, so every operand slices
-    // at its layout offset - reading from 0 wrote the WRONG SPAN
-    // (q-projection bytes as v) in the un-offset form.
     let dst_slice = T::as_cuda_slice(dst)?.slice(dst_offset..);
     let (dst_ptr, _dst_guard) = dst_slice.device_ptr(stream);
     let src_slice = T::as_cuda_slice(src)?.slice(src_offset..);
@@ -122,9 +100,7 @@ fn launch_slot_write<T: candle_core::cuda::CudaDType>(
     Ok(())
 }
 
-/// `buffer.inplace_op3(&row, &slot, &SlotWrite { dtype })`: dst is
-/// (heads, capacity, dim), src (heads, 1, dim), slot a (1,) u32
-/// device buffer; all contiguous (dst at offset 0).
+/// `buffer.inplace_op3(&row, &slot, &SlotWrite { dtype })`.
 pub(crate) struct SlotWrite {
     pub(crate) dtype: candle_core::DType,
 }
@@ -204,67 +180,47 @@ impl candle_core::InplaceOp3 for SlotWrite {
     }
 }
 
-/// Release the device's cached CUDA-graph memory pools (device 0 -
-/// the single-device box). Destroyed graphs leave their in-graph
-/// allocation pools driver-cached; the trim returns them. Safe
-/// beside live graphs; failures are ignored (best-effort).
+/// Release the device's cached CUDA-graph memory pools, best-effort.
 pub(crate) fn trim_graph_memory() {
     let _ = unsafe { cudarc::driver::sys::cuDeviceGraphMemTrim(0) };
 }
 
-/// Smallest grain multiple covering `len` valid entries (at least
-/// one grain). The grain is a settings field
-/// (LibSettings.graph_bucket_grain).
+/// The smallest grain multiple covering `len` valid entries.
 pub(crate) fn bucket_for(len: usize, grain: usize) -> usize {
     len.max(1).div_ceil(grain) * grain
 }
 
-/// Additive pad-mask values: 0.0 below `valid`, -inf across the
-/// bucket's pad tail (post-softmax pad mass is exactly zero).
+/// Additive pad-mask values: 0.0 below `valid`, -inf across the tail.
 pub(crate) fn pad_mask_values(bucket: usize, valid: usize) -> Vec<f32> {
     (0..bucket)
         .map(|column| if column < valid { 0.0 } else { f32::NEG_INFINITY })
         .collect()
 }
 
-/// E4 staged decode state: the persistent device buffers every
-/// per-step dynamic reads. The host stages a few bytes before each
-/// step; the captured ops read values, never baked host constants.
-/// Created once per Model at first arming and kept - masks are
-/// width-pooled and value-reset IN PLACE, so every address a
-/// captured graph bakes stays stable; clear epochs only drop the
-/// armed flag.
+/// The staged decode state: the persistent buffers each step reads.
 #[derive(Debug, Clone)]
 pub(crate) struct DecodeStage {
-    /// (1,) u32: the token this step feeds (embedding index_select).
+    /// (1,) u32: the token this step feeds.
     pub(crate) ids: candle_core::Tensor,
-    /// (1,) u32: the shared attention append slot (= context_len).
+    /// (1,) u32: the shared attention append slot.
     pub(crate) kv_slot: candle_core::Tensor,
-    /// (1, bucket) additive 0/-inf, model dtype (a handle into the
-    /// width pool).
+    /// (1, bucket) additive mask; a handle into the width pool.
     pub(crate) kv_mask: candle_core::Tensor,
     /// (1, vocab) f32: the step's logits, written in-graph.
     pub(crate) logits_out: candle_core::Tensor,
     /// (1, 1) model-dtype 0.0: the mask-enable write source.
     mask_zero: candle_core::Tensor,
-    /// Width-keyed mask pool: one tensor per bucket width, created
-    /// once and value-reset in place - captured graphs bake these
-    /// addresses, so a width's mask must never reallocate.
+    /// Width-keyed mask pool; a width's mask must never reallocate.
     masks: HashMap<usize, candle_core::Tensor>,
     /// Captured decode graphs keyed by bucket width.
     pub(crate) graphs: GraphCache,
-    /// Replay switch (gates' uncaptured reference legs turn it off).
+    /// Replay switch; the gates' reference legs turn it off.
     pub(crate) capture_enabled: bool,
-    /// Lifetime switch: once a regrow parks captured buffers,
-    /// capture stays off for this Model (rearm restores
-    /// capture_enabled from THIS, never from true).
+    /// Lifetime switch: parked buffers retire capture for this model.
     pub(crate) capture_permitted: bool,
-    /// Whether stepping is armed for the current cache state (clear
-    /// epochs unset it; arm_graph_decode re-arms).
+    /// Whether stepping is armed for the current cache state.
     pub(crate) armed: bool,
-    /// The KV capacity the cached graphs were captured against; a
-    /// change means the buffers reallocated and every cached graph
-    /// is stale.
+    /// The KV capacity the cached graphs were captured against.
     pub(crate) kv_capacity: usize,
     pub(crate) bucket: usize,
     grain: usize,
@@ -273,8 +229,7 @@ pub(crate) struct DecodeStage {
 }
 
 impl DecodeStage {
-    /// Build from the live post-prefill state (`kv_len` valid rows in
-    /// every attention layer).
+    /// Build from the live post-prefill state.
     pub(crate) fn new(
         kv_len: usize,
         grain: usize,
@@ -300,8 +255,6 @@ impl DecodeStage {
             capture_enabled: true,
             capture_permitted: true,
             armed: true,
-            // The creator records the true capacity right after
-            // construction.
             kv_capacity: 0,
             bucket,
             grain,
@@ -310,8 +263,7 @@ impl DecodeStage {
         })
     }
 
-    /// Get-or-create the width's pooled mask and reset its values to
-    /// `valid` IN PLACE (stable address across the pool's lifetime).
+    /// Get-or-create the width's pooled mask, value-reset in place.
     fn pooled_mask(
         pool: &mut HashMap<usize, candle_core::Tensor>,
         bucket: usize,
@@ -346,11 +298,7 @@ impl DecodeStage {
         Ok(())
     }
 
-    /// Re-point the stage at a fresh post-prefill length (a new
-    /// generation over the same buffers): bucket re-derived, pooled
-    /// mask value-reset in place, stepping re-armed. Captured graphs
-    /// survive - the model flushes them separately when the KV
-    /// buffers reallocate.
+    /// Re-point the stage at a fresh post-prefill length and re-arm.
     pub(crate) fn rearm(&mut self, kv_len: usize) -> LibQuestResult<()> {
         self.bucket = bucket_for(kv_len + 1, self.grain);
         self.kv_mask = Self::pooled_mask(
@@ -365,10 +313,7 @@ impl DecodeStage {
         Ok(())
     }
 
-    /// Re-derive the bucket for the width the NEXT append reaches; a
-    /// crossing re-points to (or creates) that width's pooled mask
-    /// with values reset from the live length - the graph switch
-    /// happens on the same boundary via the cache key.
+    /// Re-derive the bucket the NEXT append reaches, re-pointing the mask.
     pub(crate) fn ensure_bucket(&mut self, kv_len: usize) -> LibQuestResult<()> {
         let bucket = bucket_for(kv_len + 1, self.grain);
         if bucket != self.bucket {
@@ -384,10 +329,7 @@ impl DecodeStage {
         Ok(())
     }
 
-    /// Stage one step: the token, the shared append slot, and the
-    /// newly-valid mask column. Tiny H2D writes outside the captured
-    /// region; state-free (everything derives from the live length,
-    /// and re-enabling an enabled column is a no-op).
+    /// Stage one step: the token, the slot, and the new mask column.
     pub(crate) fn stage_step(&self, token: u32, kv_len: usize) -> LibQuestResult<()> {
         snafu::ensure_whatever!(
             kv_len < self.bucket,
@@ -408,11 +350,8 @@ impl DecodeStage {
 }
 
 /// Captured, instantiated decode graphs keyed by bucket width.
-/// Wrapped so the containing types keep their derives: Debug renders
-/// a summary, Clone shares the instantiated execs.
 #[derive(Clone, Default)]
 pub(crate) struct GraphCache {
-    // Rc, not Arc: CudaGraph is single-thread by cudarc's contract.
     graphs: HashMap<usize, std::rc::Rc<cudarc::driver::CudaGraph>>,
 }
 
@@ -431,7 +370,7 @@ impl GraphCache {
         self.graphs.insert(key, std::rc::Rc::new(graph));
     }
 
-    /// Drop every captured graph (the KV buffers reallocated).
+    /// Drop every captured graph; the KV buffers reallocated.
     pub(crate) fn clear(&mut self) {
         self.graphs.clear();
     }

@@ -1,25 +1,10 @@
-//! AdapterLoad: engine-side adapter consumption. A trained adapter
-//! safetensors (the bquest train cpt artifact) merges into the
-//! RESIDENT weights at load - zero decode-path change; adapter-off
-//! is a plain load, bit-exact by omission. Placement validates
-//! against the direction-3 rule at load time: only the readout
-//! surface (GDN q_proj / q_conv1d / g_proj / o_proj, attn q/o, MLP
-//! gate/up/down) may carry a delta; a state-carrying target is a
-//! hard error. The merge rides the VarBuilder seam: a wrapping
-//! backend patches each unfused checkpoint tensor as the model's
-//! constructors get() it (base -> f32 -> + delta -> model dtype),
-//! so the fused-projection cats downstream see merged rows with no
-//! constructor changes anywhere.
+//! Engine-side adapter consumption: deltas merged at the loader seam.
 use crate::*;
 
 /// The adapter artifact format version (metadata "version").
 const ADAPTER_VERSION: &str = "1";
 
-/// The three-tier adapter token resolution (the snapshot-token
-/// pattern): a pure snake resolves to <adapters_dir>/<snake>
-/// .safetensors; a bare relative path resolves relative to the
-/// adapters dir; anything else is a normal path with `~`/`$VAR`
-/// expansion.
+/// The three-tier adapter token resolution, as snapshot tokens use.
 pub fn adapter_path(adapters_dir: &Path, token: &str) -> LibQuestResult<PathBuf> {
     if config::is_profile_name(Path::new(token)) {
         return Ok(adapters_dir.join(format!("{token}.safetensors")));
@@ -35,10 +20,7 @@ pub fn adapter_path(adapters_dir: &Path, token: &str) -> LibQuestResult<PathBuf>
     config::expand_path(token)
 }
 
-/// One target weight's delta: a low-rank pair over the TRANSPOSED
-/// weight (delta for W = (a.b * scale) transposed) or the dense
-/// conv-delta tensor, held f32 on the target device and materialized
-/// per get().
+/// One target weight's delta: a low-rank pair, or a dense conv delta.
 #[derive(Debug)]
 pub(crate) enum AdapterDelta {
     LowRank {
@@ -62,8 +44,7 @@ impl AdapterDelta {
         }
     }
 
-    /// The checkpoint shape this delta expects ([out, in] for a
-    /// pair; the conv's own dims for a dense delta).
+    /// The checkpoint shape this delta expects.
     fn expected_shape(&self) -> Vec<usize> {
         match self {
             AdapterDelta::LowRank { a, b, .. } => {
@@ -74,9 +55,7 @@ impl AdapterDelta {
     }
 }
 
-/// The direction-3 surface check: an adapter tensor name maps to its
-/// checkpoint weight name, or errors for anything off the sanctioned
-/// readout surface (state-carrying weights never adapt).
+/// Map an adapter tensor name to its checkpoint weight, or reject it.
 fn target_weight_name(delta_name: &str) -> LibQuestResult<(String, &'static str)> {
     let Some(rest) = delta_name.strip_prefix("model.layers.") else {
         snafu::whatever!("adapter tensor {delta_name} is outside model.layers");
@@ -122,8 +101,7 @@ fn kind_str(kind: &str) -> &'static str {
     }
 }
 
-/// A parsed, placement-validated adapter file: deltas keyed by the
-/// checkpoint weight names they merge into.
+/// A validated adapter file, keyed by the weight names it merges into.
 #[derive(Debug)]
 pub(crate) struct AdapterFile {
     pub(crate) deltas: HashMap<String, AdapterDelta>,
@@ -154,9 +132,7 @@ fn adapter_tensor(
 }
 
 impl AdapterFile {
-    /// Parse + validate an adapter artifact: format version, model
-    /// identity, direction-3 placement, pair completeness, and rank
-    /// consistency; tensors land f32 on the target device.
+    /// Parse and validate an adapter artifact onto the target device.
     pub(crate) fn load(
         path: &Path,
         expected_model_id: &str,
@@ -251,8 +227,7 @@ impl AdapterFile {
         Ok(Self { deltas })
     }
 
-    /// Every delta target must exist in the checkpoint header at the
-    /// delta's expected shape (the wrong-model geometry guard).
+    /// The wrong-model geometry guard, against the checkpoint header.
     pub(crate) fn validate_geometry(
         &self,
         inventory: &[TensorInfo],
@@ -275,9 +250,7 @@ impl AdapterFile {
     }
 }
 
-/// The merging VarBuilder backend: every get() serves the mmaped
-/// checkpoint tensor, plus-delta where the adapter carries one (f32
-/// merge, one cast back to the requested dtype).
+/// The merging VarBuilder backend, wrapping the mmaped checkpoint.
 struct DeltaBackend {
     inner: candle_core::safetensors::MmapedSafetensors,
     deltas: HashMap<String, AdapterDelta>,
@@ -332,11 +305,7 @@ impl candle_nn::var_builder::SimpleBackend for DeltaBackend {
     }
 }
 
-/// The adapter-aware weight loader: resolve the config's adapter
-/// token (None = the plain mmap path, byte-identical to
-/// mmap_weights), validate the artifact against the model identity
-/// and checkpoint geometry, and hand back a VarBuilder whose get()s
-/// serve merged weights.
+/// The adapter-aware weight loader; no token means the plain load.
 pub fn load_weights(
     config: &LibConfig,
     dtype: candle_core::DType,

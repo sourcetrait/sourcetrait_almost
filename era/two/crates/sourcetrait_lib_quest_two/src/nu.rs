@@ -1,15 +1,4 @@
-//! The NUON data-format core: the nu type/value surface the whole
-//! toolset consumes (sister crates reach `lib::nu`, never the nu
-//! crates directly) plus the generic format helpers - typedef
-//! parsing, NUON text and file IO in whole-value and record-per-line
-//! forms, and typedef conformance.
-//!
-//! NUON is the program's primary data format. Datasets and artifacts
-//! we author are `.nuon` - one whole value (usually a table or
-//! record) per file; stream-shaped outputs (append-as-you-go,
-//! tail-able) are NUON LINES - one record literal per line, the JSONL
-//! analog. Foreign-tool seams (ai2 scorers, python shims) keep their
-//! own formats at the boundary.
+//! The NUON data-format core: the nu type and value surface, and its IO.
 use crate::*;
 
 pub use nu_protocol::{
@@ -22,18 +11,9 @@ pub use nu_protocol::{
     record,
 };
 
-/// Parse a nu typedef string (nu 0.114.1's native Type grammar,
-/// oneof included) into a Type. No bare type-parse exists on
-/// nu-parser's public surface, so the typedef rides a synthetic
-/// closure signature (`{|x: <t>| null}`) parsed decl-free on a bare
-/// engine state; the positional's shape carries the type. Sugar note:
-/// path/directory are valid typedef spellings that collapse to string
-/// in the Type enum (rendered/derived typedefs show the base); glob
-/// survives as its own type.
+/// Parse a nu typedef string into a Type, oneof included.
 pub fn parse_typedef(typedef: &str) -> LibQuestResult<Type> {
     let mut engine_state = r::nu::EngineState::new();
-    // The parser expects $env.PWD on the engine state (the nuon crate
-    // performs the same seeding for from_nuon).
     engine_state.add_env_var(String::from("PWD"), Value::string("", Span::unknown()));
     let mut working_set = r::nu::StateWorkingSet::new(&engine_state);
     let source = format!("{{|x: {typedef}| null}}");
@@ -67,26 +47,17 @@ pub fn from_nuon_text(text: &str) -> LibQuestResult<Value> {
     }
 }
 
-/// Value -> NUON text, compact single-line (the nuon-lines form
-/// leans on it); non-serializable types reject rather than
-/// stringify.
+/// Value -> NUON text, compact and single-line.
 pub fn to_nuon_text(value: &Value) -> LibQuestResult<String> {
     render_nuon(value, nuon::ToStyle::Default)
 }
 
-/// Value -> CONDENSED NUON: no whitespace at all, which is what
-/// `to nuon --raw` emits.
+/// Value -> CONDENSED NUON, what `to nuon --raw` emits.
 pub fn to_nuon_condensed(value: &Value) -> LibQuestResult<String> {
     render_nuon(value, nuon::ToStyle::Raw)
 }
 
-/// Value -> PRETTY NUON, two-space indented, which is what
-/// `to nuon --pretty` emits.
-///
-/// Two spaces is not a choice: NUON pretty indents two and nushell
-/// source indents four, neither borrows from the other, and
-/// two-space nushell found anywhere is a mistake rather than a
-/// convention.
+/// Value -> PRETTY NUON, two-space indented as `to nuon --pretty`.
 pub fn to_nuon_pretty(value: &Value) -> LibQuestResult<String> {
     render_nuon(value, nuon::ToStyle::Spaces(2))
 }
@@ -100,10 +71,7 @@ fn render_nuon(value: &Value, style: nuon::ToStyle) -> LibQuestResult<String> {
     }
 }
 
-/// Deep value-vs-typedef conformance via nu's own subtype machinery
-/// (oneof accepts any member, empty lists bind any list/table,
-/// records are OPEN - extra fields pass); the error names declared
-/// vs derived.
+/// Deep value-vs-typedef conformance via nu's own subtype machinery.
 pub fn conform(value: &Value, declared: &Type) -> LibQuestResult<()> {
     snafu::ensure_whatever!(
         value.is_subtype_of(declared),
@@ -119,8 +87,7 @@ pub fn load_value(path: &Path) -> LibQuestResult<Value> {
     from_nuon_text(&fs::read_to_string(path)?)
 }
 
-/// Write one whole-value .nuon file, newline-terminated (parent
-/// directories created).
+/// Write one whole-value .nuon file, newline-terminated.
 pub fn save_value(path: &Path, value: &Value) -> LibQuestResult<()> {
     let text = to_nuon_text(value)?;
     ensure_parent(path)?;
@@ -137,8 +104,7 @@ pub fn load_lines(path: &Path) -> LibQuestResult<Vec<Value>> {
         .collect()
 }
 
-/// Write a NUON-LINES file whole (one value per line, each asserted
-/// single-line; parent directories created).
+/// Write a NUON-LINES file whole, one asserted single-line value each.
 pub fn save_lines(path: &Path, values: &[Value]) -> LibQuestResult<()> {
     let mut out = String::new();
     for value in values {
@@ -149,8 +115,7 @@ pub fn save_lines(path: &Path, values: &[Value]) -> LibQuestResult<()> {
     Ok(fs::write(path, out)?)
 }
 
-/// Append one value to a NUON-LINES file as a single line (creates
-/// the file and parents; the append-as-you-go stream form).
+/// Append one value to a NUON-LINES file as a single line.
 pub fn append_line(path: &Path, value: &Value) -> LibQuestResult<()> {
     let line = render_line(value)?;
     ensure_parent(path)?;
@@ -158,8 +123,7 @@ pub fn append_line(path: &Path, value: &Value) -> LibQuestResult<()> {
     Ok(io::Write::write_all(&mut file, format!("{line}\n").as_bytes())?)
 }
 
-/// One value as one line, guarded (a multi-line rendering would
-/// corrupt the lines form).
+/// One value as one line, guarded against a multi-line rendering.
 fn render_line(value: &Value) -> LibQuestResult<String> {
     let text = to_nuon_text(value)?;
     snafu::ensure_whatever!(
