@@ -269,6 +269,127 @@ impl<B: Backend> ModelAdapters<B> {
         Ok(Self { layers, rank, alpha, seed })
     }
 
+    /// Resume from a saved adapter: the same structure `init` builds,
+    /// with every tensor replaced by the artifact's.
+    ///
+    /// This is what makes a STAGED sequence possible - supervised
+    /// tuning continuing the continued-pretraining checkpoint, then
+    /// preference tuning continuing that. Without it every stage
+    /// would restart from the base and the chain would not exist.
+    ///
+    /// Rank and alpha come from the artifact rather than the caller:
+    /// a resumed adapter's geometry is already decided, and taking
+    /// them from a flag would let a mismatched rank load as garbage.
+    pub(crate) fn load(
+        path: &Path,
+        config: &HybridCheckpointConfig,
+        expected_model_id: &str,
+        device: &B::Device,
+    ) -> BquestResult<Self> {
+        let bytes = fs::read(path)?;
+        let (_, header) = match safetensors::SafeTensors::read_metadata(&bytes) {
+            Ok(header) => header,
+            Err(error) => snafu::whatever!("adapter header parse failed: {error}"),
+        };
+        let Some(metadata) = header.metadata().as_ref() else {
+            snafu::whatever!("adapter {} carries no metadata", path.display());
+        };
+        let field = |key: &str| -> BquestResult<String> {
+            match metadata.get(key) {
+                Some(value) => Ok(value.clone()),
+                None => snafu::whatever!("adapter metadata is missing {key}"),
+            }
+        };
+        snafu::ensure_whatever!(
+            field("version")? == "1",
+            "adapter version {} is not the supported 1",
+            field("version")?
+        );
+        let model_id = field("model_id")?;
+        snafu::ensure_whatever!(
+            model_id == expected_model_id,
+            "adapter was trained for {model_id}, not {expected_model_id}"
+        );
+        let Ok(rank) = field("lora_rank")?.parse::<usize>() else {
+            snafu::whatever!("adapter lora_rank does not parse");
+        };
+        let Ok(alpha) = field("lora_alpha")?.parse::<f64>() else {
+            snafu::whatever!("adapter lora_alpha does not parse");
+        };
+        let seed = field("seed")?.parse::<u64>().unwrap_or(0);
+
+        let parsed = match safetensors::SafeTensors::deserialize(&bytes) {
+            Ok(parsed) => parsed,
+            Err(error) => snafu::whatever!("adapter parse failed: {error}"),
+        };
+        let mut stored: HashMap<String, (Vec<usize>, Vec<f32>)> = HashMap::new();
+        for (name, view) in parsed.tensors() {
+            snafu::ensure_whatever!(
+                view.dtype() == safetensors::Dtype::F32,
+                "adapter tensor {name}: expected f32, got {:?}",
+                view.dtype()
+            );
+            let values: Vec<f32> = view
+                .data()
+                .chunks_exact(4)
+                .map(|quad| f32::from_le_bytes([quad[0], quad[1], quad[2], quad[3]]))
+                .collect();
+            stored.insert(name, (view.shape().to_vec(), values));
+        }
+
+        // Build the structure at the artifact's geometry, then
+        // overwrite every trainable tensor from the file.
+        let mut adapters = Self::init(config, rank, alpha, seed, device)?;
+        for (name, tensor) in adapters.params_mut() {
+            let replacement = match name.split_once(".delta_tap") {
+                // The conv delta persists as one (channels, 1, kernel)
+                // tensor and trains as `kernel` rows, so a tap is a
+                // stride through it.
+                Some((prefix, tap_index)) => {
+                    let Ok(tap) = tap_index.parse::<usize>() else {
+                        snafu::whatever!("adapter tap index in {name} does not parse");
+                    };
+                    let key = format!("{prefix}.delta");
+                    let Some((shape, values)) = stored.get(&key) else {
+                        snafu::whatever!("adapter is missing {key}");
+                    };
+                    snafu::ensure_whatever!(
+                        shape.len() == 3 && shape[1] == 1,
+                        "{key}: expected (channels, 1, kernel), got {shape:?}"
+                    );
+                    let (channels, kernel) = (shape[0], shape[2]);
+                    snafu::ensure_whatever!(tap < kernel, "{name}: tap beyond kernel {kernel}");
+                    let row: Vec<f32> =
+                        (0..channels).map(|channel| values[channel * kernel + tap]).collect();
+                    burn::tensor::Tensor::from_data(
+                        burn::tensor::TensorData::new(row, [1, channels]),
+                        device,
+                    )
+                }
+                None => {
+                    let Some((shape, values)) = stored.get(&name) else {
+                        snafu::whatever!("adapter is missing {name}");
+                    };
+                    snafu::ensure_whatever!(
+                        shape.len() == 2,
+                        "{name}: expected rank 2, got {shape:?}"
+                    );
+                    snafu::ensure_whatever!(
+                        *shape == tensor.dims().to_vec(),
+                        "{name}: artifact shape {shape:?} does not match the model's {:?}",
+                        tensor.dims()
+                    );
+                    burn::tensor::Tensor::from_data(
+                        burn::tensor::TensorData::new(values.clone(), [shape[0], shape[1]]),
+                        device,
+                    )
+                }
+            };
+            *tensor = replacement.require_grad();
+        }
+        Ok(adapters)
+    }
+
     /// Named refs to every trainable tensor, layer-major.
     #[allow(dead_code)]
     pub(crate) fn params(&self) -> Vec<(String, &burn::tensor::Tensor<B, 2>)> {

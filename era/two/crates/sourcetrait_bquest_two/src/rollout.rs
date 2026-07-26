@@ -26,9 +26,11 @@ const ROLLOUT_TYPEDEF: &str = "table<prompt_index: int, prompt_ids: list<int>, \
 
 /// One rollout ready for training: the padded window, its response
 /// mask, and the verifier's reward.
+#[cfg(feature = "train")]
 pub(crate) type PackedRollout = (Vec<u32>, Vec<u8>, f32);
 /// Rollouts bucketed by the prompt they answer - the unit a
 /// group-relative advantage is computed over.
+#[cfg(feature = "train")]
 pub(crate) type RolloutGroups = Vec<Vec<PackedRollout>>;
 
 /// `bquest rollout run`: sample `group` replies per verifiable
@@ -110,7 +112,7 @@ pub(crate) fn rollout_run(cli: &Cli, args: &RolloutRunArgs) -> BquestResult<()> 
     }
 
     let table = lib::nu::Value::list(rows, span());
-    lib::nu::conform(&table, &lib::nu::parse_typedef(&format!("list<{ROLLOUT_TYPEDEF}>"))?)?;
+    lib::nu::conform(&table, &lib::nu::parse_typedef(ROLLOUT_TYPEDEF)?)?;
     lib::nu::save_value(&args.out, &table)?;
 
     let summary = lib::nu::Value::record(
@@ -129,19 +131,118 @@ pub(crate) fn rollout_run(cli: &Cli, args: &RolloutRunArgs) -> BquestResult<()> 
     Ok(())
 }
 
+/// One graded bench answer.
+const BENCH_TYPEDEF: &str = "table<prompt_index: int, response: string, reward: float, \
+     verifier: string>";
+
+/// `bquest bench run`: the same generate-and-grade machinery as a
+/// rollout, but GREEDY and one reply per prompt, reporting a score
+/// rather than training data.
+///
+/// This is the only reading that answers whether the model is any
+/// good at the job. The general battery indicates what a posture is
+/// BREAKING; this measures what it can DO, and every item in it is
+/// something we care about by construction, so a miss is a defect
+/// rather than a trade-off.
+///
+/// Which posture is measured rides the config's adapter token, so
+/// reading a checkpoint means pointing the config at it.
+pub(crate) fn bench_run(cli: &Cli, args: &BenchRunArgs) -> BquestResult<()> {
+    let started = std::time::Instant::now();
+    let config = lib::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
+    let settings = lib::LibSettings::load_from_dir(cli.dir.as_ref(), cli.settings.as_deref())?;
+    let prompts = example::load_rlvr(&args.prompts)?;
+
+    #[cfg(feature = "cuda")]
+    let (device, dtype) = (candle_core::Device::new_cuda(0)?, candle_core::DType::BF16);
+    #[cfg(not(feature = "cuda"))]
+    let (device, dtype) = (candle_core::Device::Cpu, candle_core::DType::F32);
+
+    let model_dir = config.model_dir();
+    let checkpoint = lib::load_config(&model_dir)?;
+    let tokenizer = lib::load_tokenizer(&model_dir)?;
+    lib::verify_token_map(&tokenizer)?;
+    let weights = lib::load_weights(&config, dtype, &device)?;
+    let mut model = lib::OlmoHybrid::new(&checkpoint, settings, weights)?;
+
+    let mut rows: Vec<lib::nu::Value> = Vec::new();
+    let mut passed = 0usize;
+    for (prompt_index, prompt) in prompts.iter().enumerate() {
+        let rendered = lib::chat_render(&prompt.prompt, true).text;
+        let options = lib::GenerateOptions {
+            temperature: None,
+            top_p: None,
+            seed: 0,
+            sample_len: args.max_tokens,
+            chat: false,
+            ignore_stops: false,
+            speculate: false,
+        };
+        let mut generation = model.generate(&tokenizer, &rendered, &options)?;
+        let mut response = String::new();
+        for step in generation.by_ref() {
+            response.push_str(&step?.chunk);
+        }
+        let report = generation.finish();
+        response.push_str(&report.rest);
+        let reward = example::verify(&prompt.verifier, &response, &prompt.reference)?;
+        if reward > 0.0 {
+            passed += 1;
+        }
+        rows.push(lib::nu::Value::record(
+            lib::nu::record! {
+                "prompt_index" => v_int(prompt_index as i64),
+                "response" => v_str(&response),
+                "reward" => v_float(reward as f64),
+                "verifier" => v_str(&prompt.verifier),
+            },
+            span(),
+        ));
+        if (prompt_index + 1) % 25 == 0 {
+            eprintln!(
+                "bquest bench: {}/{} - {passed} passing",
+                prompt_index + 1,
+                prompts.len()
+            );
+        }
+    }
+
+    let table = lib::nu::Value::list(rows, span());
+    lib::nu::conform(&table, &lib::nu::parse_typedef(BENCH_TYPEDEF)?)?;
+    lib::nu::save_value(&args.out, &table)?;
+
+    let summary = lib::nu::Value::record(
+        lib::nu::record! {
+            "prompts" => v_int(prompts.len() as i64),
+            "passed" => v_int(passed as i64),
+            "pass_rate" => v_float(passed as f64 / prompts.len().max(1) as f64),
+            "adapter" => match &config.adapter {
+                Some(token) => v_str(token),
+                None => v_str("(base)"),
+            },
+            "out" => v_str(&args.out.display().to_string()),
+            "seconds" => v_float(started.elapsed().as_secs_f64()),
+        },
+        span(),
+    );
+    println!("{}", lib::nu::to_nuon_text(&summary)?);
+    Ok(())
+}
+
 /// Read a scored-rollout artifact back into per-prompt groups, each
 /// row padded to `width` with its response positions masked.
 ///
 /// A rollout longer than the window is DROPPED rather than clipped: a
 /// truncated reply would be graded on text the model did not finish
 /// producing.
+#[cfg(feature = "train")]
 pub(crate) fn load_groups(
     path: &Path,
     width: usize,
     pad_id: u32,
 ) -> BquestResult<(RolloutGroups, usize)> {
     let value = lib::nu::load_value(path)?;
-    lib::nu::conform(&value, &lib::nu::parse_typedef(&format!("list<{ROLLOUT_TYPEDEF}>"))?)?;
+    lib::nu::conform(&value, &lib::nu::parse_typedef(ROLLOUT_TYPEDEF)?)?;
     let rows = match value.as_list() {
         Ok(rows) => rows,
         Err(e) => snafu::whatever!("{}: not a rollout table: {e}", path.display()),

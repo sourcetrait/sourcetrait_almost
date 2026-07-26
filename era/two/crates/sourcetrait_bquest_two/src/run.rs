@@ -18,6 +18,12 @@ pub fn run() {
             MixCommand::Sample(args) => mix_sample(args),
             MixCommand::Instruct(args) => mix_instruct(&cli, args),
         },
+        Command::Bench { command } => match command {
+            BenchCommand::Run(args) => bench_run(&cli, args),
+        },
+        Command::Taskgen { command } => match command {
+            TaskgenCommand::Nuon(args) => taskgen_nuon(args),
+        },
         Command::Rollout { command } => match command {
             RolloutCommand::Run(args) => rollout_run(&cli, args),
         },

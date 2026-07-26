@@ -40,6 +40,17 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: MixCommand,
     },
+    /// Our own bench: does the model do the job we built it for.
+    Bench {
+        #[command(subcommand)]
+        command: BenchCommand,
+    },
+    /// Task generators: synthesised examples whose answers are
+    /// mechanically verifiable, for every stage plus the bench.
+    Taskgen {
+        #[command(subcommand)]
+        command: TaskgenCommand,
+    },
     /// Sampled, verifier-graded generation - the reinforcement
     /// stage's data source.
     Rollout {
@@ -87,10 +98,15 @@ pub(crate) struct StageArgs {
     /// The adapter artifact path (.safetensors).
     #[arg(long)]
     pub(crate) out: PathBuf,
-    /// LoRA rank.
+    /// Continue a previous stage's adapter rather than starting from
+    /// the base - the checkpoint chain. Rank and alpha then come from
+    /// that artifact and --rank / --alpha are ignored.
+    #[arg(long)]
+    pub(crate) resume: Option<PathBuf>,
+    /// LoRA rank (fresh adapters only).
     #[arg(long, default_value_t = 64)]
     pub(crate) rank: usize,
-    /// LoRA alpha; absent = 2 * rank.
+    /// LoRA alpha; absent = 2 * rank (fresh adapters only).
     #[arg(long)]
     pub(crate) alpha: Option<f64>,
     /// Peak learning rate (linear warmup then constant).
@@ -155,6 +171,52 @@ pub(crate) struct TrainRlvrArgs {
     pub(crate) seq_len: usize,
     #[command(flatten)]
     pub(crate) stage: StageArgs,
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub(crate) enum BenchCommand {
+    /// Answer every bench prompt greedily and report the pass rate -
+    /// what the model can DO, against the general battery's reading
+    /// of what a posture is breaking.
+    Run(BenchRunArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct BenchRunArgs {
+    /// A verifiable-prompt table (a taskgen bench split).
+    #[arg(long)]
+    pub(crate) prompts: PathBuf,
+    /// The per-item report (.nuon).
+    #[arg(long)]
+    pub(crate) out: PathBuf,
+    /// Decode budget per answer.
+    #[arg(long, default_value_t = 256)]
+    pub(crate) max_tokens: usize,
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub(crate) enum TaskgenCommand {
+    /// Convert-to-NUON: synthesised values rendered to JSON as the
+    /// ask and to NUON as the answer, so the ground truth is the
+    /// renderer itself.
+    Nuon(TaskgenNuonArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct TaskgenNuonArgs {
+    /// Output directory; the per-stage tables and the bench land in
+    /// it.
+    #[arg(long)]
+    pub(crate) out: PathBuf,
+    /// Examples to generate before the bench split.
+    #[arg(long, default_value_t = 512)]
+    pub(crate) count: usize,
+    /// Every nth example is held out as bench rather than trained on.
+    #[arg(long, default_value_t = 10)]
+    pub(crate) bench_every: usize,
+    /// The generation seed - the whole run is deterministic in it.
+    #[arg(long, default_value_t = 299_792_458)]
+    pub(crate) seed: u64,
 }
 
 #[derive(Debug, clap::Subcommand)]

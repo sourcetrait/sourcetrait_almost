@@ -17,6 +17,7 @@ pub(crate) mod pytext;
 pub(crate) mod rollout;
 pub mod run;
 pub(crate) mod score;
+pub(crate) mod taskgen;
 pub(crate) mod speculate;
 pub(crate) mod tagger;
 #[cfg(feature = "train")]
@@ -78,7 +79,11 @@ pub(crate) use crate::train::{
     train_sft,
 };
 pub(crate) use crate::example::mix_instruct;
-pub(crate) use crate::rollout::rollout_run;
+pub(crate) use crate::rollout::{
+    bench_run,
+    rollout_run,
+};
+pub(crate) use crate::taskgen::taskgen_nuon;
 #[allow(unused_imports)]
 pub(crate) use crate::hybrid_load::{
     HybridCheckpointConfig,
@@ -94,6 +99,8 @@ pub(crate) use crate::capability::{
     data_home,
 };
 pub(crate) use crate::cli::{
+    BenchCommand,
+    BenchRunArgs,
     CapabilityBridgeArgs,
     CapabilityCommand,
     CapabilityConvertArgs,
@@ -110,6 +117,8 @@ pub(crate) use crate::cli::{
     RolloutCommand,
     RolloutRunArgs,
     SpeculateCommand,
+    TaskgenCommand,
+    TaskgenNuonArgs,
     SpeculateRecordArgs,
     SpeculateSimulateArgs,
     SpeculateTokensArgs,
@@ -197,6 +206,7 @@ mod tests {
     mod mix;
     mod score;
     mod speculate;
+    mod taskgen;
     #[cfg(feature = "train")]
     mod train;
 }

@@ -1270,6 +1270,28 @@ fn print_stage_summary(
     Ok(())
 }
 
+/// Fresh adapters, or the previous stage's continued. This is the
+/// seam the staged sequence turns on: each stage either starts from
+/// the base or carries the checkpoint before it forward.
+#[cfg(feature = "train-cuda")]
+fn stage_adapters<AD: AutodiffBackend>(
+    stage: &StageArgs,
+    config: &HybridCheckpointConfig,
+    model_id: &str,
+    device: &AD::Device,
+) -> BquestResult<ModelAdapters<AD>> {
+    match &stage.resume {
+        Some(path) => {
+            eprintln!("bquest: resuming from adapter {}", path.display());
+            ModelAdapters::<AD>::load(path, config, model_id, device)
+        }
+        None => {
+            let alpha = stage.alpha.unwrap_or(2.0 * stage.rank as f64);
+            ModelAdapters::<AD>::init(config, stage.rank, alpha, stage.seed, device)
+        }
+    }
+}
+
 fn stage_options(args: &StageArgs, steps: usize) -> LoopOptions {
     LoopOptions {
         steps,
@@ -1287,7 +1309,6 @@ pub(crate) fn train_sft(cli: &Cli, args: &TrainSftArgs) -> BquestResult<()> {
     let config = lib::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
     let model_dir = config.model_dir();
     let model_id = config.model.clone();
-    let alpha = args.stage.alpha.unwrap_or(2.0 * args.stage.rank as f64);
     let pack = load_chunks(&args.chunks)?;
     let Some(masks) = pack.masks else {
         snafu::whatever!(
@@ -1318,13 +1339,8 @@ pub(crate) fn train_sft(cli: &Cli, args: &TrainSftArgs) -> BquestResult<()> {
         let hybrid_config = HybridCheckpointConfig::load(&model_dir)?;
         let weights = HybridWeights::load(&model_dir)?;
         let model = HybridModel::<CudaBack>::new(&hybrid_config, weights, device.clone())?;
-        let mut adapters = ModelAdapters::<TrainAd>::init(
-            &hybrid_config,
-            args.stage.rank,
-            alpha,
-            args.stage.seed,
-            &device,
-        )?;
+        let mut adapters =
+            stage_adapters::<TrainAd>(&args.stage, &hybrid_config, &model_id, &device)?;
         let batch = SupervisedBatch {
             rows: &rows,
             masks: &masks,
@@ -1343,7 +1359,7 @@ pub(crate) fn train_sft(cli: &Cli, args: &TrainSftArgs) -> BquestResult<()> {
     }
     #[cfg(not(feature = "train-cuda"))]
     {
-        let _ = (model_dir, model_id, alpha, steps, log_path, masks, rows);
+        let _ = (model_dir, model_id, steps, log_path, masks, rows);
         snafu::whatever!("bquest train sft runs on cuda (rebuild with --features train-cuda)")
     }
 }
@@ -1356,7 +1372,6 @@ pub(crate) fn train_dpo(cli: &Cli, args: &TrainDpoArgs) -> BquestResult<()> {
     let config = lib::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
     let model_dir = config.model_dir();
     let model_id = config.model.clone();
-    let alpha = args.stage.alpha.unwrap_or(2.0 * args.stage.rank as f64);
     let pairs = example::load_dpo(&args.pairs)?;
     let log_path = stage_log_path(&args.stage);
     let width = args.seq_len + 1;
@@ -1417,13 +1432,8 @@ pub(crate) fn train_dpo(cli: &Cli, args: &TrainDpoArgs) -> BquestResult<()> {
             eprintln!("bquest train dpo: {dropped} pairs exceed the window and were DROPPED");
         }
         let steps = args.stage.steps.unwrap_or(encoded.len());
-        let mut adapters = ModelAdapters::<TrainAd>::init(
-            &hybrid_config,
-            args.stage.rank,
-            alpha,
-            args.stage.seed,
-            &device,
-        )?;
+        let mut adapters =
+            stage_adapters::<TrainAd>(&args.stage, &hybrid_config, &model_id, &device)?;
         let report = dpo_loop::<TrainAd>(
             &model,
             &mut adapters,
@@ -1438,7 +1448,7 @@ pub(crate) fn train_dpo(cli: &Cli, args: &TrainDpoArgs) -> BquestResult<()> {
     }
     #[cfg(not(feature = "train-cuda"))]
     {
-        let _ = (model_dir, model_id, alpha, log_path, width, pairs);
+        let _ = (model_dir, model_id, log_path, width, pairs);
         snafu::whatever!("bquest train dpo runs on cuda (rebuild with --features train-cuda)")
     }
 }
@@ -1451,7 +1461,6 @@ pub(crate) fn train_rlvr(cli: &Cli, args: &TrainRlvrArgs) -> BquestResult<()> {
     let config = lib::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
     let model_dir = config.model_dir();
     let model_id = config.model.clone();
-    let alpha = args.stage.alpha.unwrap_or(2.0 * args.stage.rank as f64);
     let log_path = stage_log_path(&args.stage);
     let width = args.seq_len + 1;
     let (raw_groups, dropped) =
@@ -1483,13 +1492,8 @@ pub(crate) fn train_rlvr(cli: &Cli, args: &TrainRlvrArgs) -> BquestResult<()> {
         let hybrid_config = HybridCheckpointConfig::load(&model_dir)?;
         let weights = HybridWeights::load(&model_dir)?;
         let model = HybridModel::<CudaBack>::new(&hybrid_config, weights, device.clone())?;
-        let mut adapters = ModelAdapters::<TrainAd>::init(
-            &hybrid_config,
-            args.stage.rank,
-            alpha,
-            args.stage.seed,
-            &device,
-        )?;
+        let mut adapters =
+            stage_adapters::<TrainAd>(&args.stage, &hybrid_config, &model_id, &device)?;
         let report = rlvr_loop::<TrainAd>(
             &model,
             &mut adapters,
@@ -1503,7 +1507,7 @@ pub(crate) fn train_rlvr(cli: &Cli, args: &TrainRlvrArgs) -> BquestResult<()> {
     }
     #[cfg(not(feature = "train-cuda"))]
     {
-        let _ = (model_dir, model_id, alpha, log_path, steps, groups);
+        let _ = (model_dir, model_id, log_path, steps, groups);
         snafu::whatever!("bquest train rlvr runs on cuda (rebuild with --features train-cuda)")
     }
 }
