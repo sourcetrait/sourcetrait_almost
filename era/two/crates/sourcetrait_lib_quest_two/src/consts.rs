@@ -19,6 +19,11 @@ pub const SUITE_CONFIG_RELATIVE: &str = "sourcetrait/quest";
 /// carries endoftext; chat turns end on im_end).
 pub const STOP_TOKENS: [&str; 2] = ["<|im_end|>", "<|endoftext|>"];
 
+/// The end-of-sequence token the chat template closes its FINAL
+/// assistant turn with (the template's `eos_token` argument; interior
+/// turns close on `<|im_end|>` instead).
+pub const EOS_TOKEN: &str = "<|endoftext|>";
+
 // The DPO artifact's added-token ids the engine leans on (identical to
 // era-one olmo3's map; the BASE checkpoint differs at 100266-100275 -
 // extra_id_1..10, no tool markers).

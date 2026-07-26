@@ -83,8 +83,16 @@ pub use crate::adapter::{
     load_weights,
 };
 pub use crate::chat::{
+    AssistantSpan,
+    ChatMessage,
+    ChatRender,
+    ChatRole,
+    EncodedRender,
+    TokenSpan,
     chat_continue,
+    chat_render,
     chat_wrap,
+    encode_render,
     resolve_stop_ids,
 };
 pub use crate::checkpoint::{

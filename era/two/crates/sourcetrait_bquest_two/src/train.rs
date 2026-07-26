@@ -18,7 +18,7 @@ use burn::tensor::{
 };
 
 type FloatTensor<B, const D: usize> = burn::tensor::Tensor<B, D>;
-type OptState<B> = <burn::optim::AdamW as SimpleOptimizer<B>>::State<2>;
+pub(crate) type OptState<B> = <burn::optim::AdamW as SimpleOptimizer<B>>::State<2>;
 
 /// The loop knobs (paths stay with the verb; the gate reuses the
 /// loop on toy values).
@@ -242,26 +242,21 @@ fn cross_entropy_chunked<AD: AutodiffBackend>(
         .div_scalar(n as f64)
 }
 
-/// One training step's gradients under the per-layer VJP chain: pass
-/// 1 (no grad, frozen adapter views) caches each layer's input; the
-/// loss block's input gradient then seeds a top-down chain where
-/// sum(out * grad_out) per layer yields that layer's adapter
-/// gradients and the next input gradient.
-pub(crate) fn chain_step<AD: AutodiffBackend>(
+/// Pass 1 (no grad, frozen adapter views): cache each layer's INPUT
+/// and return them with the last layer's output (pre final norm).
+pub(crate) fn forward_cache<AD: AutodiffBackend>(
     model: &HybridModel<AD::InnerBackend>,
     adapters: &ModelAdapters<AD>,
     mask_inner: &FloatTensor<AD::InnerBackend, 2>,
     inputs: &[u32],
-    targets: &[u32],
-    loss_chunk: usize,
     device: &AD::Device,
-) -> BquestResult<StepOutcome<AD::InnerBackend>> {
+) -> (
+    Vec<FloatTensor<AD::InnerBackend, 2>>,
+    FloatTensor<AD::InnerBackend, 2>,
+) {
     let dims = dims_of::<AD>(model);
     let frozen: Vec<LayerAdapters<AD::InnerBackend>> =
         adapters.layers.iter().map(adapters_inner::<AD>).collect();
-
-    // Pass 1 (no grad): cache each layer's INPUT; x ends as the last
-    // layer's output (pre final norm).
     let mut layer_inputs: Vec<FloatTensor<AD::InnerBackend, 2>> =
         Vec::with_capacity(model.layers.len());
     let mut x = model.embed(inputs);
@@ -269,30 +264,94 @@ pub(crate) fn chain_step<AD: AutodiffBackend>(
         layer_inputs.push(x.clone());
         x = dims_block_forward(&dims, block, x, mask_inner, Some(frozen_layer), device);
     }
+    (layer_inputs, x)
+}
 
-    // Loss block: final norm + chunked CE as a small autodiff graph;
-    // its input gradient seeds the layer chain.
-    let top_input = FloatTensor::<AD, 2>::from_inner(x).require_grad();
+/// The loss block, as a small autodiff graph over ONE sequence's top
+/// hidden state: final-norm it, hand it plus the head to
+/// `build_loss`, and return the scalar loss with the seed gradient
+/// the layer chain consumes.
+///
+/// The objective lives entirely in `build_loss`. That is the whole
+/// reason supervised, preference and reinforcement training share the
+/// machinery below - the chain never learns what it is training.
+pub(crate) fn seed_from_hidden<AD, F>(
+    model: &HybridModel<AD::InnerBackend>,
+    top_x: FloatTensor<AD::InnerBackend, 2>,
+    build_loss: F,
+) -> BquestResult<(f32, FloatTensor<AD::InnerBackend, 2>)>
+where
+    AD: AutodiffBackend,
+    F: FnOnce(FloatTensor<AD, 2>, &FloatTensor<AD, 2>) -> BquestResult<FloatTensor<AD, 1>>,
+{
+    let top_input = FloatTensor::<AD, 2>::from_inner(top_x).require_grad();
     let hidden = hybrid::rms_norm(
         top_input.clone(),
         &FloatTensor::from_inner(model.final_norm.clone()),
         model.eps,
     );
-    let loss = cross_entropy_chunked::<AD>(
-        hidden,
-        &FloatTensor::from_inner(model.lm_head_transposed.clone()),
-        targets,
-        loss_chunk,
-        device,
-    );
+    let head = FloatTensor::<AD, 2>::from_inner(model.lm_head_transposed.clone());
+    let loss = build_loss(hidden, &head)?;
     let loss_value: f32 = loss.clone().into_scalar().elem();
     let mut top_grads = loss.backward();
-    let Some(mut grad_out) = top_input.grad_remove(&mut top_grads) else {
+    let Some(grad_out) = top_input.grad_remove(&mut top_grads) else {
         snafu::whatever!("no gradient reached the loss block input");
     };
-    drop(top_grads);
+    Ok((loss_value, grad_out))
+}
 
-    // Pass 2: per-layer VJP, top down; at most one layer graph live.
+/// The paired loss block: TWO sequences under ONE scalar loss, so a
+/// preference objective that couples them backwards once and yields a
+/// seed gradient for each. Each seed then drives its own layer chain
+/// and the two gradient sets accumulate.
+pub(crate) fn seed_pair_from_hidden<AD, F>(
+    model: &HybridModel<AD::InnerBackend>,
+    left_x: FloatTensor<AD::InnerBackend, 2>,
+    right_x: FloatTensor<AD::InnerBackend, 2>,
+    build_loss: F,
+) -> BquestResult<(
+    f32,
+    FloatTensor<AD::InnerBackend, 2>,
+    FloatTensor<AD::InnerBackend, 2>,
+)>
+where
+    AD: AutodiffBackend,
+    F: FnOnce(
+        FloatTensor<AD, 2>,
+        FloatTensor<AD, 2>,
+        &FloatTensor<AD, 2>,
+    ) -> BquestResult<FloatTensor<AD, 1>>,
+{
+    let left_input = FloatTensor::<AD, 2>::from_inner(left_x).require_grad();
+    let right_input = FloatTensor::<AD, 2>::from_inner(right_x).require_grad();
+    let norm = FloatTensor::<AD, 1>::from_inner(model.final_norm.clone());
+    let left_hidden = hybrid::rms_norm(left_input.clone(), &norm, model.eps);
+    let right_hidden = hybrid::rms_norm(right_input.clone(), &norm, model.eps);
+    let head = FloatTensor::<AD, 2>::from_inner(model.lm_head_transposed.clone());
+    let loss = build_loss(left_hidden, right_hidden, &head)?;
+    let loss_value: f32 = loss.clone().into_scalar().elem();
+    let mut top_grads = loss.backward();
+    let (Some(left_grad), Some(right_grad)) = (
+        left_input.grad_remove(&mut top_grads),
+        right_input.grad_remove(&mut top_grads),
+    ) else {
+        snafu::whatever!("a paired loss left one sequence without a gradient");
+    };
+    Ok((loss_value, left_grad, right_grad))
+}
+
+/// Pass 2: per-layer VJP, top down from a seed gradient; at most one
+/// layer's graph is live at a time.
+pub(crate) fn chain_from_seed<AD: AutodiffBackend>(
+    model: &HybridModel<AD::InnerBackend>,
+    adapters: &ModelAdapters<AD>,
+    mask_inner: &FloatTensor<AD::InnerBackend, 2>,
+    layer_inputs: &[FloatTensor<AD::InnerBackend, 2>],
+    seed: FloatTensor<AD::InnerBackend, 2>,
+    device: &AD::Device,
+) -> BquestResult<HashMap<String, FloatTensor<AD::InnerBackend, 2>>> {
+    let dims = dims_of::<AD>(model);
+    let mut grad_out = seed;
     let mut lora_grads: HashMap<String, FloatTensor<AD::InnerBackend, 2>> = HashMap::new();
     for (index, (block, layer_adapters)) in model
         .layers
@@ -327,8 +386,59 @@ pub(crate) fn chain_step<AD: AutodiffBackend>(
         };
         grad_out = next_grad;
     }
+    Ok(lora_grads)
+}
 
-    Ok(StepOutcome { loss: loss_value, grads: lora_grads })
+/// Add one gradient set into an accumulator, summing where a name is
+/// already present. Preference and reinforcement steps both fold
+/// several sequences into one optimizer step, which continued
+/// pretraining never needed.
+pub(crate) fn accumulate_grads<B: Backend>(
+    into: &mut HashMap<String, FloatTensor<B, 2>>,
+    from: HashMap<String, FloatTensor<B, 2>>,
+) {
+    for (name, grad) in from {
+        match into.remove(&name) {
+            Some(existing) => into.insert(name, existing + grad),
+            None => into.insert(name, grad),
+        };
+    }
+}
+
+/// Scale an accumulated gradient set (the mean over its contributors).
+pub(crate) fn scale_grads<B: Backend>(
+    grads: &mut HashMap<String, FloatTensor<B, 2>>,
+    factor: f64,
+) {
+    let names: Vec<String> = grads.keys().cloned().collect();
+    for name in names {
+        if let Some(grad) = grads.remove(&name) {
+            grads.insert(name, grad.mul_scalar(factor));
+        }
+    }
+}
+
+/// One continued-pretraining step: the plain LM objective over every
+/// position, composed from the three pieces above.
+pub(crate) fn chain_step<AD: AutodiffBackend>(
+    model: &HybridModel<AD::InnerBackend>,
+    adapters: &ModelAdapters<AD>,
+    mask_inner: &FloatTensor<AD::InnerBackend, 2>,
+    inputs: &[u32],
+    targets: &[u32],
+    loss_chunk: usize,
+    device: &AD::Device,
+) -> BquestResult<StepOutcome<AD::InnerBackend>> {
+    let (layer_inputs, top_x) =
+        forward_cache::<AD>(model, adapters, mask_inner, inputs, device);
+    let (loss, seed) = seed_from_hidden::<AD, _>(model, top_x, |hidden, head| {
+        Ok(cross_entropy_chunked::<AD>(
+            hidden, head, targets, loss_chunk, device,
+        ))
+    })?;
+    let grads =
+        chain_from_seed::<AD>(model, adapters, mask_inner, &layer_inputs, seed, device)?;
+    Ok(StepOutcome { loss, grads })
 }
 
 /// The full-graph reference step (toy scale only): the identical
@@ -441,20 +551,14 @@ pub(crate) fn train_loop<AD: AutodiffBackend>(
         }
         last_loss = outcome.loss;
 
-        let learning_rate = options.learning_rate
-            * (((step + 1) as f64 / options.warmup_steps.max(1) as f64).min(1.0));
-        for (name, tensor) in adapters.params_mut() {
-            let Some(grad) = outcome.grads.remove(&name) else {
-                snafu::whatever!("missing accumulated gradient for {name}");
-            };
-            let inner = tensor.clone().inner();
-            let state = states.remove(&name);
-            let (updated, state) = optimizer.step(learning_rate, inner, grad, state);
-            if let Some(state) = state {
-                states.insert(name, state);
-            }
-            *tensor = FloatTensor::from_inner(updated).require_grad();
-        }
+        let learning_rate = warmup_rate(options.learning_rate, options.warmup_steps, step);
+        optimizer_step::<AD>(
+            &optimizer,
+            &mut states,
+            adapters,
+            &mut outcome.grads,
+            learning_rate,
+        )?;
         if step == 0 && probe.as_deref() == Some("step") {
             eprintln!("bquest train probe: parked at step");
             std::thread::sleep(std::time::Duration::from_secs(3));
@@ -494,6 +598,37 @@ pub(crate) fn train_loop<AD: AutodiffBackend>(
     })
 }
 
+/// The shared learning rate schedule: linear warmup to the peak,
+/// then constant.
+pub(crate) fn warmup_rate(peak: f64, warmup_steps: usize, step: usize) -> f64 {
+    peak * (((step + 1) as f64 / warmup_steps.max(1) as f64).min(1.0))
+}
+
+/// Apply one AdamW update per adapter tensor, consuming the gradient
+/// set. Shared by every stage so the optimizer, its per-tensor state
+/// keying and its no-weight-decay posture cannot drift between them.
+pub(crate) fn optimizer_step<AD: AutodiffBackend>(
+    optimizer: &burn::optim::AdamW,
+    states: &mut HashMap<String, OptState<AD::InnerBackend>>,
+    adapters: &mut ModelAdapters<AD>,
+    grads: &mut HashMap<String, FloatTensor<AD::InnerBackend, 2>>,
+    learning_rate: f64,
+) -> BquestResult<()> {
+    for (name, tensor) in adapters.params_mut() {
+        let Some(grad) = grads.remove(&name) else {
+            snafu::whatever!("missing accumulated gradient for {name}");
+        };
+        let inner = tensor.clone().inner();
+        let state = states.remove(&name);
+        let (updated, state) = optimizer.step(learning_rate, inner, grad, state);
+        if let Some(state) = state {
+            states.insert(name, state);
+        }
+        *tensor = FloatTensor::from_inner(updated).require_grad();
+    }
+    Ok(())
+}
+
 /// Per-layer gradient health print (step 0, QUEST_TRAIN_DEBUG_GRADS):
 /// non-finite counts localize a NaN backward to its layer.
 fn debug_grad_health<B: Backend>(
@@ -527,33 +662,83 @@ fn debug_grad_health<B: Backend>(
     Ok(())
 }
 
-/// Read a packed-chunks artifact ("chunks" u32 [n, seq_len + 1] -
-/// the mix pack contract).
-fn load_chunks(path: &Path) -> BquestResult<Vec<Vec<u32>>> {
+/// A loaded pack: the id rows, and the per-position loss mask when
+/// the artifact carries one (supervised packs do; a continued-
+/// pretraining pack does not, and every position trains).
+pub(crate) struct ChunkPack {
+    pub(crate) rows: Vec<Vec<u32>>,
+    pub(crate) masks: Option<Vec<Vec<u8>>>,
+}
+
+/// Read a packed artifact: ids as u32 [n, width], and an optional
+/// loss mask as u8 of the same shape.
+///
+/// ## DEV
+/// This REJECTS any tensor it does not recognise. The previous form
+/// read one named tensor and ignored the rest, so the first objective
+/// to write a second tensor beside the ids would have had it skipped
+/// in silence - a run that completes cleanly having trained the wrong
+/// objective. That is the failure this rejection exists to make
+/// impossible, and it is why the check is here rather than in the
+/// writer.
+/// ##
+fn load_chunks(path: &Path) -> BquestResult<ChunkPack> {
     let bytes = fs::read(path)?;
     let parsed = match safetensors::SafeTensors::deserialize(&bytes) {
         Ok(parsed) => parsed,
         Err(error) => snafu::whatever!("chunks parse failed: {error}"),
     };
-    let Ok(view) = parsed.tensor("chunks") else {
-        snafu::whatever!("the artifact carries no chunks tensor");
+    for name in parsed.names() {
+        snafu::ensure_whatever!(
+            name == example::TENSOR_IDS || name == example::TENSOR_LOSS_MASK,
+            "pack carries unrecognised tensor {name:?} \
+             (expected {:?} and optionally {:?})",
+            example::TENSOR_IDS,
+            example::TENSOR_LOSS_MASK
+        );
+    }
+    let Ok(view) = parsed.tensor(example::TENSOR_IDS) else {
+        snafu::whatever!("the artifact carries no {:?} tensor", example::TENSOR_IDS);
     };
     snafu::ensure_whatever!(
         view.dtype() == safetensors::Dtype::U32,
-        "chunks: expected u32, got {:?}",
+        "ids: expected u32, got {:?}",
         view.dtype()
     );
     let shape = view.shape();
-    snafu::ensure_whatever!(shape.len() == 2, "chunks: expected rank 2, got {shape:?}");
-    let (rows, width) = (shape[0], shape[1]);
+    snafu::ensure_whatever!(shape.len() == 2, "ids: expected rank 2, got {shape:?}");
+    let (row_count, width) = (shape[0], shape[1]);
     let values: Vec<u32> = view
         .data()
         .chunks_exact(4)
         .map(|quad| u32::from_le_bytes([quad[0], quad[1], quad[2], quad[3]]))
         .collect();
-    Ok((0..rows)
+    let rows: Vec<Vec<u32>> = (0..row_count)
         .map(|row| values[row * width..(row + 1) * width].to_vec())
-        .collect())
+        .collect();
+
+    let masks = match parsed.tensor(example::TENSOR_LOSS_MASK) {
+        Ok(mask_view) => {
+            snafu::ensure_whatever!(
+                mask_view.dtype() == safetensors::Dtype::U8,
+                "loss mask: expected u8, got {:?}",
+                mask_view.dtype()
+            );
+            snafu::ensure_whatever!(
+                mask_view.shape() == [row_count, width],
+                "loss mask shape {:?} does not match the ids [{row_count}, {width}]",
+                mask_view.shape()
+            );
+            let flat = mask_view.data().to_vec();
+            Some(
+                (0..row_count)
+                    .map(|row| flat[row * width..(row + 1) * width].to_vec())
+                    .collect(),
+            )
+        }
+        Err(_) => None,
+    };
+    Ok(ChunkPack { rows, masks })
 }
 
 // ---- The toy-config gate (cpu f32) --------------------------------
@@ -927,7 +1112,15 @@ pub(crate) fn train_cpt(cli: &Cli, args: &TrainCptArgs) -> BquestResult<()> {
     let model_dir = config.model_dir();
     let model_id = config.model.clone();
     let alpha = args.alpha.unwrap_or(2.0 * args.rank as f64);
-    let chunks = load_chunks(&args.chunks)?;
+    let pack = load_chunks(&args.chunks)?;
+    // A masked pack is a SUPERVISED pack; running it here would
+    // average the loss over the prompt as well as the reply.
+    snafu::ensure_whatever!(
+        pack.masks.is_none(),
+        "{} carries a loss mask, so it is a supervised pack - use `train sft`",
+        args.chunks.display()
+    );
+    let chunks = pack.rows;
     let steps = args.steps.unwrap_or(chunks.len());
     let log_path = match &args.log {
         Some(path) => path.clone(),
@@ -1013,4 +1206,465 @@ pub(crate) fn train_cpt(cli: &Cli, args: &TrainCptArgs) -> BquestResult<()> {
         let _ = (model_dir, model_id, alpha, steps, log_path);
         snafu::whatever!("bquest train cpt runs on cuda (rebuild with --features train-cuda)")
     }
+}
+
+// ---- The post-training stages -------------------------------------
+
+/// The adapter-off forward: the FROZEN base, which is the reference
+/// model a preference objective compares against. Zero-init adapters
+/// are bit-exact to the base and the gate locks that, so no second
+/// copy of the weights exists anywhere in this crate.
+fn forward_plain<B: Backend>(
+    model: &HybridModel<B>,
+    mask_inner: &FloatTensor<B, 2>,
+    inputs: &[u32],
+    device: &B::Device,
+) -> FloatTensor<B, 2> {
+    let dims = HybridDims {
+        attn_heads: model.attn_heads,
+        attn_head_dim: model.attn_head_dim,
+        gdn_heads: model.gdn_heads,
+        gdn_key_dim: model.gdn_key_dim,
+        gdn_value_dim: model.gdn_value_dim,
+        eps: model.eps,
+    };
+    let mut x = model.embed(inputs);
+    for block in model.layers.iter() {
+        x = dims_block_forward(&dims, block, x, mask_inner, None, device);
+    }
+    x
+}
+
+/// A sequence's masked log-probability under the frozen base, with no
+/// autodiff graph anywhere. Chunked over the head so the (n, vocab)
+/// logits never materialize whole.
+fn reference_logprob<B: Backend>(
+    model: &HybridModel<B>,
+    mask_inner: &FloatTensor<B, 2>,
+    inputs: &[u32],
+    targets: &[u32],
+    mask: &[u8],
+    chunk: usize,
+    device: &B::Device,
+) -> BquestResult<f32> {
+    let top = forward_plain::<B>(model, mask_inner, inputs, device);
+    let hidden = hybrid::rms_norm(top, &model.final_norm, model.eps);
+    let n = targets.len();
+    let chunk = chunk.max(1);
+    let mut total = 0f64;
+    let mut start = 0usize;
+    while start < n {
+        let end = (start + chunk).min(n);
+        let rows = end - start;
+        let logits = hidden
+            .clone()
+            .narrow(0, start, rows)
+            .matmul(model.lm_head_transposed.clone());
+        let log_probs = burn::tensor::activation::log_softmax(logits, 1);
+        let indices: Vec<i64> = targets[start..end].iter().map(|t| *t as i64).collect();
+        let index_tensor = burn::tensor::Tensor::<B, 2, Int>::from_data(
+            burn::tensor::TensorData::new(indices, [rows, 1]),
+            device,
+        );
+        let picked = log_probs.gather(1, index_tensor);
+        let values = match picked.into_data().convert::<f32>().to_vec::<f32>() {
+            Ok(values) => values,
+            Err(error) => snafu::whatever!("reference logprob extraction failed: {error:?}"),
+        };
+        for (offset, value) in values.iter().enumerate() {
+            if mask[start + offset] != 0 {
+                total += *value as f64;
+            }
+        }
+        start = end;
+    }
+    Ok(total as f32)
+}
+
+/// One packed supervised row split into what the objective consumes:
+/// inputs, next-token targets, and the target-aligned loss mask.
+fn split_row<'a>(ids: &'a [u32], mask: &'a [u8]) -> (&'a [u32], &'a [u32], &'a [u8]) {
+    let width = ids.len();
+    (&ids[..width - 1], &ids[1..], &mask[1..])
+}
+
+/// The supervised loop: masked next-token cross-entropy over packed
+/// example rows, `accumulate` rows folded into each optimizer step.
+pub(crate) fn sft_loop<AD: AutodiffBackend>(
+    model: &HybridModel<AD::InnerBackend>,
+    adapters: &mut ModelAdapters<AD>,
+    rows: &[Vec<u32>],
+    masks: &[Vec<u8>],
+    accumulate: usize,
+    options: &LoopOptions,
+    device: &AD::Device,
+    mut on_step: impl FnMut(&StepLog) -> BquestResult<()>,
+) -> BquestResult<TrainReport> {
+    snafu::ensure_whatever!(!rows.is_empty(), "no supervised rows");
+    let seq_len = rows[0].len() - 1;
+    let mask_inner = causal_mask::<AD::InnerBackend>(seq_len, device);
+    let optimizer = burn::optim::AdamWConfig::new().with_weight_decay(0.0).build();
+    let mut states: HashMap<String, OptState<AD::InnerBackend>> = HashMap::new();
+    let accumulate = accumulate.max(1);
+
+    let mut first_loss = 0f32;
+    let mut last_loss = 0f32;
+    let mut trained_tokens = 0usize;
+    let started = std::time::Instant::now();
+    for step in 0..options.steps {
+        let mut accumulated: HashMap<String, FloatTensor<AD::InnerBackend, 2>> = HashMap::new();
+        let mut batch_loss = 0f32;
+        for slot in 0..accumulate {
+            let index = (step * accumulate + slot) % rows.len();
+            let (ids, mask) = (&rows[index], &masks[index]);
+            snafu::ensure_whatever!(
+                ids.len() == seq_len + 1 && mask.len() == seq_len + 1,
+                "row {index} is {} wide against seq_len {seq_len}",
+                ids.len()
+            );
+            let (inputs, targets, target_mask) = split_row(ids, mask);
+            let supervised = objective::supervised_count(target_mask);
+            snafu::ensure_whatever!(
+                supervised > 0,
+                "row {index} supervises no position - packing should have dropped it"
+            );
+            let (layer_inputs, top_x) =
+                forward_cache::<AD>(model, adapters, &mask_inner, inputs, device);
+            let (loss, seed) = seed_from_hidden::<AD, _>(model, top_x, |hidden, head| {
+                objective::masked_cross_entropy::<AD>(
+                    hidden,
+                    head,
+                    targets,
+                    target_mask,
+                    options.loss_chunk,
+                    device,
+                )
+            })?;
+            let grads = chain_from_seed::<AD>(
+                model,
+                adapters,
+                &mask_inner,
+                &layer_inputs,
+                seed,
+                device,
+            )?;
+            accumulate_grads(&mut accumulated, grads);
+            batch_loss += loss;
+            trained_tokens += supervised;
+        }
+        scale_grads(&mut accumulated, 1.0 / accumulate as f64);
+        let batch_loss = batch_loss / accumulate as f32;
+        if step == 0 {
+            first_loss = batch_loss;
+        }
+        last_loss = batch_loss;
+
+        let learning_rate = warmup_rate(options.learning_rate, options.warmup_steps, step);
+        optimizer_step::<AD>(
+            &optimizer,
+            &mut states,
+            adapters,
+            &mut accumulated,
+            learning_rate,
+        )?;
+
+        let elapsed = started.elapsed().as_secs_f64();
+        let log = StepLog {
+            step: step + 1,
+            loss: last_loss,
+            learning_rate,
+            tokens_per_second: trained_tokens as f64 / elapsed,
+            elapsed_seconds: elapsed,
+        };
+        on_step(&log)?;
+        if (step + 1) % options.log_every.max(1) == 0 || step + 1 == options.steps {
+            eprintln!(
+                "bquest train sft: step {} | loss {:.4} | lr {:.2e} | {:.0} supervised tok/s",
+                log.step, log.loss, log.learning_rate, log.tokens_per_second
+            );
+        }
+    }
+    Ok(TrainReport {
+        first_loss,
+        final_loss: last_loss,
+        steps: options.steps,
+        trained_tokens,
+        seconds: started.elapsed().as_secs_f64(),
+    })
+}
+
+/// One preference pair, encoded: the two candidate continuations of
+/// a shared prompt, each with its response mask, plus the frozen
+/// base's log-probability for each.
+pub(crate) struct EncodedPair {
+    pub(crate) chosen: (Vec<u32>, Vec<u8>),
+    pub(crate) rejected: (Vec<u32>, Vec<u8>),
+    pub(crate) chosen_reference: f32,
+    pub(crate) rejected_reference: f32,
+}
+
+/// The preference loop. Each pair backwards ONCE through a loss that
+/// couples both candidates, yielding a seed gradient per sequence;
+/// the two chains then accumulate into one optimizer step.
+pub(crate) fn dpo_loop<AD: AutodiffBackend>(
+    model: &HybridModel<AD::InnerBackend>,
+    adapters: &mut ModelAdapters<AD>,
+    pairs: &[EncodedPair],
+    beta: f64,
+    options: &LoopOptions,
+    device: &AD::Device,
+    mut on_step: impl FnMut(&StepLog) -> BquestResult<()>,
+) -> BquestResult<TrainReport> {
+    snafu::ensure_whatever!(!pairs.is_empty(), "no preference pairs");
+    let optimizer = burn::optim::AdamWConfig::new().with_weight_decay(0.0).build();
+    let mut states: HashMap<String, OptState<AD::InnerBackend>> = HashMap::new();
+    let mut first_loss = 0f32;
+    let mut last_loss = 0f32;
+    let mut trained_tokens = 0usize;
+    let started = std::time::Instant::now();
+
+    for step in 0..options.steps {
+        let pair = &pairs[step % pairs.len()];
+        let seq_len = pair.chosen.0.len() - 1;
+        snafu::ensure_whatever!(
+            pair.rejected.0.len() == pair.chosen.0.len(),
+            "a preference pair's candidates are padded to different widths"
+        );
+        let mask_inner = causal_mask::<AD::InnerBackend>(seq_len, device);
+        let (chosen_in, chosen_targets, chosen_mask) =
+            split_row(&pair.chosen.0, &pair.chosen.1);
+        let (rejected_in, rejected_targets, rejected_mask) =
+            split_row(&pair.rejected.0, &pair.rejected.1);
+
+        let (chosen_layers, chosen_top) =
+            forward_cache::<AD>(model, adapters, &mask_inner, chosen_in, device);
+        let (rejected_layers, rejected_top) =
+            forward_cache::<AD>(model, adapters, &mask_inner, rejected_in, device);
+
+        let loss_chunk = options.loss_chunk;
+        let (loss, chosen_seed, rejected_seed) = seed_pair_from_hidden::<AD, _>(
+            model,
+            chosen_top,
+            rejected_top,
+            |chosen_hidden, rejected_hidden, head| {
+                let chosen_logprob = objective::sequence_logprob::<AD>(
+                    chosen_hidden,
+                    head,
+                    chosen_targets,
+                    chosen_mask,
+                    loss_chunk,
+                    device,
+                )?;
+                let rejected_logprob = objective::sequence_logprob::<AD>(
+                    rejected_hidden,
+                    head,
+                    rejected_targets,
+                    rejected_mask,
+                    loss_chunk,
+                    device,
+                )?;
+                Ok(objective::dpo_loss::<AD>(
+                    chosen_logprob,
+                    rejected_logprob,
+                    pair.chosen_reference,
+                    pair.rejected_reference,
+                    beta,
+                ))
+            },
+        )?;
+
+        let mut accumulated = chain_from_seed::<AD>(
+            model,
+            adapters,
+            &mask_inner,
+            &chosen_layers,
+            chosen_seed,
+            device,
+        )?;
+        let rejected_grads = chain_from_seed::<AD>(
+            model,
+            adapters,
+            &mask_inner,
+            &rejected_layers,
+            rejected_seed,
+            device,
+        )?;
+        accumulate_grads(&mut accumulated, rejected_grads);
+
+        if step == 0 {
+            first_loss = loss;
+        }
+        last_loss = loss;
+        trained_tokens += objective::supervised_count(chosen_mask)
+            + objective::supervised_count(rejected_mask);
+
+        let learning_rate = warmup_rate(options.learning_rate, options.warmup_steps, step);
+        optimizer_step::<AD>(
+            &optimizer,
+            &mut states,
+            adapters,
+            &mut accumulated,
+            learning_rate,
+        )?;
+
+        let elapsed = started.elapsed().as_secs_f64();
+        let log = StepLog {
+            step: step + 1,
+            loss: last_loss,
+            learning_rate,
+            tokens_per_second: trained_tokens as f64 / elapsed,
+            elapsed_seconds: elapsed,
+        };
+        on_step(&log)?;
+        if (step + 1) % options.log_every.max(1) == 0 || step + 1 == options.steps {
+            eprintln!(
+                "bquest train dpo: step {} | loss {:.4} | lr {:.2e}",
+                log.step, log.loss, log.learning_rate
+            );
+        }
+    }
+    Ok(TrainReport {
+        first_loss,
+        final_loss: last_loss,
+        steps: options.steps,
+        trained_tokens,
+        seconds: started.elapsed().as_secs_f64(),
+    })
+}
+
+/// One scored rollout: the full sequence, the response mask, and the
+/// verifier's reward.
+pub(crate) struct ScoredRollout {
+    pub(crate) ids: Vec<u32>,
+    pub(crate) mask: Vec<u8>,
+    pub(crate) reward: f32,
+}
+
+/// One prompt's group of rollouts - the unit a group-relative
+/// advantage is computed over.
+pub(crate) struct RolloutGroup {
+    pub(crate) rollouts: Vec<ScoredRollout>,
+}
+
+/// The reinforcement loop: for each group, advantages come from the
+/// group's own reward spread and every rollout contributes a
+/// policy-gradient term; the group folds into one optimizer step.
+///
+/// A group whose rollouts all scored alike yields zero advantages and
+/// is SKIPPED rather than stepped on - there is nothing to prefer,
+/// and stepping on a zero gradient still moves the optimizer state.
+pub(crate) fn rlvr_loop<AD: AutodiffBackend>(
+    model: &HybridModel<AD::InnerBackend>,
+    adapters: &mut ModelAdapters<AD>,
+    groups: &[RolloutGroup],
+    options: &LoopOptions,
+    device: &AD::Device,
+    mut on_step: impl FnMut(&StepLog) -> BquestResult<()>,
+) -> BquestResult<TrainReport> {
+    snafu::ensure_whatever!(!groups.is_empty(), "no rollout groups");
+    let optimizer = burn::optim::AdamWConfig::new().with_weight_decay(0.0).build();
+    let mut states: HashMap<String, OptState<AD::InnerBackend>> = HashMap::new();
+    let mut first_loss = 0f32;
+    let mut last_loss = 0f32;
+    let mut trained_tokens = 0usize;
+    let mut stepped = 0usize;
+    let started = std::time::Instant::now();
+
+    for step in 0..options.steps {
+        let group = &groups[step % groups.len()];
+        let rewards: Vec<f32> = group.rollouts.iter().map(|r| r.reward).collect();
+        let advantages = objective::group_advantages(&rewards);
+        if advantages.iter().all(|a| *a == 0.0) {
+            eprintln!(
+                "bquest train rlvr: group {} scored uniformly ({:?}) - no signal, skipped",
+                step % groups.len(),
+                rewards.first()
+            );
+            continue;
+        }
+
+        let mut accumulated: HashMap<String, FloatTensor<AD::InnerBackend, 2>> = HashMap::new();
+        let mut group_loss = 0f32;
+        for (rollout, advantage) in group.rollouts.iter().zip(&advantages) {
+            if *advantage == 0.0 {
+                continue;
+            }
+            let seq_len = rollout.ids.len() - 1;
+            let mask_inner = causal_mask::<AD::InnerBackend>(seq_len, device);
+            let (inputs, targets, target_mask) = split_row(&rollout.ids, &rollout.mask);
+            if objective::supervised_count(target_mask) == 0 {
+                continue;
+            }
+            let (layer_inputs, top_x) =
+                forward_cache::<AD>(model, adapters, &mask_inner, inputs, device);
+            let advantage = *advantage;
+            let (loss, seed) = seed_from_hidden::<AD, _>(model, top_x, |hidden, head| {
+                let logprob = objective::sequence_logprob::<AD>(
+                    hidden,
+                    head,
+                    targets,
+                    target_mask,
+                    options.loss_chunk,
+                    device,
+                )?;
+                Ok(objective::policy_gradient_loss::<AD>(logprob, advantage))
+            })?;
+            let grads = chain_from_seed::<AD>(
+                model,
+                adapters,
+                &mask_inner,
+                &layer_inputs,
+                seed,
+                device,
+            )?;
+            accumulate_grads(&mut accumulated, grads);
+            group_loss += loss;
+            trained_tokens += objective::supervised_count(target_mask);
+        }
+        if accumulated.is_empty() {
+            continue;
+        }
+        scale_grads(&mut accumulated, 1.0 / group.rollouts.len() as f64);
+        let group_loss = group_loss / group.rollouts.len() as f32;
+        if stepped == 0 {
+            first_loss = group_loss;
+        }
+        last_loss = group_loss;
+        stepped += 1;
+
+        let learning_rate = warmup_rate(options.learning_rate, options.warmup_steps, step);
+        optimizer_step::<AD>(
+            &optimizer,
+            &mut states,
+            adapters,
+            &mut accumulated,
+            learning_rate,
+        )?;
+
+        let elapsed = started.elapsed().as_secs_f64();
+        let log = StepLog {
+            step: step + 1,
+            loss: last_loss,
+            learning_rate,
+            tokens_per_second: trained_tokens as f64 / elapsed,
+            elapsed_seconds: elapsed,
+        };
+        on_step(&log)?;
+        if (step + 1) % options.log_every.max(1) == 0 || step + 1 == options.steps {
+            eprintln!(
+                "bquest train rlvr: step {} | mean reward {:.3} | objective {:.4} | lr {:.2e}",
+                log.step,
+                rewards.iter().sum::<f32>() / rewards.len() as f32,
+                log.loss,
+                log.learning_rate
+            );
+        }
+    }
+    Ok(TrainReport {
+        first_loss,
+        final_loss: last_loss,
+        steps: stepped,
+        trained_tokens,
+        seconds: started.elapsed().as_secs_f64(),
+    })
 }

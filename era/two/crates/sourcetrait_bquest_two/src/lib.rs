@@ -4,6 +4,9 @@ pub(crate) mod cli;
 pub(crate) mod convert;
 pub(crate) mod doc;
 pub(crate) mod error;
+pub(crate) mod example;
+#[cfg(feature = "train")]
+pub(crate) mod objective;
 pub(crate) mod hybrid;
 pub(crate) mod hybrid_load;
 pub(crate) mod ifeval;
