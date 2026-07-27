@@ -25,12 +25,60 @@ what a peer will refuse.
 
 ## const LOOPBACK_NAME
 
+## const LOOPBACK_ADDRESS
+
+One constant rather than one per end. A client and a server disagreeing
+about where the rendezvous is produces a connection refused, which reads
+as a daemon that is not running rather than as two numbers that differ -
+so the fault is made inexpressible instead of diagnosable. It sat in the
+daemon until a client needed it, which is the moment a private constant
+stops being private.
+
+## const PROFILE
+
+## const SECRET_DATA_ENV
+
+The same argument one level up. Both ends present the same leaf, so both
+have to name the same profile and find it by the same variable, and the
+transport is the only place either end already depends on.
+
+`SECRET_DATA_ENV` is a sourcetrait extension rather than an XDG variable,
+so nothing else on a box sets it and there is no platform default to fall
+back to. That is why an absent value is an error rather than a guess:
+neither end can know where the material lives, and inventing a location
+would put a lookup somewhere nothing installed to. It is also the
+variable `srcert` itself reads, so the tools agree without either telling
+the other.
+
 ## fn material
 
 The four installed artifacts, as the profile that owns them names. The
 certificate library owns the path layout, so a consumer reconstructing a
 secret directory plus four filenames would duplicate exactly the knowledge
 that library exists to hold.
+
+## fn secret_data_home
+
+Blank is the same condition as absent, and treating them alike is the
+point rather than tidiness. A variable exported empty is the ordinary
+result of a shell assignment that resolved to nothing, and an empty
+string joined to the layout below it produces a relative path - so a
+consumer would look for its certificate under whatever directory it
+happened to be started from, find nothing, and report missing material
+rather than a misconfigured environment.
+
+## fn installed_material
+
+The whole of what a consumer needs to present this transport's identity,
+in one call. Both ends resolve it the same way because both present the
+same leaf, and a consumer reconstructing the home, the profile and four
+filenames would duplicate exactly the knowledge this crate exists to
+hold.
+
+The daemon keeps its own resolution rather than calling this, and that is
+not duplication left in by accident. It has a setup conversation to hold
+with an operator - which variable is unset, which certificate is owed -
+and that needs its own error type, where this returns the transport's.
 
 ## fn client_config
 

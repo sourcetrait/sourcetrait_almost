@@ -5,7 +5,13 @@ pub mod wire;
 
 mod error;
 
-pub(crate) use std::path::Path;
+pub(crate) use std::{
+    env,
+    path::{
+        Path,
+        PathBuf,
+    },
+};
 
 pub(crate) use sourcetrait_cert_lib as srcert;
 
@@ -76,10 +82,15 @@ pub use client::{
     TlsClientOptions,
 };
 pub use tls::{
+    LOOPBACK_ADDRESS,
     LOOPBACK_NAME,
+    PROFILE,
+    SECRET_DATA_ENV,
     client_config,
+    installed_material,
     loopback_server_name,
     material,
+    secret_data_home,
     server_config,
 };
 

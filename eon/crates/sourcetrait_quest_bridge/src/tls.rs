@@ -4,9 +4,45 @@ use crate::*;
 /// The name a loopback peer's certificate is checked against.
 pub const LOOPBACK_NAME: &str = "localhost";
 
+/// Where the daemon listens and every client connects.
+///
+/// One constant rather than one per end, because a client and a server
+/// disagreeing about it is a class of fault that should not be
+/// expressible. A port becomes configuration the moment something needs
+/// it to be, and that is a decision rather than an implementation detail.
+pub const LOOPBACK_ADDRESS: std::net::SocketAddr = std::net::SocketAddr::new(
+    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+    7842,
+);
+
+/// The srcert profile this transport's material is minted under.
+pub const PROFILE: &str = "quest";
+
+/// The variable naming the secret data home; there is no flag for it.
+pub const SECRET_DATA_ENV: &str = "XDGX_SECRET_DATA_HOME";
+
 /// The four installed artifacts, as the profile that owns them names.
 pub fn material(secret_data: &Path, profile: &str) -> srcert::CertFiles {
     srcert::CertFiles::new(&srcert::secret_certs_dir(secret_data, profile), profile)
+}
+
+/// The secret data home, from the one variable that names it.
+pub fn secret_data_home() -> BridgeResult<PathBuf> {
+    match env::var(SECRET_DATA_ENV) {
+        Ok(value) if !value.trim().is_empty() => Ok(PathBuf::from(value)),
+        _ => snafu::whatever!(
+            "${SECRET_DATA_ENV} is not set, so the certificate material cannot be located"
+        ),
+    }
+}
+
+/// This transport's own installed material, resolved from the environment.
+///
+/// Both ends present the same leaf, so both resolve it the same way. A
+/// consumer reconstructing the home, the profile and four filenames would
+/// duplicate exactly the knowledge this crate exists to hold.
+pub fn installed_material() -> BridgeResult<srcert::CertFiles> {
+    Ok(material(&secret_data_home()?, PROFILE))
 }
 
 /// A client that PRESENTS our leaf and trusts only our authority.

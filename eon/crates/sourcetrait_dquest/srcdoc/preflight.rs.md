@@ -1,5 +1,17 @@
 # preflight.rs
 
+## use bridge::PROFILE, bridge::SECRET_DATA_ENV
+
+Read from the transport rather than restated, because a daemon and a
+client disagreeing about which profile they present is a fault that
+should not be expressible. Both ends mint from one profile and locate it
+by one variable, so the transport owns the two names and neither end can
+drift from the other.
+
+They are re-exported under this module rather than reached for at each
+call site, so `preflight::PROFILE` still reads as this crate's own
+precondition - which is what it is, even though the name is not.
+
 ## const PROFILE_TEXT
 
 Included at compile time rather than read from disk, so the binary always
@@ -11,19 +23,6 @@ no ordering problem between placing the profile and reading it.
 shipped profile fails at the first start rather than at the first
 handshake. The parse is also locked in-crate, which is the earlier of the
 two and the one that fails during a build rather than in front of a user.
-
-## const SECRET_DATA_ENV
-
-A sourcetrait extension rather than an XDG variable, so nothing else on a
-box sets it and there is no platform default to fall back to. That is why
-an absent value is an error rather than a guess: the daemon genuinely
-cannot know where the material lives, and inventing a location would put
-a lookup somewhere nothing installed to.
-
-There is deliberately no flag for it, matching the crate's standing
-position that configuration surface is a decision rather than a
-convenience. The variable is also the one `srcert` itself reads, so the
-two tools agree about the location without either telling the other.
 
 ## fn session_log_root
 

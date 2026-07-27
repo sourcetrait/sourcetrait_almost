@@ -1,14 +1,19 @@
 //! The startup preconditions, before the daemon is allowed to serve.
 use crate::*;
 
-/// The srcert profile this daemon mints its own authority under.
-pub(crate) const PROFILE: &str = "quest";
+/// The profile and the variable that locates its material, both from the
+/// transport rather than restated here.
+///
+/// A daemon and a client disagreeing about which profile they present is
+/// a fault that should not be expressible, so the transport owns them and
+/// both ends read the same two names.
+pub(crate) use bridge::{
+    PROFILE,
+    SECRET_DATA_ENV,
+};
 
 /// The profile text shipped with the binary, placed on a first start.
 pub(crate) const PROFILE_TEXT: &str = include_str!("../defaults/srcert/quest.toml");
-
-/// The variable naming the secret data home; there is no flag for it.
-pub(crate) const SECRET_DATA_ENV: &str = "XDGX_SECRET_DATA_HOME";
 
 /// The variable naming the cache home session logs are written under.
 pub(crate) const CACHE_HOME_ENV: &str = "XDG_CACHE_HOME";

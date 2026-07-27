@@ -51,14 +51,16 @@ it is now whether the material exists, with the profile write happening on
 the way. The message needed no rewording, because it already said that no
 certificate exists yet rather than that no profile did.
 
-## const ADDRESS
-
-A CONSTANT rather than a setting. Everything is loopback today, and a
-port becomes configuration the moment something needs it to be - which is
-a decision rather than an implementation detail, and adding a knob nobody
-asked for is how a config surface grows without anyone choosing it.
-
 ## fn serve_forever
+
+The address is the transport's rather than this crate's. It was a private
+constant here until a client needed the same number, and two ends holding
+their own copy of a rendezvous point is a fault that should not be
+expressible - so it moved to the bridge and both read it. What did not
+change is why it is a constant at all: everything is loopback today, and
+a port becomes configuration the moment something needs it to be, which
+is a decision rather than an implementation detail.
+
 
 THE RUNTIME IS BUILT HERE rather than by an attribute on `main`, which
 keeps `main` two lines and keeps the whole daemon reachable from an

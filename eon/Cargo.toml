@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "crates/sourcetrait_quest_bridge",
   "crates/sourcetrait_dquest",
+  "crates/sourcetrait_quest",
   # Parked while the harness and daemon are built; camp returns as the
   # second QuestHarness consumer.
   # "crates/sourcetrait_quest_camp",
@@ -17,6 +18,12 @@ bitcode = { version = "0.6" }
 candle-core = { version = "0.11" }
 clap = { version = "4", features = ["derive"] }
 futures-util = { version = "0.3", features = ["sink"] }
+# Pinned at the estate's nushell, which is also the plugin protocol
+# binding: the plugin and the era library must resolve ONE nu-protocol,
+# or a Value built by the library is a different type from the one the
+# plugin returns.
+nu-plugin = { git = "https://github.com/nushell/nushell", tag = "0.114.1" }
+nu-protocol = { git = "https://github.com/nushell/nushell", tag = "0.114.1", default-features = false }
 rand = { version = "0.9" }
 ratatui = { version = "0.29" }
 # Default features pull aws_lc_rs, and prefer-post-quantum pulls it again
@@ -33,6 +40,7 @@ snafu = { version = "0.9" }
 # sourcetrait projects home, so the sibling assumption is the standing
 # checkout layout rather than one machine's.
 sourcetrait_cert_lib = { path = "../../sourcetrait_cert/crates/sourcetrait_cert_lib" }
+sourcetrait_lib_quest_two = { path = "../era/two/crates/sourcetrait_lib_quest_two" }
 sourcetrait_quest_bridge = { path = "crates/sourcetrait_quest_bridge" }
 sourcetrait_quest_bridge_two = { path = "../era/two/crates/sourcetrait_quest_bridge_two" }
 tokenizers = { version = "0.23" }

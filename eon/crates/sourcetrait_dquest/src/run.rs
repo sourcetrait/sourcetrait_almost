@@ -13,14 +13,6 @@ pub(crate) enum Started {
     CertificateOwed,
 }
 
-/// Where the daemon listens.
-///
-/// A constant rather than a setting: everything is loopback today, and a
-/// port becomes configuration the moment something needs it to be, which
-/// is a decision rather than an implementation detail.
-pub(crate) const ADDRESS: std::net::SocketAddr =
-    std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 7842);
-
 /// The variable naming the user whose Thinkspace this serves.
 pub(crate) const USER_ENV: &str = "USER";
 
@@ -57,7 +49,7 @@ fn serve_forever() -> DquestResult<()> {
         .map_err(|source| DquestError::Runtime { source })?;
 
     runtime.block_on(async move {
-        let listener = serve::bind(ADDRESS).await?;
+        let listener = serve::bind(bridge::LOOPBACK_ADDRESS).await?;
         // The engine loads on the container's own thread; a failure
         // there leaves the daemon up and refusing, rather than exiting
         // before any client can be told why. The factory comes from the

@@ -1,0 +1,23 @@
+[package]
+name = "sourcetrait_quest"
+version = "0.0.0-1"
+edition = "2024"
+description = "quest: the flagship smart command, served as a nushell plugin"
+authors = ["SourceTrait <development@sourcetrait.com>"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/sourcetrait/sourcetrait_quest"
+homepage = "https://sourcetrait.com"
+categories = []
+keywords = ["sourcetrait", "quest", "nushell", "plugin"]
+
+[[bin]]
+name = "nu_plugin_quest"
+path = "src/main.rs"
+
+[dependencies]
+nu-plugin.workspace = true
+nu-protocol.workspace = true
+snafu.workspace = true
+sourcetrait_lib_quest_two.workspace = true
+sourcetrait_quest_bridge.workspace = true
+tokio.workspace = true
