@@ -13,6 +13,7 @@ members = [
 anstyle = { version = "1" }
 bitcode = { version = "0.6" }
 clap = { version = "4", features = ["derive"] }
+futures-util = { version = "0.3", features = ["sink"] }
 liquid = { version = "0.26" }
 nu-cmd-lang = { git = "https://github.com/nushell/nushell", tag = "0.114.1" }
 nu-command = { git = "https://github.com/nushell/nushell", tag = "0.114.1" }
@@ -21,6 +22,11 @@ nu-parser = { git = "https://github.com/nushell/nushell", tag = "0.114.1" }
 nu-protocol = { git = "https://github.com/nushell/nushell", tag = "0.114.1", default-features = false }
 nuon = { git = "https://github.com/nushell/nushell", tag = "0.114.1" }
 ratatui = { version = "0.29" }
+# Default features pull aws_lc_rs, and prefer-post-quantum pulls it again
+# on its own. The estate is single-backend on ring; re-read the lock after
+# touching either of these.
+rustls = { version = "0.23", default-features = false, features = ["logging", "ring", "std", "tls12"] }
+rustls-pki-types = { version = "1", features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
 snafu = { version = "0.9" }
@@ -33,4 +39,5 @@ sourcetrait_quest_bridge = { path = "crates/sourcetrait_quest_bridge" }
 sourcetrait_quest_bridge_two = { path = "../era/two/crates/sourcetrait_quest_bridge_two" }
 sourcetrait_quest_core = { path = "crates/sourcetrait_quest_core" }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
 tokio-util = { version = "0.7", features = ["codec"] }

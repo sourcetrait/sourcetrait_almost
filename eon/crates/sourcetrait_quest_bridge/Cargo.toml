@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_quest_bridge"
-version = "0.0.0-3"
+version = "0.0.0-4"
 edition = "2024"
 description = "Era-bridge API for the SourceTrait Quest eon components"
 authors = ["SourceTrait <development@sourcetrait.com>"]
@@ -12,7 +12,12 @@ keywords = ["sourcetrait", "quest", "bridge"]
 
 [dependencies]
 bitcode.workspace = true
+futures-util.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
 serde.workspace = true
 snafu.workspace = true
+sourcetrait_cert_lib.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 tokio-util.workspace = true
