@@ -31,6 +31,51 @@ fn the_filter_set_is_registered_and_pipes() {
     assert_eq!(value.as_int().expect("int"), 2);
 }
 
+/// Arithmetic over a collection, which a checking mode needs before it
+/// can say anything quantitative about the value it was handed.
+#[test]
+fn the_math_family_is_registered_and_computes() {
+    let engine = evaluator();
+    let value = engine
+        .evaluate("[1, 2, 3, 4] | math sum", None)
+        .expect("evaluates");
+    assert_eq!(value.as_int().expect("int"), 10);
+    let value = engine
+        .evaluate("[2.0, 4.0] | math avg", None)
+        .expect("evaluates");
+    assert!((value.as_float().expect("float") - 3.0).abs() < 1e-9);
+}
+
+/// Text interchange in both directions. NUON is the program's own
+/// format and JSON is the foreign seam, so the round trip through both
+/// is what a format-moving mode actually does.
+#[test]
+fn the_conversion_families_round_trip() {
+    let engine = evaluator();
+    let value = engine
+        .evaluate(r#"'{"n": 1}' | from json | to nuon --raw"#, None)
+        .expect("evaluates");
+    // `--raw` is tighter than the default compact render: no space
+    // after the key's colon.
+    assert_eq!(value.as_str().expect("string"), "{n:1}");
+
+    let value = engine
+        .evaluate("'[a, b]' | from nuon | length", None)
+        .expect("evaluates");
+    assert_eq!(value.as_int().expect("int"), 2);
+}
+
+/// The binary and spreadsheet readers are deliberately absent, which is
+/// what an allowlist is for: it earns its keep by what it declines, and
+/// nothing has asked for these.
+#[test]
+fn the_conversions_left_out_stay_out() {
+    let engine = evaluator();
+    for name in ["from xlsx", "from ods", "from msgpack", "to msgpack"] {
+        assert!(!engine.resolves(name), "{name} was not asked for");
+    }
+}
+
 #[test]
 fn a_piped_value_arrives_as_the_input() {
     let engine = evaluator();

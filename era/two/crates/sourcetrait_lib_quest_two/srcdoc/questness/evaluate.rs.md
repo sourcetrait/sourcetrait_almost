@@ -3,12 +3,14 @@
 The engine `evaluate` round-trips on: the one nu mode that runs inside
 Questness rather than leaving for the client's harness.
 
-IT SITS BEHIND A DEFAULT-OFF FEATURE, and that is a build-weight decision
-rather than a doubt about the code. Turning it on pulls the whole nushell
-command set into the dependency graph, and the trainer, the baseliner and the
-engine all read and write NUON without ever evaluating. Making them pay for a
-shell they never call would have added it to every burn and candle build in the
-era workspace. Questness and the daemon turn it on; nothing else does.
+IT USED TO SIT BEHIND A DEFAULT-OFF FEATURE, on the argument that turning it on
+would make the trainer and the baseliner pay for a shell they never call. That
+was an unmeasured build-weight claim of the kind
+{adhoc:info:development:src:dependency_weight} now rules out twice over: the
+workspace is built as one unit, so the command set was compiled regardless of
+which crate held this file, and a binary carries only what it calls, so nothing
+that never evaluates was ever carrying an evaluator. The feature is gone and so
+is the crate boundary drawn beside it.
 
 WHAT THIS IS NOT IS A SECURITY BOUNDARY, and the file should be read with that
 in front. Restricting by non-registration is real - an absent command is absent
@@ -142,13 +144,38 @@ own result is what comes back. A bare stack would leave them inheriting the
 host's real file descriptors, which for a protocol-carrying stdout is a
 corruption rather than an inconvenience.
 
-## fn register_filters
+## fn register_commands
 
-The twenty-one filters are the verified starting set rather than the intended
-end state. Widening it is a deliberate step with its own locks, and the two
-families most obviously owed are `math` and the `from`/`to` format pair, since
-an evaluate sub-turn doing arithmetic on a table wants both. Arithmetic itself
-already works, because operators are language-level rather than commands.
+REGISTRATION IS AN ALLOWLIST, so the file's security-relevant content is what it
+does NOT name. Every command across the three families is a pure value-to-value
+transform; nothing that reaches the filesystem, the network or the host appears,
+because nothing that could was added.
+
+## fn add_filters
+
+## fn add_math
+
+The bare `math` head is registered alongside its subcommands so an emission
+reaching for it without one gets nushell's own guidance instead of a
+command-not-found the model cannot act on. The same reasoning puts `from` and
+`to` in the family below.
+
+Arithmetic on scalars already worked without any of this, because operators are
+language-level rather than commands. What was missing was arithmetic over a
+COLLECTION, which is what a checking mode needs before it can say anything
+quantitative about the value it was handed.
+
+## fn add_conversions
+
+TEXT FORMATS ONLY, and the omission is the decision. The binary and spreadsheet
+readers beside these - msgpack, ods, xlsx - are equally pure and equally safe,
+and they are left out because nothing has asked for them. An allowlist earns its
+keep by what it declines, so growing it to everything harmless would spend the
+one property it has.
+
+`FROM_YML` and `TO_YML` ride along with their yaml siblings. They are the same
+command under a second name in real nushell, so leaving them out would turn a
+valid emission into a confusing failure for one line's worth of saving.
 
 One consequence of hand-building rather than layering the shell context, worth
 knowing because it fails silently: `add_shell_command_context` caches the

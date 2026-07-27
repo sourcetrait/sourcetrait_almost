@@ -30,7 +30,7 @@ impl QuestnessEvaluator {
     /// Build the base engine once; every evaluation clones it.
     pub fn new() -> LibQuestResult<Self> {
         let mut base = nu_cmd_lang::create_default_context();
-        base = register_filters(base)?;
+        base = register_commands(base)?;
 
         let mut config = base.get_config().as_ref().clone();
         config.use_ansi_coloring = nu_protocol::UseAnsiColoring::False;
@@ -191,39 +191,123 @@ fn eval_once(
     }
 }
 
-/// Add the filter set on top of the language core, then merge.
-fn register_filters(mut engine: r::nu::EngineState) -> LibQuestResult<r::nu::EngineState> {
+/// Add the three command families on top of the language core, then
+/// merge.
+///
+/// Registration is an ALLOWLIST, so what is absent is what the sandbox
+/// note in the module header is about: nothing here reaches the
+/// filesystem, the network or the host, because nothing that could was
+/// added. Every command in the three families below is a pure
+/// value-to-value transform.
+fn register_commands(mut engine: r::nu::EngineState) -> LibQuestResult<r::nu::EngineState> {
+    let delta = {
+        let mut ws = r::nu::StateWorkingSet::new(&engine);
+        add_filters(&mut ws);
+        add_math(&mut ws);
+        add_conversions(&mut ws);
+        ws.render()
+    };
+    if let Err(error) = engine.merge_delta(delta) {
+        snafu::whatever!("registering the command set failed: {error}");
+    }
+    Ok(engine)
+}
+
+/// Reshaping a value: the family a mode reaches for first.
+fn add_filters(ws: &mut r::nu::StateWorkingSet) {
     use nu_command::{
         Append, DropColumn, Each, Enumerate, Filter, Find, First, Flatten, Get, Last, Length,
         Prepend, Reject, Reverse, Select, Skip, Sort, Take, Uniq, Where, Wrap,
     };
-    let delta = {
-        let mut ws = r::nu::StateWorkingSet::new(&engine);
-        ws.add_decl(Box::new(Append));
-        ws.add_decl(Box::new(DropColumn));
-        ws.add_decl(Box::new(Each));
-        ws.add_decl(Box::new(Enumerate));
-        ws.add_decl(Box::new(Filter));
-        ws.add_decl(Box::new(Find));
-        ws.add_decl(Box::new(First));
-        ws.add_decl(Box::new(Flatten));
-        ws.add_decl(Box::new(Get));
-        ws.add_decl(Box::new(Last));
-        ws.add_decl(Box::new(Length));
-        ws.add_decl(Box::new(Prepend));
-        ws.add_decl(Box::new(Reject));
-        ws.add_decl(Box::new(Reverse));
-        ws.add_decl(Box::new(Select));
-        ws.add_decl(Box::new(Skip));
-        ws.add_decl(Box::new(Sort));
-        ws.add_decl(Box::new(Take));
-        ws.add_decl(Box::new(Uniq));
-        ws.add_decl(Box::new(Where));
-        ws.add_decl(Box::new(Wrap));
-        ws.render()
+    ws.add_decl(Box::new(Append));
+    ws.add_decl(Box::new(DropColumn));
+    ws.add_decl(Box::new(Each));
+    ws.add_decl(Box::new(Enumerate));
+    ws.add_decl(Box::new(Filter));
+    ws.add_decl(Box::new(Find));
+    ws.add_decl(Box::new(First));
+    ws.add_decl(Box::new(Flatten));
+    ws.add_decl(Box::new(Get));
+    ws.add_decl(Box::new(Last));
+    ws.add_decl(Box::new(Length));
+    ws.add_decl(Box::new(Prepend));
+    ws.add_decl(Box::new(Reject));
+    ws.add_decl(Box::new(Reverse));
+    ws.add_decl(Box::new(Select));
+    ws.add_decl(Box::new(Skip));
+    ws.add_decl(Box::new(Sort));
+    ws.add_decl(Box::new(Take));
+    ws.add_decl(Box::new(Uniq));
+    ws.add_decl(Box::new(Where));
+    ws.add_decl(Box::new(Wrap));
+}
+
+/// Arithmetic over a collection, which a checking mode needs to say
+/// anything quantitative about the value it was handed.
+///
+/// The bare `math` head rides along so an emission that reaches for it
+/// without a subcommand gets nushell's own guidance rather than a
+/// command-not-found the model cannot act on.
+fn add_math(ws: &mut r::nu::StateWorkingSet) {
+    use nu_command::{
+        Math, MathAbs, MathAvg, MathCbrt, MathCeil, MathFloor, MathLog, MathMax, MathMedian,
+        MathMin, MathMode, MathProduct, MathRound, MathSqrt, MathStddev, MathSum, MathVariance,
     };
-    if let Err(error) = engine.merge_delta(delta) {
-        snafu::whatever!("registering the filter set failed: {error}");
-    }
-    Ok(engine)
+    ws.add_decl(Box::new(Math));
+    ws.add_decl(Box::new(MathAbs));
+    ws.add_decl(Box::new(MathAvg));
+    ws.add_decl(Box::new(MathCbrt));
+    ws.add_decl(Box::new(MathCeil));
+    ws.add_decl(Box::new(MathFloor));
+    ws.add_decl(Box::new(MathLog));
+    ws.add_decl(Box::new(MathMax));
+    ws.add_decl(Box::new(MathMedian));
+    ws.add_decl(Box::new(MathMin));
+    ws.add_decl(Box::new(MathMode));
+    ws.add_decl(Box::new(MathProduct));
+    ws.add_decl(Box::new(MathRound));
+    ws.add_decl(Box::new(MathSqrt));
+    ws.add_decl(Box::new(MathStddev));
+    ws.add_decl(Box::new(MathSum));
+    ws.add_decl(Box::new(MathVariance));
+}
+
+/// Text interchange in both directions, which is a named capability
+/// rather than a convenience: moving a foreign format into NUON and back
+/// is one of the things a mode exists to do.
+///
+/// TEXT FORMATS ONLY. The binary and spreadsheet readers beside these in
+/// nushell - msgpack, ods, xlsx - are equally pure and are left out
+/// because nothing asks for them, and an allowlist earns its keep by
+/// what it declines.
+fn add_conversions(ws: &mut r::nu::StateWorkingSet) {
+    use nu_command::{
+        FROM_YAML, FROM_YML, From, FromCsv, FromJson, FromKdl, FromMd, FromNuon, FromSsv,
+        FromToml, FromTsv, FromXml, TO_YAML, TO_YML, To, ToCsv, ToJson, ToKdl, ToMd, ToNuon,
+        ToText, ToToml, ToTsv, ToXml,
+    };
+    ws.add_decl(Box::new(From));
+    ws.add_decl(Box::new(FromCsv));
+    ws.add_decl(Box::new(FromJson));
+    ws.add_decl(Box::new(FromKdl));
+    ws.add_decl(Box::new(FromMd));
+    ws.add_decl(Box::new(FromNuon));
+    ws.add_decl(Box::new(FromSsv));
+    ws.add_decl(Box::new(FromToml));
+    ws.add_decl(Box::new(FromTsv));
+    ws.add_decl(Box::new(FromXml));
+    ws.add_decl(Box::new(FROM_YAML));
+    ws.add_decl(Box::new(FROM_YML));
+    ws.add_decl(Box::new(To));
+    ws.add_decl(Box::new(ToCsv));
+    ws.add_decl(Box::new(ToJson));
+    ws.add_decl(Box::new(ToKdl));
+    ws.add_decl(Box::new(ToMd));
+    ws.add_decl(Box::new(ToNuon));
+    ws.add_decl(Box::new(ToText));
+    ws.add_decl(Box::new(ToToml));
+    ws.add_decl(Box::new(ToTsv));
+    ws.add_decl(Box::new(ToXml));
+    ws.add_decl(Box::new(TO_YAML));
+    ws.add_decl(Box::new(TO_YML));
 }
