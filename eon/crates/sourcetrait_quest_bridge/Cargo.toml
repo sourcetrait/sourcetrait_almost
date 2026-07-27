@@ -13,6 +13,8 @@ keywords = ["sourcetrait", "quest", "bridge"]
 [dependencies]
 bitcode.workspace = true
 futures-util.workspace = true
+nu-protocol.workspace = true
+nuon.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
 serde.workspace = true

@@ -11,7 +11,7 @@ members = [
 
 [workspace.dependencies]
 anstyle = { version = "1" }
-bitcode = { version = "0.6" }
+bitcode = { version = "0.6", features = ["serde"] }
 # Pinned at era/two's own versions: a direct dependency binds whichever
 # instance matches its requirement, and these must be the instances the
 # era library uses rather than a second copy beside them.
@@ -24,6 +24,7 @@ futures-util = { version = "0.3", features = ["sink"] }
 # plugin returns.
 nu-plugin = { git = "https://github.com/nushell/nushell", tag = "0.114.1" }
 nu-protocol = { git = "https://github.com/nushell/nushell", tag = "0.114.1", default-features = false }
+nuon = { git = "https://github.com/nushell/nushell", tag = "0.114.1" }
 rand = { version = "0.9" }
 ratatui = { version = "0.29" }
 # Default features pull aws_lc_rs, and prefer-post-quantum pulls it again

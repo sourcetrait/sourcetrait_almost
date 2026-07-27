@@ -5678,6 +5678,8 @@ version = "0.0.0-5"
 dependencies = [
  "bitcode",
  "futures-util",
+ "nu-protocol",
+ "nuon",
  "rustls",
  "rustls-pki-types",
  "serde",

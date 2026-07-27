@@ -59,8 +59,6 @@ pub trait Era {
     Eq,
     serde::Serialize,
     serde::Deserialize,
-    bitcode::Encode,
-    bitcode::Decode,
 )]
 pub struct EraInfo {
     pub era: String,
@@ -76,8 +74,6 @@ pub struct EraInfo {
     Eq,
     serde::Serialize,
     serde::Deserialize,
-    bitcode::Encode,
-    bitcode::Decode,
 )]
 pub struct ChatOptions {
     pub dir: Option<String>,
@@ -93,8 +89,6 @@ pub struct ChatOptions {
     PartialEq,
     serde::Serialize,
     serde::Deserialize,
-    bitcode::Encode,
-    bitcode::Decode,
 )]
 pub struct TurnReport {
     pub finish: FinishReason,
@@ -113,8 +107,6 @@ pub struct TurnReport {
     Eq,
     serde::Serialize,
     serde::Deserialize,
-    bitcode::Encode,
-    bitcode::Decode,
 )]
 pub enum FinishReason {
     StopToken,

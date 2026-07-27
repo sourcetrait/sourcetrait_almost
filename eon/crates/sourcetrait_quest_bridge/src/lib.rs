@@ -1,5 +1,6 @@
 pub mod all;
 pub mod client;
+pub mod infer;
 pub mod tls;
 pub mod wire;
 
@@ -56,6 +57,24 @@ pub use error::{
     BridgeError,
     BridgeResult,
 };
+pub use infer::{
+    InferConfig,
+    InferInput,
+    InferLiquid,
+    InferNu,
+    InferNuCall,
+    InferNuEvaluate,
+    InferNuExecute,
+    InferNuInteract,
+    InferNuonInput,
+    InferNuonOutput,
+    InferOutput,
+    InferPass,
+    InferRequest,
+    InferResponse,
+    InferText,
+    InferValue,
+};
 pub use wire::{
     BitcodeCodec,
     CancelRequest,
@@ -73,8 +92,6 @@ pub use wire::{
     ServerToClient,
     TurnChunk,
     TurnFailedResponse,
-    TurnRequest,
-    TurnResponse,
 };
 
 pub use client::{

@@ -28,8 +28,17 @@ use crate::wire::{
     ServerToClient,
     TurnChunk,
     TurnFailedResponse,
-    TurnRequest,
-    TurnResponse,
+};
+use crate::infer::{
+    InferInput,
+    InferNu,
+    InferNuExecute,
+    InferNuonInput,
+    InferPass,
+    InferRequest,
+    InferResponse,
+    InferText,
+    InferValue,
 };
 
 fn client_messages() -> Vec<ClientToServer> {
@@ -45,8 +54,9 @@ fn client_messages() -> Vec<ClientToServer> {
                 sample_len: Some(4096),
             },
         }),
-        ClientToServer::Turn(TurnRequest {
-            text: String::from("what is in this directory"),
+        ClientToServer::Turn(InferRequest {
+            text: Some(InferText(String::from("what is in this directory"))),
+            ..InferRequest::default()
         }),
         ClientToServer::Cancel(CancelRequest),
         ClientToServer::Reset(ResetRequest),
@@ -71,14 +81,15 @@ fn server_messages() -> Vec<ServerToClient> {
         ServerToClient::TurnFailed(TurnFailedResponse {
             message: String::from("the engine faulted mid-generation"),
         }),
-        ServerToClient::Turn(TurnResponse {
-            report: TurnReport {
+        ServerToClient::Turn(InferResponse {
+            report: Some(TurnReport {
                 finish: FinishReason::StopToken,
                 prompt_token_count: 2106,
                 generated_token_count: 128,
                 prefill_seconds: 0.5103515625,
                 decode_seconds: 2.328125,
-            },
+            }),
+            ..InferResponse::default()
         }),
         ServerToClient::Cancel(CancelResponse { stopped: true }),
         ServerToClient::Cancel(CancelResponse { stopped: false }),
@@ -125,14 +136,15 @@ fn every_finish_reason_survives_the_wire() {
         FinishReason::SampleLen,
         FinishReason::Cancelled,
     ] {
-        let message = ServerToClient::Turn(TurnResponse {
-            report: TurnReport {
+        let message = ServerToClient::Turn(InferResponse {
+            report: Some(TurnReport {
                 finish,
                 prompt_token_count: 1,
                 generated_token_count: 1,
                 prefill_seconds: 0.0,
                 decode_seconds: 0.0,
-            },
+            }),
+            ..InferResponse::default()
         });
         let mut buffer = BytesMut::new();
         codec.encode(message.clone(), &mut buffer).expect("encodes");
@@ -155,8 +167,9 @@ fn timings_round_trip_bit_for_bit() {
     let mut buffer = BytesMut::new();
     codec
         .encode(
-            ServerToClient::Turn(TurnResponse {
-                report: report.clone(),
+            ServerToClient::Turn(InferResponse {
+                report: Some(report.clone()),
+                ..InferResponse::default()
             }),
             &mut buffer,
         )
@@ -164,12 +177,13 @@ fn timings_round_trip_bit_for_bit() {
     let Some(ServerToClient::Turn(back)) = codec.decode(&mut buffer).expect("decodes") else {
         panic!("a turn response reads back as one");
     };
+    let carried = back.report.as_ref().expect("a finished turn reports");
     assert_eq!(
-        back.report.prefill_seconds.to_bits(),
+        carried.prefill_seconds.to_bits(),
         report.prefill_seconds.to_bits()
     );
     assert_eq!(
-        back.report.decode_seconds.to_bits(),
+        carried.decode_seconds.to_bits(),
         report.decode_seconds.to_bits()
     );
 }
@@ -255,6 +269,78 @@ fn a_frame_that_is_not_a_message_is_refused() {
         .decode(&mut buffer)
         .expect_err("a corrupted payload is refused");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+}
+
+/// The whole point of the rewrite: a typed value crosses AS A VALUE
+/// rather than as a rendering of one, so no layer but Questness ever
+/// sees a block.
+#[test]
+fn a_nu_value_crosses_the_wire_inside_a_request() {
+    let value = InferValue::from_nuon("{name: foo, rows: [[a b]; [1 2]], took: 30sec}")
+        .expect("fixture parses");
+    let message = ClientToServer::Turn(InferRequest {
+        inputs: vec![(InferPass::In, InferInput::Nuon(InferNuonInput(value)))],
+        ..InferRequest::default()
+    });
+
+    let mut codec = BitcodeCodec::<ClientToServer>::new();
+    let mut buffer = BytesMut::new();
+    codec.encode(message.clone(), &mut buffer).expect("encodes");
+    let back = codec.decode(&mut buffer).expect("decodes").expect("a whole frame");
+
+    assert_eq!(back, message, "the typed literals survive the crossing");
+}
+
+/// An ask travels with what it consumes. An `InferNu` alone is a
+/// function the caller has nothing to run on.
+#[test]
+fn an_ask_carries_its_bound_channels() {
+    let value = InferValue::from_nuon("[a, b, c]").expect("fixture parses");
+    let message = ServerToClient::Turn(InferResponse {
+        nu: Some(InferNu::Execute(InferNuExecute(String::from(
+            "def execute []: list<string> -> int { $in | length }",
+        )))),
+        inputs: vec![(InferPass::In, InferInput::Nuon(InferNuonInput(value)))],
+        ..InferResponse::default()
+    });
+
+    let mut codec = BitcodeCodec::<ServerToClient>::new();
+    let mut buffer = BytesMut::new();
+    codec.encode(message, &mut buffer).expect("encodes");
+    let Some(ServerToClient::Turn(back)) = codec.decode(&mut buffer).expect("decodes") else {
+        panic!("a turn response reads back as one");
+    };
+
+    let ask = back.nu.expect("the ask travelled");
+    assert!(!ask.is_think(), "only evaluate is a think turn");
+    assert_eq!(ask.mode(), "execute");
+    assert_eq!(back.inputs.len(), 1, "the ask carries what it consumes");
+    assert_eq!(back.inputs[0].0, InferPass::In);
+    assert_eq!(
+        back.inputs[0].1.value().declared(),
+        "list<string>",
+        "and it carries the value's own derived type"
+    );
+}
+
+/// A span is a byte offset into a file that existed in the sending
+/// process, so it is meaningless to a receiver and must not travel.
+/// NUON has nowhere to put one, which is why the newtype carries it.
+#[test]
+fn a_span_does_not_travel() {
+    let span = nu_protocol::Span::new(4096, 4123);
+    let carried = InferValue::new(nu_protocol::Value::string("hello", span));
+    let nuon = carried.to_nuon().expect("renders");
+
+    assert!(!nuon.contains("4096"), "a span offset reached the wire: {nuon}");
+    assert!(!nuon.contains("4123"), "a span offset reached the wire: {nuon}");
+
+    let back = InferValue::from_nuon(&nuon).expect("parses");
+    assert_eq!(
+        back.0.coerce_into_string().expect("a string"),
+        "hello",
+        "the value survives what the span does not"
+    );
 }
 
 #[test]

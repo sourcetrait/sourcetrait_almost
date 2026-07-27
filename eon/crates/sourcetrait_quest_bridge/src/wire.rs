@@ -12,8 +12,6 @@ pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
     Eq,
     serde::Serialize,
     serde::Deserialize,
-    bitcode::Encode,
-    bitcode::Decode,
 )]
 pub struct OpenRequest {
     pub options: all::ChatOptions,
@@ -27,8 +25,6 @@ pub struct OpenRequest {
     Eq,
     serde::Serialize,
     serde::Deserialize,
-    bitcode::Encode,
-    bitcode::Decode,
 )]
 pub struct OpenResponse {
     pub info: all::EraInfo,
@@ -46,40 +42,9 @@ pub struct OpenResponse {
     Eq,
     serde::Serialize,
     serde::Deserialize,
-    bitcode::Encode,
-    bitcode::Decode,
 )]
 pub struct OpenRefusedResponse {
     pub message: String,
-}
-
-/// The next user turn; chunks stream as events until it answers.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    bitcode::Encode,
-    bitcode::Decode,
-)]
-pub struct TurnRequest {
-    pub text: String,
-}
-
-/// The turn ran to an ending, and this is its accounting.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    serde::Serialize,
-    serde::Deserialize,
-    bitcode::Encode,
-    bitcode::Decode,
-)]
-pub struct TurnResponse {
-    pub report: all::TurnReport,
 }
 
 /// The turn did not run to an ending.
@@ -94,8 +59,6 @@ pub struct TurnResponse {
     Eq,
     serde::Serialize,
     serde::Deserialize,
-    bitcode::Encode,
-    bitcode::Decode,
 )]
 pub struct TurnFailedResponse {
     pub message: String,
@@ -110,8 +73,6 @@ pub struct TurnFailedResponse {
     Eq,
     serde::Serialize,
     serde::Deserialize,
-    bitcode::Encode,
-    bitcode::Decode,
 )]
 pub struct CancelRequest;
 
@@ -124,8 +85,6 @@ pub struct CancelRequest;
     Eq,
     serde::Serialize,
     serde::Deserialize,
-    bitcode::Encode,
-    bitcode::Decode,
 )]
 pub struct CancelResponse {
     pub stopped: bool,
@@ -140,8 +99,6 @@ pub struct CancelResponse {
     Eq,
     serde::Serialize,
     serde::Deserialize,
-    bitcode::Encode,
-    bitcode::Decode,
 )]
 pub struct ResetRequest;
 
@@ -154,8 +111,6 @@ pub struct ResetRequest;
     Eq,
     serde::Serialize,
     serde::Deserialize,
-    bitcode::Encode,
-    bitcode::Decode,
 )]
 pub struct ResetResponse;
 
@@ -170,8 +125,6 @@ pub struct ResetResponse;
     Eq,
     serde::Serialize,
     serde::Deserialize,
-    bitcode::Encode,
-    bitcode::Decode,
 )]
 pub struct TurnChunk {
     pub text: String,
@@ -185,8 +138,6 @@ pub struct TurnChunk {
     Eq,
     serde::Serialize,
     serde::Deserialize,
-    bitcode::Encode,
-    bitcode::Decode,
 )]
 pub struct ServerFaultNotice {
     pub message: String,
@@ -203,8 +154,6 @@ pub struct ServerFaultNotice {
     Eq,
     serde::Serialize,
     serde::Deserialize,
-    bitcode::Encode,
-    bitcode::Decode,
 )]
 pub struct ServerShutdownNotice {
     pub reason: String,
@@ -222,8 +171,6 @@ pub struct ServerShutdownNotice {
     Eq,
     serde::Serialize,
     serde::Deserialize,
-    bitcode::Encode,
-    bitcode::Decode,
 )]
 pub enum ServerNotice {
     Fault(ServerFaultNotice),
@@ -237,12 +184,10 @@ pub enum ServerNotice {
     PartialEq,
     serde::Serialize,
     serde::Deserialize,
-    bitcode::Encode,
-    bitcode::Decode,
 )]
 pub enum ClientToServer {
     Open(OpenRequest),
-    Turn(TurnRequest),
+    Turn(InferRequest),
     Cancel(CancelRequest),
     Reset(ResetRequest),
     Close,
@@ -256,13 +201,11 @@ pub enum ClientToServer {
     PartialEq,
     serde::Serialize,
     serde::Deserialize,
-    bitcode::Encode,
-    bitcode::Decode,
 )]
 pub enum ServerToClient {
     Open(OpenResponse),
     OpenRefused(OpenRefusedResponse),
-    Turn(TurnResponse),
+    Turn(InferResponse),
     TurnFailed(TurnFailedResponse),
     TurnChunk(TurnChunk),
     Cancel(CancelResponse),
@@ -305,7 +248,7 @@ impl<T> std::fmt::Debug for BitcodeCodec<T> {
 
 impl<T> r::tokio::Decoder for BitcodeCodec<T>
 where
-    T: for<'a> bitcode::Decode<'a>,
+    T: serde::de::DeserializeOwned,
 {
     type Item = T;
     type Error = std::io::Error;
@@ -317,7 +260,7 @@ where
         let Some(frame) = self.codec.decode(src)? else {
             return Ok(None);
         };
-        bitcode::decode(&frame).map(Some).map_err(|error| {
+        bitcode::deserialize(&frame).map(Some).map_err(|error| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("a frame did not decode: {error}"),
@@ -328,7 +271,7 @@ where
 
 impl<T> r::tokio::Encoder<T> for BitcodeCodec<T>
 where
-    T: bitcode::Encode,
+    T: serde::Serialize,
 {
     type Error = std::io::Error;
 
@@ -337,6 +280,12 @@ where
         item: T,
         dst: &mut r::tokio::BytesMut,
     ) -> Result<(), Self::Error> {
-        self.codec.encode(bitcode::encode(&item).into(), dst)
+        let bytes = bitcode::serialize(&item).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("a message did not encode: {error}"),
+            )
+        })?;
+        self.codec.encode(bytes.into(), dst)
     }
 }
