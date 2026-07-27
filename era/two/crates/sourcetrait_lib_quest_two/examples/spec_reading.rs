@@ -60,12 +60,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let opened_attractor = text.trim_start().starts_with("<function_calls>");
         let strict = parse_blocks(&text, Aliasing::Strict);
         let aliased = parse_blocks(&text, Aliasing::ToolMarkers);
-        let payload_is_nuon = aliased
-            .as_ref()
-            .ok()
-            .and_then(|blocks| blocks.first())
-            .map(|block| lib::nu::from_nuon_text(block.content.trim()).is_ok())
-            .unwrap_or(false);
+        // The no-marker alias sweeps the WHOLE emission into one block,
+        // so the payload has to be recovered before it can be judged:
+        // an echoed type line is structure, not data.
+        let trimmed = text.trim();
+        let first_line = trimmed.lines().next().unwrap_or_default().trim().to_string();
+        let echoed_type = first_line == typedef;
+        let payload = if echoed_type {
+            trimmed.split_once('\n').map(|(_, rest)| rest).unwrap_or_default()
+        } else {
+            trimmed
+        };
+        let payload = payload.trim().trim_end_matches("eot").trim();
+        let payload_is_nuon = !payload.is_empty()
+            && lib::nu::from_nuon_text(payload).is_ok();
         let declared_matches = aliased
             .as_ref()
             .ok()
@@ -81,8 +89,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "opened_attractor" => lib::nu::Value::bool(opened_attractor, span),
                 "strict_parses" => lib::nu::Value::bool(strict.is_ok(), span),
                 "aliased_parses" => lib::nu::Value::bool(aliased.is_ok(), span),
+                "echoed_type" => lib::nu::Value::bool(echoed_type, span),
+                "first_line" => lib::nu::Value::string(first_line, span),
+                "payload" => lib::nu::Value::string(payload, span),
                 "payload_is_nuon" => lib::nu::Value::bool(payload_is_nuon, span),
                 "declared_matches" => lib::nu::Value::bool(declared_matches, span),
+                "stopped" => lib::nu::Value::bool(
+                    matches!(report.finish_reason, Some(lib::FinishReason::StopToken)),
+                    span,
+                ),
                 "generated" => lib::nu::Value::int(report.generated_token_count as i64, span),
                 "response" => lib::nu::Value::string(text.clone(), span),
             },
