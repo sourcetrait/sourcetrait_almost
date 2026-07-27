@@ -64,7 +64,7 @@ pub enum Destination {
 /// A sub-turn the model asked for, ready to dispatch.
 #[derive(Debug, Clone)]
 pub struct SubTurn {
-    pub contract: NuContract,
+    pub contract: InferNu,
     pub destination: Destination,
     pub source: String,
     pub bindings: Vec<Binding>,

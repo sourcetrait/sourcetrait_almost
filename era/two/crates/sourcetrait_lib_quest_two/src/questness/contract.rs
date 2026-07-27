@@ -6,7 +6,7 @@ pub const ARGS_POSITIONAL: &str = "args";
 
 /// What a `<nu>` block's def declares, read back from its signature.
 #[derive(Debug, Clone)]
-pub struct NuContract {
+pub struct InferNu {
     /// The def's name, which IS the mode.
     pub mode: String,
     /// The infix input type; `nothing` means no pipeline input.
@@ -16,7 +16,7 @@ pub struct NuContract {
     pub args: Option<nu::Type>,
 }
 
-impl NuContract {
+impl InferNu {
     /// Whether the def takes pipeline input at all.
     pub fn takes_pipeline(&self) -> bool {
         self.input != nu::Type::Nothing
@@ -29,7 +29,7 @@ impl questness::evaluate::QuestnessEvaluator {
     /// The mode is discovered by diffing the declaration set rather
     /// than by scanning the source, so a def named anything at all is
     /// found and the answer comes from the parser instead of a regex.
-    pub fn contract(&self, source: &str) -> LibQuestResult<NuContract> {
+    pub fn contract(&self, source: &str) -> LibQuestResult<InferNu> {
         let before = self.decl_names();
         let (fresh, signature) = self.parse_fresh_decl(source, &before)?;
         let (input, output) = match signature.input_output_types.first() {
@@ -41,7 +41,7 @@ impl questness::evaluate::QuestnessEvaluator {
             .iter()
             .find(|positional| positional.name == ARGS_POSITIONAL)
             .map(|positional| positional.shape.to_type());
-        Ok(NuContract {
+        Ok(InferNu {
             mode: fresh,
             input,
             output,
@@ -51,7 +51,7 @@ impl questness::evaluate::QuestnessEvaluator {
 }
 
 /// Collect every agreement failure rather than bailing at the first.
-pub fn check_agreements(blocks: &[Block], contract: &NuContract) -> Envelope {
+pub fn check_agreements(blocks: &[Block], contract: &InferNu) -> Envelope {
     let mut envelope = Envelope::default();
     let bindings = pass_bindings(blocks, &mut envelope);
 

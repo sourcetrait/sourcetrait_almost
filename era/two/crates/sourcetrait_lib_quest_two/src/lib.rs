@@ -77,7 +77,7 @@ pub(crate) use crate::model::mask::{
 };
 pub(crate) use crate::model::mlp::Mlp;
 pub(crate) use crate::questness::contract::{
-    NuContract,
+    InferNu,
     check_agreements,
 };
 pub(crate) use crate::questness::evaluate::QuestnessEvaluator;

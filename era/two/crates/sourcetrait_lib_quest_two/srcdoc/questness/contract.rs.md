@@ -12,7 +12,7 @@ agreements are what can be settled while the turn is still text.
 
 ## const ARGS_POSITIONAL
 
-## struct NuContract
+## struct InferNu
 
 ## fn takes_pipeline
 
