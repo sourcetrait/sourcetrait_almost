@@ -28,7 +28,7 @@ impl<H: harness::ClientHarness> Questness<H> {
     pub fn new(
         harness: H,
         aliasing: sourcetrait_quest_core::channel::Aliasing,
-    ) -> QuestHarnessResult<Self> {
+    ) -> LibQuestResult<Self> {
         Ok(Self {
             evaluator: QuestnessEvaluator::new()?,
             harness,
@@ -44,14 +44,14 @@ impl<H: harness::ClientHarness> Questness<H> {
     }
 
     /// The text a turn shows the model.
-    pub fn assemble(&self, request: &turn::Request) -> QuestHarnessResult<turn::Assembled> {
+    pub fn assemble(&self, request: &turn::Request) -> LibQuestResult<turn::Assembled> {
         let assembled = turn::assemble(request)?;
         self.record("assembled", &assembled.text);
         Ok(assembled)
     }
 
     /// Read one emission and take the turn to its next state.
-    pub fn step(&mut self, emission: &str, insufficient: bool) -> QuestHarnessResult<Step> {
+    pub fn step(&mut self, emission: &str, insufficient: bool) -> LibQuestResult<Step> {
         self.record("emission", emission);
         let outcome = turn::interpret(&self.evaluator, emission, self.aliasing, insufficient)?;
         let step = match outcome {
@@ -87,7 +87,7 @@ impl<H: harness::ClientHarness> Questness<H> {
     }
 
     /// Run a sub-turn wherever it belongs, and render its result back.
-    fn serve(&mut self, sub: &turn::SubTurn) -> QuestHarnessResult<Step> {
+    fn serve(&mut self, sub: &turn::SubTurn) -> LibQuestResult<Step> {
         let response = match sub.destination {
             turn::Destination::Inside => {
                 match turn::run_inside(&self.evaluator, sub) {

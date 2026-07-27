@@ -43,7 +43,6 @@ snafu = { version = "0.9" }
 sourcetrait_cert_lib = { path = "../../sourcetrait_cert/crates/sourcetrait_cert_lib" }
 sourcetrait_quest_bridge = { path = "crates/sourcetrait_quest_bridge" }
 sourcetrait_lib_quest_two = { path = "../era/two/crates/sourcetrait_lib_quest_two" }
-sourcetrait_quest_bridge_two = { path = "../era/two/crates/sourcetrait_quest_bridge_two" }
 sourcetrait_quest_core = { path = "crates/sourcetrait_quest_core" }
 tokenizers = { version = "0.23" }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

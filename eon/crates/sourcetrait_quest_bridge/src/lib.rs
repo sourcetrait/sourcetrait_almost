@@ -1,9 +1,6 @@
 pub mod all;
-pub mod cli;
 pub mod client;
-pub mod srvc;
 pub mod tls;
-pub mod tui;
 pub mod wire;
 
 mod error;

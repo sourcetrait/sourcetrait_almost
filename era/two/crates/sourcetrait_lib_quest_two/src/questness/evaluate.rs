@@ -28,7 +28,7 @@ pub struct QuestnessEvaluator {
 
 impl QuestnessEvaluator {
     /// Build the base engine once; every evaluation clones it.
-    pub fn new() -> QuestHarnessResult<Self> {
+    pub fn new() -> LibQuestResult<Self> {
         let mut base = nu_cmd_lang::create_default_context();
         base = register_filters(base)?;
 
@@ -52,7 +52,7 @@ impl QuestnessEvaluator {
     /// Non-registration is what forbids the denied set, so the day
     /// someone adds the shell context this fails loudly rather than
     /// quietly widening what a sub-turn can reach.
-    fn lock_boundary(&self) -> QuestHarnessResult<()> {
+    fn lock_boundary(&self) -> LibQuestResult<()> {
         for name in DENIED {
             if self.resolves(name) {
                 snafu::whatever!(
@@ -91,7 +91,7 @@ impl QuestnessEvaluator {
         &self,
         source: &str,
         before: &[String],
-    ) -> QuestHarnessResult<(String, nu_protocol::Signature)> {
+    ) -> LibQuestResult<(String, nu_protocol::Signature)> {
         let mut engine = self.base.clone();
         let mut working_set = r::nu::StateWorkingSet::new(&engine);
         let _block = r::nu::parse(&mut working_set, None, source.as_bytes(), false);
@@ -123,7 +123,7 @@ impl QuestnessEvaluator {
     /// Runs on its own sized thread: a stack overflow in the parser is
     /// a fatal abort rather than a catchable error, so an async
     /// runtime worker's stack is not safe to parse on.
-    pub fn evaluate(&self, source: &str, input: Option<nu::Value>) -> QuestHarnessResult<nu::Value> {
+    pub fn evaluate(&self, source: &str, input: Option<nu::Value>) -> LibQuestResult<nu::Value> {
         let engine = self.base.clone();
         let source = source.to_string();
         let spawned = std::thread::Builder::new()
@@ -151,7 +151,7 @@ fn eval_once(
     mut engine: r::nu::EngineState,
     source: &str,
     input: Option<nu::Value>,
-) -> QuestHarnessResult<nu::Value> {
+) -> LibQuestResult<nu::Value> {
     engine.set_signals(nu_protocol::Signals::new(std::sync::Arc::new(
         std::sync::atomic::AtomicBool::new(false),
     )));
@@ -192,7 +192,7 @@ fn eval_once(
 }
 
 /// Add the filter set on top of the language core, then merge.
-fn register_filters(mut engine: r::nu::EngineState) -> QuestHarnessResult<r::nu::EngineState> {
+fn register_filters(mut engine: r::nu::EngineState) -> LibQuestResult<r::nu::EngineState> {
     use nu_command::{
         Append, DropColumn, Each, Enumerate, Filter, Find, First, Flatten, Get, Last, Length,
         Prepend, Reject, Reverse, Select, Skip, Sort, Take, Uniq, Where, Wrap,

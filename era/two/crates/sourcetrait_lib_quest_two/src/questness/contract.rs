@@ -29,7 +29,7 @@ impl questness::evaluate::QuestnessEvaluator {
     /// The mode is discovered by diffing the declaration set rather
     /// than by scanning the source, so a def named anything at all is
     /// found and the answer comes from the parser instead of a regex.
-    pub fn contract(&self, source: &str) -> QuestHarnessResult<NuContract> {
+    pub fn contract(&self, source: &str) -> LibQuestResult<NuContract> {
         let before = self.decl_names();
         let (fresh, signature) = self.parse_fresh_decl(source, &before)?;
         let (input, output) = match signature.input_output_types.first() {

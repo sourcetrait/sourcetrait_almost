@@ -25,6 +25,12 @@ pub(crate) mod needle;
 pub(crate) mod norms;
 #[cfg(feature = "attn-profile")]
 pub(crate) mod profile;
+pub(crate) mod questness {
+    pub mod arbitrate;
+    pub mod contract;
+    pub mod evaluate;
+    pub mod turn;
+}
 pub(crate) mod snapshot;
 pub(crate) mod speculate;
 pub(crate) mod tokenizer;
@@ -45,6 +51,13 @@ pub(crate) use std::{
 };
 
 pub(crate) use candle_nn::Module;
+pub(crate) use nu_protocol::CompareTypes;
+
+pub(crate) use sourcetrait_quest_core::channel::{
+    Block,
+    Envelope,
+    Tag,
+};
 
 pub(crate) use crate::model::attn_layer::AttnLayer;
 pub(crate) use crate::model::gdn_layer::GdnLayer;
@@ -53,11 +66,28 @@ pub(crate) use crate::model::mask::{
     offset_causal_mask,
 };
 pub(crate) use crate::model::mlp::Mlp;
+pub(crate) use crate::questness::contract::{
+    NuContract,
+    check_agreements,
+};
+pub(crate) use crate::questness::evaluate::QuestnessEvaluator;
+pub(crate) use crate::questness::turn;
 
 pub(crate) mod r {
     #[cfg(feature = "flash-attn")]
     pub(crate) mod flash {
         pub(crate) use candle_flash_attn::flash_attn;
+    }
+    pub(crate) mod nu {
+        pub(crate) use nu_parser::parse;
+        pub(crate) use nu_protocol::{
+            debugger::WithoutDebug,
+            engine::{
+                EngineState,
+                Stack,
+                StateWorkingSet,
+            },
+        };
     }
     pub(crate) mod sampling {
         pub(crate) use candle_transformers::generation::{
@@ -71,7 +101,9 @@ pub use sourcetrait_quest_core::{
     QuestCoreError,
     QuestCoreResult,
     channel,
+    harness,
     nu,
+    session,
 };
 
 pub use crate::adapter::{
@@ -141,6 +173,16 @@ pub use crate::profile::{
     HeadMasses,
     LayerProfile,
 };
+pub use crate::questness::arbitrate::{
+    Questness,
+    Step,
+};
+pub use crate::questness::turn::{
+    Answer,
+    Assembled,
+    Binding,
+    Request,
+};
 pub use crate::snapshot::{
     RestoredContext,
     snapshot_path,
@@ -176,6 +218,12 @@ mod tests {
     mod norms;
     #[cfg(feature = "attn-profile")]
     mod profile;
+    mod questness {
+        mod arbitrate;
+        mod contract;
+        mod evaluate;
+        mod turn;
+    }
     mod snapshot;
     mod speculate;
     mod tokenizer;

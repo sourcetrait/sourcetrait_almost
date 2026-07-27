@@ -77,7 +77,7 @@ pub enum Outcome {
 }
 
 /// Assemble the text one turn shows the model.
-pub fn assemble(request: &Request) -> QuestHarnessResult<Assembled> {
+pub fn assemble(request: &Request) -> LibQuestResult<Assembled> {
     let bindings: Vec<(String, nu::Value)> = request
         .bindings
         .iter()
@@ -123,7 +123,7 @@ pub fn interpret(
     text: &str,
     aliasing: sourcetrait_quest_core::channel::Aliasing,
     insufficient: bool,
-) -> QuestHarnessResult<Outcome> {
+) -> LibQuestResult<Outcome> {
     if insufficient {
         return Ok(Outcome::Insufficient);
     }
@@ -149,7 +149,7 @@ pub fn interpret(
 pub fn run_inside(
     evaluator: &QuestnessEvaluator,
     sub: &SubTurn,
-) -> QuestHarnessResult<nu::Value> {
+) -> LibQuestResult<nu::Value> {
     if sub.destination != Destination::Inside {
         snafu::whatever!(
             "`{}` leaves for the client rather than running here",
@@ -189,7 +189,7 @@ fn sub_turn(
     evaluator: &QuestnessEvaluator,
     blocks: &[Block],
     nu_block: &Block,
-) -> QuestHarnessResult<Outcome> {
+) -> LibQuestResult<Outcome> {
     let source = nu_source(nu_block);
     let contract = match evaluator.contract(&source) {
         Ok(contract) => contract,
@@ -218,7 +218,7 @@ fn sub_turn(
 }
 
 /// The answer path: the typed value, then the prose that renders it.
-fn answer(blocks: &[Block]) -> QuestHarnessResult<Outcome> {
+fn answer(blocks: &[Block]) -> LibQuestResult<Outcome> {
     let mut envelope = Envelope::default();
     let output = blocks.iter().find(|block| block.tag == Tag::Output);
     let mut declared = None;
@@ -341,7 +341,7 @@ fn nu_source(block: &Block) -> String {
 }
 
 /// A NUON payload, escaped so no string's newline can forge a closer.
-fn nuon_payload(value: &nu::Value) -> QuestHarnessResult<String> {
+fn nuon_payload(value: &nu::Value) -> LibQuestResult<String> {
     Ok(sourcetrait_quest_core::channel::escape_content(&nu::to_nuon_text(value)?))
 }
 

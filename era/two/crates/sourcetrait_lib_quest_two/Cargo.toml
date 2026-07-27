@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_lib_quest_two"
-version = "0.0.0-51"
+version = "0.0.0-52"
 edition = "2024"
 description = "The shared library common to the quest toolset"
 authors = ["SourceTrait <development@sourcetrait.com>"]
@@ -22,6 +22,11 @@ candle-nn.workspace = true
 candle-transformers.workspace = true
 cudarc = { workspace = true, optional = true }
 half = { workspace = true, optional = true }
+nu-cmd-lang.workspace = true
+nu-command.workspace = true
+nu-engine.workspace = true
+nu-parser.workspace = true
+nu-protocol.workspace = true
 safetensors.workspace = true
 serde.workspace = true
 serde_json.workspace = true

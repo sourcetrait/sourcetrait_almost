@@ -2,8 +2,6 @@
 resolver = "3"
 members = [
   "crates/sourcetrait_lib_quest_two",
-  "crates/sourcetrait_quest_bridge_two",
-  "crates/sourcetrait_quest_harness_two",
   "crates/sourcetrait_bquest_two",
   "crates/sourcetrait_refquest_two",
 ]
@@ -30,10 +28,8 @@ serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
 sha2 = { version = "0.10" }
 snafu = { version = "0.9" }
 sourcetrait_lib_quest_two = { path = "crates/sourcetrait_lib_quest_two" }
-sourcetrait_quest_bridge = { path = "../../eon/crates/sourcetrait_quest_bridge" }
 sourcetrait_quest_core = { path = "../../eon/crates/sourcetrait_quest_core" }
 tokenizers = { version = "0.23" }
-tokio = { version = "1", features = ["sync"] }
 toml = { version = "0.9" }
 unicode-normalization = { version = "0.1" }
 unicode-properties = { version = "0.1" }

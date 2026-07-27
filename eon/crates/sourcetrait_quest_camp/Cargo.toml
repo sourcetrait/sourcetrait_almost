@@ -14,14 +14,13 @@ keywords = ["sourcetrait", "quest", "camp"]
 name = "camp"
 path = "src/main.rs"
 
-[features]
-cuda = ["sourcetrait_quest_bridge_two/cuda"]
-flash-attn = ["cuda", "sourcetrait_quest_bridge_two/flash-attn"]
-
+# PARKED, and it does not build as it stands. Camp drove an era that held
+# the model in its own process; the daemon holds it now, so camp returns
+# as a client of the bridge transport rather than of an era crate. Its
+# source still speaks the retired session vocabulary.
 [dependencies]
 clap.workspace = true
 ratatui.workspace = true
 snafu.workspace = true
 sourcetrait_quest_bridge.workspace = true
-sourcetrait_quest_bridge_two.workspace = true
 tokio = { workspace = true, features = ["rt", "macros"] }
