@@ -40,4 +40,4 @@ sourcetrait_quest_bridge_two = { path = "../era/two/crates/sourcetrait_quest_bri
 sourcetrait_quest_core = { path = "crates/sourcetrait_quest_core" }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
-tokio-util = { version = "0.7", features = ["codec"] }
+tokio-util = { version = "0.7", features = ["codec", "rt"] }

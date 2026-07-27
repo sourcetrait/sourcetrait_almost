@@ -1984,7 +1984,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_cert_lib"
-version = "0.0.0-3"
+version = "0.0.0-4"
 dependencies = [
  "nix",
  "rcgen",
@@ -2006,7 +2006,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_quest_bridge"
-version = "0.0.0-3"
+version = "0.0.0-4"
 dependencies = [
  "bitcode",
  "futures-util",
@@ -2302,6 +2302,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "libc",
  "pin-project-lite",
  "tokio",

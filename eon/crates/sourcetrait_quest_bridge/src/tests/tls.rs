@@ -30,13 +30,13 @@ use crate::all::{
 
 /// A throwaway authority and leaf, so a lock depends on no installed
 /// state and leaves none behind.
-struct Material {
+pub(crate) struct Material {
     root: std::path::PathBuf,
-    files: sourcetrait_cert_lib::CertFiles,
+    pub(crate) files: sourcetrait_cert_lib::CertFiles,
 }
 
 impl Material {
-    fn mint(name: &str) -> Self {
+    pub(crate) fn mint(name: &str) -> Self {
         let root = std::env::temp_dir().join(format!("bridge_tls_{name}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("scratch root");
