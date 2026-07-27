@@ -93,15 +93,19 @@ pub fn check_agreements(blocks: &[Block], contract: &NuContract) -> Envelope {
         _ => {}
     }
 
-    for (binding, declared) in &bindings {
+    for (binding, bound) in &bindings {
         let channel = match binding.as_str() {
             "$in" => Some(&contract.input),
             "$args" => contract.args.as_ref(),
             _ => None,
         };
-        let (Some(channel), Some(declared)) = (channel, declared) else {
+        let (Some(channel), Some(bound)) = (channel, bound) else {
             continue;
         };
+        let declared = &bound.header;
+        if declared.is_empty() {
+            continue;
+        }
         let parsed = match nu::parse_typedef(declared) {
             Ok(parsed) => parsed,
             Err(error) => {
@@ -124,8 +128,11 @@ pub fn check_agreements(blocks: &[Block], contract: &NuContract) -> Envelope {
 }
 
 /// Pair each `<pass>` with the block it binds, in emission order.
-fn pass_bindings(blocks: &[Block], envelope: &mut Envelope) -> Vec<(String, Option<String>)> {
-    let mut bindings: Vec<(String, Option<String>)> = Vec::new();
+pub(crate) fn pass_bindings<'a>(
+    blocks: &'a [Block],
+    envelope: &mut Envelope,
+) -> Vec<(String, Option<&'a Block>)> {
+    let mut bindings: Vec<(String, Option<&'a Block>)> = Vec::new();
     for (index, block) in blocks.iter().enumerate() {
         if block.tag != Tag::Pass {
             continue;
@@ -152,7 +159,7 @@ fn pass_bindings(blocks: &[Block], envelope: &mut Envelope) -> Vec<(String, Opti
             .and_then(|previous| blocks.get(previous))
             .filter(|previous| previous.tag != Tag::Pass);
         match bound {
-            Some(previous) => bindings.push((binding, Some(previous.header.clone()))),
+            Some(previous) => bindings.push((binding, Some(previous))),
             None => {
                 envelope.error(
                     "channel::unbound_pass",

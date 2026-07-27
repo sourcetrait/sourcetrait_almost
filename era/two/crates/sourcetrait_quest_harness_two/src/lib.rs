@@ -2,6 +2,7 @@ pub(crate) mod error;
 pub mod questness {
     pub mod contract;
     pub mod evaluate;
+    pub mod turn;
 }
 
 #[allow(unused_imports)]
@@ -39,9 +40,22 @@ pub use crate::questness::contract::{
     check_agreements,
 };
 pub use crate::questness::evaluate::QuestnessEvaluator;
+pub use crate::questness::turn::{
+    Answer,
+    Assembled,
+    Binding,
+    Destination,
+    Outcome,
+    Request,
+    SubTurn,
+    assemble,
+    interpret,
+    run_inside,
+};
 
 #[cfg(test)]
 mod tests {
     mod contract;
     mod evaluate;
+    mod turn;
 }

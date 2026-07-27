@@ -39,8 +39,6 @@ impl QuestnessEvaluator {
         base.is_interactive = false;
         base.is_login = false;
         base.is_lsp = false;
-        // Our stdout is a protocol channel: an external gets a null
-        // stdin rather than ours, and `print` routes to stderr.
         base.is_mcp = true;
         base.add_env_var(String::from("PWD"), nu::Value::string("", nu::Span::unknown()));
 
