@@ -1683,7 +1683,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_quest_core"
-version = "0.0.0-8"
+version = "0.0.0-9"
 dependencies = [
  "liquid",
  "nu-parser",
