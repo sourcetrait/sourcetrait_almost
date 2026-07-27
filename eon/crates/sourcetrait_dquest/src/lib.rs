@@ -1,5 +1,6 @@
 pub(crate) mod container;
 pub(crate) mod error;
+pub(crate) mod nom;
 pub(crate) mod preflight;
 pub mod run;
 pub(crate) mod serve;
@@ -56,6 +57,7 @@ pub(crate) use crate::error::{
 #[cfg(test)]
 mod tests {
     mod material;
+    mod nom;
     mod preflight;
     mod run;
     mod serve;
