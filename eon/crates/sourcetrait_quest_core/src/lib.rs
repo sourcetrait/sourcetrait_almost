@@ -5,6 +5,7 @@ pub(crate) mod error;
 #[cfg(feature = "evaluate")]
 pub mod evaluate;
 pub mod nu;
+pub mod template;
 
 #[allow(unused_imports)]
 pub(crate) use std::{
@@ -58,4 +59,5 @@ mod tests {
     #[cfg(feature = "evaluate")]
     mod evaluate;
     mod nu;
+    mod template;
 }

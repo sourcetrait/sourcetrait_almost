@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_quest_core"
-version = "0.0.0-4"
+version = "0.0.0-5"
 edition = "2024"
 description = "The era-independent data and template core of the quest toolset"
 authors = ["SourceTrait <development@sourcetrait.com>"]
@@ -17,6 +17,7 @@ keywords = ["sourcetrait", "quest", "core"]
 evaluate = ["dep:nu-cmd-lang", "dep:nu-command", "dep:nu-engine"]
 
 [dependencies]
+liquid.workspace = true
 nu-cmd-lang = { workspace = true, optional = true }
 nu-command = { workspace = true, optional = true }
 nu-engine = { workspace = true, optional = true }
