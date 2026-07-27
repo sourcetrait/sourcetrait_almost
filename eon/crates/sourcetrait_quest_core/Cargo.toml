@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_quest_core"
-version = "0.0.0-7"
+version = "0.0.0-8"
 edition = "2024"
 description = "The era-independent data and template core of the quest toolset"
 authors = ["SourceTrait <development@sourcetrait.com>"]
@@ -15,4 +15,8 @@ liquid.workspace = true
 nu-parser.workspace = true
 nu-protocol.workspace = true
 nuon.workspace = true
+serde.workspace = true
 snafu.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

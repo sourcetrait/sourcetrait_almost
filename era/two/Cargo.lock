@@ -8363,18 +8363,19 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_quest_core"
-version = "0.0.0-7"
+version = "0.0.0-8"
 dependencies = [
  "liquid",
  "nu-parser",
  "nu-protocol",
  "nuon",
+ "serde",
  "snafu",
 ]
 
 [[package]]
 name = "sourcetrait_quest_harness_two"
-version = "0.0.0-1"
+version = "0.0.0-2"
 dependencies = [
  "nu-cmd-lang",
  "nu-command",

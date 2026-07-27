@@ -1,6 +1,7 @@
 pub mod channel;
 pub mod config;
 pub(crate) mod error;
+pub mod harness;
 pub mod nu;
 pub mod template;
 
@@ -37,6 +38,7 @@ pub use crate::error::{
 mod tests {
     mod channel;
     mod config;
+    mod harness;
     mod nu;
     mod template;
 }

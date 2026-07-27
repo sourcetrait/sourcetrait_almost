@@ -1,5 +1,4 @@
-//! The runtime config record: what Questness consumes, what the model
-//! sees, and the prompt rendering one of those keys switches on.
+//! The runtime config record: what we consume, what the model sees.
 use crate::*;
 
 /// Keys addressed to Questness, which never reach the model.
@@ -38,8 +37,7 @@ pub fn split(config: &nu::Value) -> QuestCoreResult<(nu::Record, nu::Record)> {
     Ok((questness, visible))
 }
 
-/// Prepare one turn: render the prompt if asked, and strip the keys
-/// that were addressed to us.
+/// Prepare one turn: render the prompt if asked, strip our own keys.
 pub fn prepare(
     config: &nu::Value,
     prompt: &str,

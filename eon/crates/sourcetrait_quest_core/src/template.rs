@@ -53,9 +53,6 @@ pub fn to_liquid(value: &nu::Value) -> QuestCoreResult<liquid::model::Value> {
             }
             liquid::model::Value::Object(object)
         }
-        // Durations, filesizes, dates, cell-paths and the rest carry
-        // their NUON spelling, which is the typed literal a reader of
-        // this program already expects to see.
         other => liquid::model::Value::scalar(nu::to_nuon_text(other)?),
     })
 }
