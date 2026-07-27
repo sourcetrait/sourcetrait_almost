@@ -75,12 +75,17 @@ response passes through.
 
 Blocking rather than async, and generic rather than boxed.
 
-Blocking is the experimental call. The bridge underneath is tokio and the
-daemon will be async, so this will likely need to change - but a
-`&mut self` method is what the current shape needs, an async trait would
-force a runtime choice into the data core, and the core is the crate
-every other crate depends on. Making it async is a smaller change later
-than un-making it would be now.
+BLOCKING IS DECIDED RATHER THAN PROVISIONAL, and it was carried as debt
+until both halves of the seam existed to price it. Making the trait async
+buys nothing: Questness is blocking all the way DOWN, since the evaluator
+spawns a sized thread and joins it, so an `evaluate` sub-turn blocks its
+caller whatever this signature says. An async `serve` would move the
+problem onto the evaluator while forcing a runtime choice into the library
+everything depends on.
+
+So the whole of `step` is a blocking API and an async daemon's correct
+call is `spawn_blocking`. That needs `Questness<H>` to be `Send`, which a
+compile-time assertion locks rather than assumes.
 
 Generic follows the design: an instance talks to one harness for its
 life, so static dispatch is enough and there is no case for a trait

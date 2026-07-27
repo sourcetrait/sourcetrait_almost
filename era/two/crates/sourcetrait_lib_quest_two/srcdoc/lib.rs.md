@@ -22,7 +22,7 @@ the identifier ambiguous - which is why these are `flash`, `nu` and `sampling`
 rather than the crate names.
 
 `r::nu` and the crate-global `nu` are different things and the near-collision is
-deliberate rather than an oversight. The global one is the eon core's data
+deliberate rather than an oversight. The global one is this crate's own data
 module, reached bare; the hub one carries nushell's own parser and engine types,
 reached as `r::nu`. Both are in scope together under the star import and stay
 unambiguous because one is only ever reached through `r`.

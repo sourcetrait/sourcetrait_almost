@@ -4,11 +4,14 @@ The one owner of the nushell dependencies in the whole toolset. Every other
 crate reaches this module and never the nu crates directly, so the estate's
 single nushell pin has exactly one place to move.
 
-It sits in eon rather than in an era because nothing in it is era-specific:
-there is no model here, no candle, and no checkpoint. That is what lets an eon
-binary speak the program's data language without linking an era's engine, and
-it is the whole reason this crate exists. The era library re-exports the module
-under its old path, so `lib::nu` still resolves and no call site moved.
+NOTHING IN IT IS ERA-SPECIFIC - there is no model here, no candle and no
+checkpoint - and it lives in the library anyway. It sat in a crate of its own
+once, so that an eon binary could speak the program's data language without
+linking an era's engine. That justification did not survive measurement: a
+binary carries only what it CALLS, so a consumer that never drives the engine
+never linked it, and every eon binary already depended on the library regardless
+(17_End_Use). The module path never moved either way, so `lib::nu` resolves as
+it always has.
 
 NUON is the program's primary data format. Artifacts we author are `.nuon` -
 one whole value per file, usually a table or a record - while stream-shaped

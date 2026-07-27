@@ -80,5 +80,5 @@ It is `pub(crate)`. An earlier draft made it public on the reasoning that
 a daemon would want to inspect a request before serving it, which was an
 invented consumer: the daemon never sees a `SubTurn`, because Questness
 services one internally, and a harness implementation receives a
-`HarnessRequest` from the core crate rather than building one. Nothing
-outside this crate can reach a `SubTurn` to pass in.
+`HarnessRequest` from the seam rather than building one. Nothing outside
+this crate can reach a `SubTurn` to pass in.
