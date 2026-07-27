@@ -27,4 +27,5 @@ pub(crate) use crate::error::{
 mod tests {
     mod preflight;
     mod run;
+    mod style;
 }

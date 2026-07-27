@@ -42,9 +42,6 @@ fn start() -> DquestResult<Started> {
 }
 
 /// The one thing this binary says to a user.
-///
-/// Composed here rather than inside an error type, so the profile and its
-/// path can be styled without any error carrying escape codes.
 pub(crate) fn certificate_owed(live: &Path) -> String {
     format!(
         "Unable to start: no certificate for the {name} profile yet, so the \
