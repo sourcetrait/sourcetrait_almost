@@ -1,0 +1,20 @@
+[package]
+name = "sourcetrait_dquest"
+version = "0.0.0-1"
+edition = "2024"
+description = "DaemonQuest: the inference daemon serving quest and camp"
+authors = ["SourceTrait <development@sourcetrait.com>"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/sourcetrait/sourcetrait_quest"
+homepage = "https://sourcetrait.com"
+categories = []
+keywords = ["sourcetrait", "quest", "dquest", "daemon"]
+
+[[bin]]
+name = "dquest"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+snafu.workspace = true
+sourcetrait_cert_lib.workspace = true

@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "crates/sourcetrait_quest_core",
   "crates/sourcetrait_quest_bridge",
+  "crates/sourcetrait_dquest",
   # Parked while the harness and daemon are built; camp returns as the
   # second QuestHarness consumer.
   # "crates/sourcetrait_quest_camp",
@@ -21,6 +22,11 @@ ratatui = { version = "0.29" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
 snafu = { version = "0.9" }
+# A sibling-repository path: sourcetrait_cert is not published, so a git
+# dependency does not resolve. Both repositories are clones under the
+# sourcetrait projects home, so the sibling assumption is the standing
+# checkout layout rather than one machine's.
+sourcetrait_cert_lib = { path = "../../sourcetrait_cert/crates/sourcetrait_cert_lib" }
 sourcetrait_quest_bridge = { path = "crates/sourcetrait_quest_bridge" }
 sourcetrait_quest_bridge_two = { path = "../era/two/crates/sourcetrait_quest_bridge_two" }
 sourcetrait_quest_core = { path = "crates/sourcetrait_quest_core" }

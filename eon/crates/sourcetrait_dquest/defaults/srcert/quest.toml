@@ -1,0 +1,36 @@
+# The srcert profile quest mints its own certificate authority from.
+#
+# This is the reference copy the daemon ships. The live copy is placed at
+# $XDG_CONFIG_HOME/sourcetrait/srcert/profiles/quest.toml on first start
+# and is never overwritten afterwards, so anything customised there
+# survives an upgrade.
+
+# Filename stem and application segment: authority_quest.pem, and the
+# <secret_data>/sourcetrait/quest/certs install destination.
+name = "quest"
+organization = "SourceTrait"
+validity_days = 3650
+
+[authority]
+common_name = "SourceTrait Quest Local CA"
+
+[entity]
+common_name = "localhost"
+
+# Hostname verification reads these rather than the common name, so the
+# list has to carry every spelling a caller might dial. Ports are not in
+# certificates, so one leaf covers every port the daemon listens on.
+subject_alt_names = ["127.0.0.1", "::1", "localhost"]
+
+# Both ends, deliberately. The bridge is a mutual-TLS client and the
+# daemon is its server, so the same leaf is presented at each end of the
+# handshake. A server-only leaf is refused as a client certificate by a
+# conformant stack, which is exactly why the grammar certificates could
+# not be reused here.
+#
+# One leaf serving both ends is sufficient only while the client and the
+# server are the same machine. Admission is the certificate authority
+# rather than the leaf's identity, and a Thinkspace is keyed from the
+# username rather than from anything in the certificate. A remote client
+# would want its own identity and therefore its own leaf.
+usages = ["server", "client"]
