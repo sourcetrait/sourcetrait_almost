@@ -1,8 +1,13 @@
 # serve.rs
 
-The module-level allow is temporary and named at the top of the file: the
-code is built and locked but not reached from `run`, because serving needs
-a container and a container needs an engine, which is the era library's.
+## fn record
+
+A logging failure is DROPPED rather than reported, and the rule behind
+that is the same one the Questness side holds to: the log is a record of
+the work and never part of it, so nothing a turn does may depend on it
+landing. A session with no log at all takes the same path, which is what
+lets an unresolvable cache home turn logging off instead of refusing
+connections.
 
 ## fn serve
 
@@ -49,3 +54,14 @@ one of them would either truncate the tail or hang.
 A second turn arriving mid-turn is REFUSED rather than queued. Queueing it
 would make the daemon hold work it cannot start on behalf of a client that
 has not been told, and the client already has a fault notice to read.
+
+THE ANSWER IS REASSEMBLED ONLY TO LOG IT. Chunks still go out as they
+arrive, so the copy costs memory rather than latency, and the alternative
+- logging each chunk as it passes - would record the tokenizer's grapheme
+boundaries rather than the answer anyone read.
+
+EVERY RECORD IS WRITTEN BEFORE ITS RESPONSE IS SENT, which is what makes
+the log testable without waiting on anything: a client that has read the
+turn response has already caused the turn, the answer and the report to
+land. The answer is also recorded on the path where the peer vanished
+mid-turn, because a partial answer is the interesting one to have kept.

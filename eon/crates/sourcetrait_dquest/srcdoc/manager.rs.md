@@ -26,6 +26,26 @@ socket and never completes a handshake is a connection being attempted,
 and a registry that only counted successful ones would show nothing while
 several such peers held sockets open.
 
+## fn log
+
+ADDRESSED BY SPACE AND THEN BY SESSION, from the two noms rather than from
+anything a client sent. The manager owns the space and the ticket owns the
+session, which is why this sits here: it is the one place holding both
+halves of the path, and `SessionLog` deliberately takes its segments
+rather than deriving them.
+
+NONE IS A SUCCESS. There are two ways to get it - no root was resolved, or
+the directory would not open - and neither refuses the session, because a
+connection dropped over a log would trade the work for the record of it.
+That makes the return an `Option` rather than a `Result`: a caller has
+nothing to do differently between the two, so distinguishing them would
+be a distinction nobody acts on.
+
+It goes through the `thinkspace` accessor rather than the field beside it,
+which is not a style preference: reading the field would leave the
+accessor unused in the library build and hand the crate a warning to
+suppress.
+
 ## fn locked
 
 A poisoned mutex is RECOVERED rather than propagated. The registry holds

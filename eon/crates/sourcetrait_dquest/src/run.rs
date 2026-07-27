@@ -62,7 +62,8 @@ fn serve_forever() -> DquestResult<()> {
         // there leaves the daemon up and refusing, rather than exiting
         // before any client can be told why.
         let container = ContainerHandle::spawn(era::EraEngine::load);
-        let manager = manager::SessionManager::for_user(&username);
+        let manager =
+            manager::SessionManager::for_user(&username, preflight::session_log_root());
         serve::serve(listener, config, container, manager).await;
         Ok(())
     })

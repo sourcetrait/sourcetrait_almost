@@ -25,6 +25,20 @@ position that configuration surface is a decision rather than a
 convenience. The variable is also the one `srcert` itself reads, so the
 two tools agree about the location without either telling the other.
 
+## fn session_log_root
+
+THE HOME IS LOOKED UP AND THE LEAF IS INVENTED, which is the distinction
+that decides the operation on each. `XDG_CACHE_HOME` is a path the
+platform defines, so its absence is an answer rather than something to
+conjure; the directories below it are ours and are created on demand.
+
+An unset variable turns logging OFF rather than refusing a start, and that
+is the same trade `manager::log` makes one level down. It is the one place
+here where absent is not an error, and it differs from `SECRET_DATA_ENV`
+for a real reason: without key material the daemon cannot serve at all,
+while without a cache home it can serve perfectly and merely says nothing
+about it afterwards.
+
 ## fn ensure_profile
 
 Called on every start rather than guarded behind `profile_exists`, and

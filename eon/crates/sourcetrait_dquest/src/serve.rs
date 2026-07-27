@@ -45,13 +45,25 @@ pub(crate) async fn serve(
         // one is still visible as a connection being attempted - and the
         // ticket drops on that path exactly as on any other.
         let ticket = manager.admit();
+        let log = manager.log(&ticket);
         tokio::spawn(async move {
             let _ticket = ticket;
             let Ok(stream) = acceptor.accept(stream).await else {
                 return;
             };
-            session(stream, container).await;
+            session(stream, container, log).await;
         });
+    }
+}
+
+/// Append one labelled record, if this session is logged at all.
+///
+/// A logging failure is dropped rather than reported, which is the same
+/// rule the Questness side holds to: the log is a record of the work and
+/// never part of it, so nothing a turn does depends on it landing.
+fn record(log: &Option<lib::session::SessionLog>, label: &str, body: &str) {
+    if let Some(log) = log {
+        let _ = log.append(label, body);
     }
 }
 
@@ -59,6 +71,7 @@ pub(crate) async fn serve(
 pub(crate) async fn session(
     stream: r::tls::ServerStream<tokio::net::TcpStream>,
     container: ContainerHandle,
+    log: Option<lib::session::SessionLog>,
 ) {
     let (read, write) = tokio::io::split(stream);
     let mut reader = Reader::new(read, bridge::BitcodeCodec::new());
@@ -68,15 +81,21 @@ pub(crate) async fn session(
         let carry_on = match message {
             bridge::ClientToServer::Open(request) => {
                 let answer = match container.open(request.options).await {
-                    Ok(info) => bridge::ServerToClient::Open(bridge::OpenResponse { info }),
-                    Err(message) => bridge::ServerToClient::OpenRefused(
-                        bridge::OpenRefusedResponse { message },
-                    ),
+                    Ok(info) => {
+                        record(&log, "open", &format!("{} {}", info.era, info.model));
+                        bridge::ServerToClient::Open(bridge::OpenResponse { info })
+                    }
+                    Err(message) => {
+                        record(&log, "open-refused", &message);
+                        bridge::ServerToClient::OpenRefused(
+                            bridge::OpenRefusedResponse { message },
+                        )
+                    }
                 };
                 writer.send(answer).await.is_ok()
             }
             bridge::ClientToServer::Turn(request) => {
-                turn(&mut reader, &mut writer, &container, request.text).await
+                turn(&mut reader, &mut writer, &container, request.text, &log).await
             }
             // Nothing is generating, or the turn arm would be running.
             bridge::ClientToServer::Cancel(_) => writer
@@ -87,14 +106,21 @@ pub(crate) async fn session(
                 .is_ok(),
             bridge::ClientToServer::Reset(_) => {
                 let answer = match container.reset().await {
-                    Ok(()) => bridge::ServerToClient::Reset(bridge::ResetResponse),
-                    Err(message) => bridge::ServerToClient::Notice(
-                        bridge::ServerNotice::Fault(bridge::ServerFaultNotice { message }),
-                    ),
+                    Ok(()) => {
+                        record(&log, "reset", "");
+                        bridge::ServerToClient::Reset(bridge::ResetResponse)
+                    }
+                    Err(message) => {
+                        record(&log, "fault", &message);
+                        bridge::ServerToClient::Notice(bridge::ServerNotice::Fault(
+                            bridge::ServerFaultNotice { message },
+                        ))
+                    }
                 };
                 writer.send(answer).await.is_ok()
             }
             bridge::ClientToServer::Close => {
+                record(&log, "close", "");
                 let _ = writer.send(bridge::ServerToClient::Close).await;
                 false
             }
@@ -117,11 +143,16 @@ async fn turn(
     writer: &mut Writer,
     container: &ContainerHandle,
     text: String,
+    log: &Option<lib::session::SessionLog>,
 ) -> bool {
+    record(log, "turn", &text);
     let (chunks, mut arriving) = r::tokio::channel(CHUNK_CAPACITY);
     let running = container.turn(text, chunks);
     tokio::pin!(running);
 
+    // The answer is reassembled here ONLY to log it. The chunks still go
+    // out as they arrive, so the log costs a copy rather than a wait.
+    let mut answer = String::new();
     let mut report = None;
     let mut draining = false;
     let mut cancelled = false;
@@ -131,6 +162,7 @@ async fn turn(
         tokio::select! {
             chunk = arriving.recv(), if !draining => match chunk {
                 Some(chunk) => {
+                    answer.push_str(&chunk.text);
                     alive = writer.send(bridge::ServerToClient::TurnChunk(chunk)).await.is_ok();
                 }
                 None => draining = true,
@@ -177,15 +209,33 @@ async fn turn(
         }
     }
 
+    // Logged whatever the ending was, including a peer that vanished
+    // mid-turn: a partial answer is the interesting one to have kept.
+    record(log, "answer", &answer);
     if !alive {
         return false;
     }
-    let answer = match report {
-        Some(Ok(report)) => bridge::ServerToClient::Turn(bridge::TurnResponse { report }),
+    let outcome = match report {
+        Some(Ok(report)) => {
+            record(
+                log,
+                "report",
+                &format!(
+                    "{:?}; prompt {}, generated {}, prefill {:.3}s, decode {:.3}s",
+                    report.finish,
+                    report.prompt_token_count,
+                    report.generated_token_count,
+                    report.prefill_seconds,
+                    report.decode_seconds,
+                ),
+            );
+            bridge::ServerToClient::Turn(bridge::TurnResponse { report })
+        }
         Some(Err(message)) => {
+            record(log, "turn-failed", &message);
             bridge::ServerToClient::TurnFailed(bridge::TurnFailedResponse { message })
         }
         None => return false,
     };
-    writer.send(answer).await.is_ok()
+    writer.send(outcome).await.is_ok()
 }

@@ -1,5 +1,25 @@
-//! A throwaway authority and leaf, so a lock depends on no installed
-//! state and leaves none behind.
+//! Throwaway filesystem state, so a lock depends on none that is
+//! installed and leaves none behind.
+
+/// A scratch directory that removes itself.
+pub(crate) struct Scratch {
+    pub(crate) root: std::path::PathBuf,
+}
+
+impl Scratch {
+    pub(crate) fn make(name: &str) -> Self {
+        let root = std::env::temp_dir().join(format!("dquest_scratch_{name}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("scratch root");
+        Self { root }
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
 
 pub(crate) struct Material {
     root: std::path::PathBuf,

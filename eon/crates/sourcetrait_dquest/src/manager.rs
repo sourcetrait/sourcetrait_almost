@@ -1,11 +1,4 @@
 //! Who is connected: one Thinkspace, and the sessions live inside it.
-//!
-//! Admitting and releasing are wired; OBSERVING is not, because its only
-//! consumer is session logging, which is blocked on where `SessionLog`
-//! should live (debt). The locks drive the observation surface, so the
-//! allow covers what the daemon does not read yet rather than what
-//! nothing exercises.
-#![allow(dead_code)]
 use crate::*;
 
 /// The live sessions, and the space they belong to.
@@ -15,6 +8,7 @@ use crate::*;
 #[derive(Clone)]
 pub(crate) struct SessionManager {
     thinkspace: nom::ThinkspaceNom,
+    log_root: Option<PathBuf>,
     live: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<nom::SessionNom>>>,
 }
 
@@ -29,10 +23,11 @@ pub(crate) struct SessionTicket {
 }
 
 impl SessionManager {
-    /// The registry for one user's space.
-    pub(crate) fn for_user(username: &str) -> Self {
+    /// The registry for one user's space, logging under `log_root`.
+    pub(crate) fn for_user(username: &str, log_root: Option<PathBuf>) -> Self {
         Self {
             thinkspace: nom::ThinkspaceNom::of(username),
+            log_root,
             live: std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new())),
         }
     }
@@ -40,6 +35,21 @@ impl SessionManager {
     /// The space every session here belongs to.
     pub(crate) fn thinkspace(&self) -> &nom::ThinkspaceNom {
         &self.thinkspace
+    }
+
+    /// This session's log, addressed by space and then by session.
+    ///
+    /// None where there is no root or the directory will not open. A
+    /// session that cannot be logged is still served, because refusing a
+    /// connection over a log is the wrong trade - the log records the
+    /// work rather than being part of it.
+    pub(crate) fn log(&self, ticket: &SessionTicket) -> Option<lib::session::SessionLog> {
+        let root = self.log_root.as_ref()?;
+        lib::session::SessionLog::open(
+            root,
+            &[self.thinkspace().as_str(), ticket.nom().as_str()],
+        )
+        .ok()
     }
 
     /// Take a place in the registry, minting the nom that names it.
@@ -52,11 +62,18 @@ impl SessionManager {
         }
     }
 
+    /// How many sessions are live.
+    ///
+    /// Read by the locks alone: the daemon has no verb that reports its
+    /// own state yet, and inventing one to consume this would be a
+    /// design decision rather than a wiring detail.
+    #[allow(dead_code)]
     pub(crate) fn live(&self) -> usize {
         self.locked().len()
     }
 
     /// Every live session, for a listing rather than for control.
+    #[allow(dead_code)]
     pub(crate) fn sessions(&self) -> Vec<nom::SessionNom> {
         self.locked().iter().cloned().collect()
     }

@@ -74,6 +74,19 @@ async fn daemon(
     tokio::task::JoinHandle<()>,
     crate::manager::SessionManager,
 ) {
+    daemon_with(material, engine, None).await
+}
+
+/// The same, with session logging written under `log_root`.
+async fn daemon_with(
+    material: &crate::tests::material::Material,
+    engine: Scripted,
+    log_root: Option<std::path::PathBuf>,
+) -> (
+    std::net::SocketAddr,
+    tokio::task::JoinHandle<()>,
+    crate::manager::SessionManager,
+) {
     let listener = bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .expect("binds");
@@ -81,7 +94,7 @@ async fn daemon(
     let config =
         sourcetrait_quest_bridge::server_config(&material.files).expect("a server configuration");
     let container = ContainerHandle::spawn(move || Ok(engine));
-    let manager = crate::manager::SessionManager::for_user("box");
+    let manager = crate::manager::SessionManager::for_user("box", log_root);
     let task = tokio::spawn(serve(listener, config, container, manager.clone()));
     (address, task, manager)
 }
@@ -419,6 +432,70 @@ async fn a_failed_turn_answers_the_turn() {
         seen.last(),
         Some(sourcetrait_quest_bridge::ServerToClient::TurnFailed(_))
     ));
+
+    handle.close(std::time::Duration::from_secs(5)).await;
+    server.abort();
+}
+
+/// The session log carries the conversation, including the answer that
+/// went out in pieces. Every record is written BEFORE its response is
+/// sent, so a client that has read the turn response has already caused
+/// the log to land - there is nothing to wait for here.
+#[tokio::test]
+async fn a_session_writes_its_turn_to_the_log() {
+    let material = crate::tests::material::Material::mint("dquest_logged");
+    let scratch = crate::tests::material::Scratch::make("serve_log");
+    let (address, server, manager) = daemon_with(
+        &material,
+        scripted(&["Hel", "lo", " there"]),
+        Some(scratch.root.clone()),
+    )
+    .await;
+    let mut handle = connect(address, &material).await;
+
+    handle
+        .send(sourcetrait_quest_bridge::ClientToServer::Open(
+            sourcetrait_quest_bridge::OpenRequest {
+                options: sourcetrait_quest_bridge::all::ChatOptions::default(),
+            },
+        ))
+        .await
+        .expect("sends");
+    let _ = read_until(&mut handle, |m| {
+        matches!(m, sourcetrait_quest_bridge::ServerToClient::Open(_))
+    })
+    .await;
+
+    handle
+        .send(sourcetrait_quest_bridge::ClientToServer::Turn(
+            sourcetrait_quest_bridge::TurnRequest {
+                text: String::from("say hello"),
+            },
+        ))
+        .await
+        .expect("sends");
+    let _ = read_until(&mut handle, |m| {
+        matches!(m, sourcetrait_quest_bridge::ServerToClient::Turn(_))
+    })
+    .await;
+
+    let space = scratch.root.join(manager.thinkspace().as_str());
+    let sessions: Vec<std::path::PathBuf> = std::fs::read_dir(&space)
+        .expect("the space was created")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(sessions.len(), 1, "one connection, one session directory");
+
+    let text = std::fs::read_to_string(sessions[0].join(crate::lib::session::LOG_FILE))
+        .expect("the log was written");
+    assert!(text.contains("== open =="), "{text}");
+    assert!(text.contains("say hello"), "the prompt is recorded: {text}");
+    assert!(
+        text.contains("Hello there"),
+        "the streamed answer is reassembled whole: {text}"
+    );
+    assert!(text.contains("StopToken"), "the accounting is recorded: {text}");
 
     handle.close(std::time::Duration::from_secs(5)).await;
     server.abort();
