@@ -1,5 +1,6 @@
 pub(crate) mod error;
 pub mod questness {
+    pub mod arbitrate;
     pub mod contract;
     pub mod evaluate;
     pub mod turn;
@@ -15,7 +16,9 @@ pub(crate) use sourcetrait_quest_core::channel::{
     Envelope,
     Tag,
 };
+pub(crate) use sourcetrait_quest_core::harness;
 pub(crate) use sourcetrait_quest_core::nu;
+pub(crate) use crate::questness::turn;
 
 pub(crate) mod r {
     pub(crate) mod nu {
@@ -39,6 +42,11 @@ pub use crate::questness::contract::{
     NuContract,
     check_agreements,
 };
+pub use crate::questness::arbitrate::{
+    Questness,
+    Step,
+    request_for,
+};
 pub use crate::questness::evaluate::QuestnessEvaluator;
 pub use crate::questness::turn::{
     Answer,
@@ -55,6 +63,7 @@ pub use crate::questness::turn::{
 
 #[cfg(test)]
 mod tests {
+    mod arbitrate;
     mod contract;
     mod evaluate;
     mod turn;
