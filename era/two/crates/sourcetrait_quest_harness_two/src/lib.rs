@@ -18,6 +18,7 @@ pub(crate) use sourcetrait_quest_core::channel::{
 };
 pub(crate) use sourcetrait_quest_core::harness;
 pub(crate) use sourcetrait_quest_core::nu;
+pub(crate) use sourcetrait_quest_core::session;
 pub(crate) use crate::questness::turn;
 pub(crate) use crate::questness::contract::{
     NuContract,

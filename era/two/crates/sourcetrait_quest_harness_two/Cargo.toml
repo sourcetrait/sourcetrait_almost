@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_quest_harness_two"
-version = "0.0.0-4"
+version = "0.0.0-5"
 edition = "2024"
 description = "Questness and QuestHarness: the era-two harness layer"
 authors = ["SourceTrait <development@sourcetrait.com>"]

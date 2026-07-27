@@ -3,6 +3,7 @@ pub mod config;
 pub(crate) mod error;
 pub mod harness;
 pub mod nu;
+pub mod session;
 pub mod template;
 
 #[allow(unused_imports)]
@@ -40,5 +41,6 @@ mod tests {
     mod config;
     mod harness;
     mod nu;
+    mod session;
     mod template;
 }

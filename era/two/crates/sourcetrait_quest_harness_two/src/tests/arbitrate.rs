@@ -158,6 +158,30 @@ fn a_failing_client_becomes_feedback_rather_than_an_error() {
 }
 
 #[test]
+fn a_session_log_records_both_sides_of_the_turn() {
+    let root = std::env::temp_dir().join("quest_arbitrate_log");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("scratch");
+    let log = sourcetrait_quest_core::session::SessionLog::open(&root, &["space", "session"])
+        .expect("opens");
+
+    let mut questness = Questness::new(World::new("{cwd: '/tmp/foo'}"), Aliasing::Strict)
+        .expect("builds")
+        .logging_to(log.clone());
+
+    questness.step(ASKS, false).expect("steps");
+
+    let text = log.read().expect("reads");
+    assert!(text.contains("== emission =="), "what the model wrote");
+    assert!(text.contains("== continue =="), "what it was told back");
+    assert!(
+        text.contains("/tmp/foo"),
+        "the low-level text carries the value: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn a_plain_answer_never_touches_the_harness() {
     let mut questness =
         Questness::new(World::new("{cwd: '/tmp/foo'}"), Aliasing::Strict).expect("builds");
