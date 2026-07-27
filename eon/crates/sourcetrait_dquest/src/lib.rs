@@ -1,4 +1,5 @@
 pub(crate) mod container;
+pub(crate) mod era;
 pub(crate) mod error;
 pub(crate) mod manager;
 pub(crate) mod nom;
@@ -21,6 +22,7 @@ pub(crate) use std::{
 };
 
 pub(crate) use sourcetrait_cert_lib as srcert;
+pub(crate) use sourcetrait_lib_quest_two as lib;
 pub(crate) use sourcetrait_quest_bridge as bridge;
 
 /// In scope so `next`, `send` and `close` dispatch on framed halves.

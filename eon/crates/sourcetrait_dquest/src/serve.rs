@@ -1,9 +1,4 @@
 //! The listener, and one session per accepted connection.
-//!
-//! Built and locked, not yet reached from `run`: serving needs a model
-//! container, and the container needs an engine, which is the era
-//! library's and the next piece. The allow goes with that wiring.
-#![allow(dead_code)]
 use crate::*;
 
 /// Chunks are the hot path; bounded so a slow client slows the model.

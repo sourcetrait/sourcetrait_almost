@@ -1,4 +1,8 @@
 //! The noms: one per user's space, one per session inside it.
+//!
+//! Minted and compared today; READ as text only by the locks, since the
+//! consumer that spells one into a path is session logging, which is
+//! blocked on where `SessionLog` should live (debt).
 #![allow(dead_code)]
 
 /// The alphabet, in the order that makes a nom sort as its number does.

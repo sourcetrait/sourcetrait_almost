@@ -1,4 +1,10 @@
 //! Who is connected: one Thinkspace, and the sessions live inside it.
+//!
+//! Admitting and releasing are wired; OBSERVING is not, because its only
+//! consumer is session logging, which is blocked on where `SessionLog`
+//! should live (debt). The locks drive the observation surface, so the
+//! allow covers what the daemon does not read yet rather than what
+//! nothing exercises.
 #![allow(dead_code)]
 use crate::*;
 

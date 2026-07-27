@@ -14,15 +14,22 @@ keywords = ["sourcetrait", "quest", "dquest", "daemon"]
 name = "dquest"
 path = "src/main.rs"
 
+[features]
+cuda = ["sourcetrait_lib_quest_two/cuda"]
+flash-attn = ["cuda", "sourcetrait_lib_quest_two/flash-attn"]
+
 [dependencies]
 anstyle.workspace = true
+candle-core.workspace = true
 clap.workspace = true
+tokenizers.workspace = true
 futures-util.workspace = true
 rand.workspace = true
 rustls.workspace = true
 sha2.workspace = true
 snafu.workspace = true
 sourcetrait_cert_lib.workspace = true
+sourcetrait_lib_quest_two.workspace = true
 sourcetrait_quest_bridge.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true

@@ -28,4 +28,7 @@ pub enum DquestError {
     Bridge {
         source: Box<bridge::BridgeError>,
     },
+
+    #[snafu(display("starting the runtime: {source}"))]
+    Runtime { source: std::io::Error },
 }

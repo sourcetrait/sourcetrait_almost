@@ -13,17 +13,59 @@ pub(crate) enum Started {
     CertificateOwed,
 }
 
+/// Where the daemon listens.
+///
+/// A constant rather than a setting: everything is loopback today, and a
+/// port becomes configuration the moment something needs it to be, which
+/// is a decision rather than an implementation detail.
+pub(crate) const ADDRESS: std::net::SocketAddr =
+    std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 7842);
+
+/// The variable naming the user whose Thinkspace this serves.
+pub(crate) const USER_ENV: &str = "USER";
+
 /// Binary entry: start, saying nothing unless something is wrong.
 pub fn run() {
     let _cli = <Cli as clap::Parser>::parse();
-    match start() {
-        Ok(Started::Serving) => {}
+    let outcome = match start() {
+        Ok(Started::Serving) => serve_forever(),
         Ok(Started::CertificateOwed) => std::process::exit(1),
-        Err(error) => {
-            style::fail(&format!("Unable to start: {error}"));
-            std::process::exit(1);
-        }
+        Err(error) => Err(error),
+    };
+    if let Err(error) = outcome {
+        style::fail(&format!("Unable to start: {error}"));
+        std::process::exit(1);
     }
+}
+
+/// Serve until the listener dies, which for a daemon is until it is
+/// stopped.
+fn serve_forever() -> DquestResult<()> {
+    let secret_data = preflight::secret_data_home()?;
+    let files = bridge::material(&secret_data, preflight::PROFILE);
+    let config = bridge::server_config(&files).map_err(|source| DquestError::Bridge {
+        source: Box::new(source),
+    })?;
+    let username = match env::var(USER_ENV) {
+        Ok(name) if !name.trim().is_empty() => name,
+        _ => return Err(DquestError::Unset { variable: USER_ENV }),
+    };
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| DquestError::Runtime { source })?;
+
+    runtime.block_on(async move {
+        let listener = serve::bind(ADDRESS).await?;
+        // The engine loads on the container's own thread; a failure
+        // there leaves the daemon up and refusing, rather than exiting
+        // before any client can be told why.
+        let container = ContainerHandle::spawn(era::EraEngine::load);
+        let manager = manager::SessionManager::for_user(&username);
+        serve::serve(listener, config, container, manager).await;
+        Ok(())
+    })
 }
 
 /// Satisfy the certificate preconditions, then serve.

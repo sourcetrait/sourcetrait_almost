@@ -51,6 +51,34 @@ it is now whether the material exists, with the profile write happening on
 the way. The message needed no rewording, because it already said that no
 certificate exists yet rather than that no profile did.
 
+## const ADDRESS
+
+A CONSTANT rather than a setting. Everything is loopback today, and a
+port becomes configuration the moment something needs it to be - which is
+a decision rather than an implementation detail, and adding a knob nobody
+asked for is how a config surface grows without anyone choosing it.
+
+## fn serve_forever
+
+THE RUNTIME IS BUILT HERE rather than by an attribute on `main`, which
+keeps `main` two lines and keeps the whole daemon reachable from an
+in-crate test without a process.
+
+THE ENGINE LOADS ON THE CONTAINER'S THREAD, and the container takes the
+loader itself rather than a loaded engine. That is what lets the listener
+bind IMMEDIATELY: binding does not wait on fourteen gigabytes, so a client
+connecting during load is answered rather than refused by a closed port.
+
+A FAILED LOAD LEAVES THE DAEMON UP. The container answers every request
+with the reason instead, which reaches a client as a refused open naming
+what went wrong. Exiting at startup would be tidier and tells a client
+that connects later nothing at all - it would meet a closed port and have
+to guess between "not started", "wrong port" and "model missing".
+
+Verified against the real binary with a scratch configuration home, so
+the engine could not load: it bound, stayed up past a timeout, and said
+nothing.
+
 ## fn certificate_owed
 
 The only thing this binary ever says to a user, and it is composed here

@@ -12,6 +12,10 @@ members = [
 [workspace.dependencies]
 anstyle = { version = "1" }
 bitcode = { version = "0.6" }
+# Pinned at era/two's own versions: a direct dependency binds whichever
+# instance matches its requirement, and these must be the instances the
+# era library uses rather than a second copy beside them.
+candle-core = { version = "0.11" }
 clap = { version = "4", features = ["derive"] }
 futures-util = { version = "0.3", features = ["sink"] }
 liquid = { version = "0.26" }
@@ -38,8 +42,10 @@ snafu = { version = "0.9" }
 # checkout layout rather than one machine's.
 sourcetrait_cert_lib = { path = "../../sourcetrait_cert/crates/sourcetrait_cert_lib" }
 sourcetrait_quest_bridge = { path = "crates/sourcetrait_quest_bridge" }
+sourcetrait_lib_quest_two = { path = "../era/two/crates/sourcetrait_lib_quest_two" }
 sourcetrait_quest_bridge_two = { path = "../era/two/crates/sourcetrait_quest_bridge_two" }
 sourcetrait_quest_core = { path = "crates/sourcetrait_quest_core" }
+tokenizers = { version = "0.23" }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
 tokio-util = { version = "0.7", features = ["codec", "rt"] }

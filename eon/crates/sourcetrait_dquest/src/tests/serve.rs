@@ -80,7 +80,7 @@ async fn daemon(
     let address = listener.local_addr().expect("has an address");
     let config =
         sourcetrait_quest_bridge::server_config(&material.files).expect("a server configuration");
-    let container = ContainerHandle::spawn(move || engine);
+    let container = ContainerHandle::spawn(move || Ok(engine));
     let manager = crate::manager::SessionManager::for_user("box");
     let task = tokio::spawn(serve(listener, config, container, manager.clone()));
     (address, task, manager)
@@ -225,6 +225,88 @@ async fn several_sessions_share_one_container() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     assert_eq!(manager.live(), 0, "every place was given back");
+    server.abort();
+}
+
+/// Reset reaches the engine rather than being answered locally, which is
+/// the difference between dropping the context and saying it was dropped.
+#[tokio::test]
+async fn a_reset_reaches_the_engine() {
+    let material = crate::tests::material::Material::mint("dquest_reset");
+    let engine = scripted(&["x"]);
+    let resets = std::sync::Arc::clone(&engine.resets);
+    let (address, server, _manager) = daemon(&material, engine).await;
+    let mut handle = connect(address, &material).await;
+
+    handle
+        .send(sourcetrait_quest_bridge::ClientToServer::Reset(
+            sourcetrait_quest_bridge::ResetRequest,
+        ))
+        .await
+        .expect("sends");
+    let seen = read_until(&mut handle, |m| {
+        matches!(m, sourcetrait_quest_bridge::ServerToClient::Reset(_))
+    })
+    .await;
+
+    assert!(matches!(
+        seen.last(),
+        Some(sourcetrait_quest_bridge::ServerToClient::Reset(_))
+    ));
+    assert_eq!(
+        resets.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the engine dropped its context rather than the session claiming so"
+    );
+
+    handle.close(std::time::Duration::from_secs(5)).await;
+    server.abort();
+}
+
+/// A second turn mid-turn is REFUSED rather than queued. Queueing it
+/// would make the daemon hold work it cannot start for a client that has
+/// not been told.
+#[tokio::test]
+async fn a_second_turn_during_a_turn_is_refused() {
+    let material = crate::tests::material::Material::mint("dquest_second");
+    let many: Vec<&str> = vec!["tick"; 20_000];
+    let (address, server, _manager) = daemon(&material, scripted(&many)).await;
+    let mut handle = connect(address, &material).await;
+
+    for _ in 0..2 {
+        handle
+            .send(sourcetrait_quest_bridge::ClientToServer::Turn(
+                sourcetrait_quest_bridge::TurnRequest {
+                    text: String::from("go on at length"),
+                },
+            ))
+            .await
+            .expect("sends");
+    }
+
+    let seen = read_until(&mut handle, |m| {
+        matches!(m, sourcetrait_quest_bridge::ServerToClient::Turn(_))
+    })
+    .await;
+
+    assert!(
+        seen.iter().any(|m| matches!(
+            m,
+            sourcetrait_quest_bridge::ServerToClient::Notice(
+                sourcetrait_quest_bridge::ServerNotice::Fault(_)
+            )
+        )),
+        "the second turn was refused with a fault"
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|m| matches!(m, sourcetrait_quest_bridge::ServerToClient::Turn(_)))
+            .count(),
+        1,
+        "exactly one turn ran"
+    );
+
+    handle.close(std::time::Duration::from_secs(5)).await;
     server.abort();
 }
 

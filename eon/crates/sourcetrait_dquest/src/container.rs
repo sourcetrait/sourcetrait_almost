@@ -1,8 +1,4 @@
 //! The singleton model container: one owner, one turn at a time.
-//!
-//! Reached only from `serve` today, which `run` does not yet wire; see
-//! that module's note.
-#![allow(dead_code)]
 use crate::*;
 
 /// Requests are few and each is answered before the next is taken.
@@ -58,15 +54,25 @@ impl ContainerHandle {
     pub(crate) fn spawn<E, F>(make: F) -> Self
     where
         E: Engine,
-        F: FnOnce() -> E + Send + 'static,
+        F: FnOnce() -> Result<E, String> + Send + 'static,
     {
         let (work, mut inbox) = r::tokio::channel::<Work>(REQUEST_CAPACITY);
         std::thread::Builder::new()
             .name(String::from("quest-model"))
-            .spawn(move || {
-                let mut engine = make();
-                while let Some(unit) = inbox.blocking_recv() {
-                    serve_one(&mut engine, unit);
+            .spawn(move || match make() {
+                Ok(mut engine) => {
+                    while let Some(unit) = inbox.blocking_recv() {
+                        serve_one(&mut engine, unit);
+                    }
+                }
+                // A model that did not load leaves the daemon UP and
+                // every request refused with the reason. The alternative
+                // is a daemon that exits at startup, which tells a client
+                // that connects later nothing at all.
+                Err(why) => {
+                    while let Some(unit) = inbox.blocking_recv() {
+                        refuse(unit, &why);
+                    }
                 }
             })
             .expect("the model thread starts");
@@ -140,6 +146,21 @@ fn serve_one<E: Engine>(engine: &mut E, unit: Work) {
         }
         Work::Reset { answer } => {
             let _ = answer.send(engine.reset());
+        }
+    }
+}
+
+/// Answer one unit with why there is no engine to serve it.
+fn refuse(unit: Work, why: &str) {
+    match unit {
+        Work::Open { answer, .. } => {
+            let _ = answer.send(Err(why.to_string()));
+        }
+        Work::Turn { answer, .. } => {
+            let _ = answer.send(Err(why.to_string()));
+        }
+        Work::Reset { answer } => {
+            let _ = answer.send(Err(why.to_string()));
         }
     }
 }
