@@ -70,6 +70,7 @@ pub(crate) mod r {
 pub use sourcetrait_quest_core::{
     QuestCoreError,
     QuestCoreResult,
+    channel,
     nu,
 };
 

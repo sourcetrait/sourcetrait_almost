@@ -1,3 +1,4 @@
+pub mod channel;
 pub(crate) mod error;
 pub mod nu;
 
@@ -32,5 +33,6 @@ pub use crate::error::{
 
 #[cfg(test)]
 mod tests {
+    mod channel;
     mod nu;
 }

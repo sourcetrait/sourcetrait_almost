@@ -9,10 +9,9 @@ pub fn load_tokenizer(model_dir: &Path) -> LibQuestResult<tokenizers::Tokenizer>
     }
 }
 
-/// Lock the twelve added-token ids the engine leans on; drift raises.
+/// Lock the added-token ids the engine and the channel grammar lean on.
 pub fn verify_token_map(tokenizer: &tokenizers::Tokenizer) -> LibQuestResult<()> {
-    let expectations: [(&str, u32); 12] = [
-        ("<|extra_id_0|>", consts::TOKEN_EXTRA_ID_0),
+    let expectations: [(&str, u32); 9] = [
         ("<|endoftext|>", consts::TOKEN_ENDOFTEXT),
         ("<|im_start|>", consts::TOKEN_IM_START),
         ("<|im_end|>", consts::TOKEN_IM_END),
@@ -20,12 +19,11 @@ pub fn verify_token_map(tokenizer: &tokenizers::Tokenizer) -> LibQuestResult<()>
         ("</functions>", consts::TOKEN_FUNCTIONS_CLOSE),
         ("<function_calls>", consts::TOKEN_FUNCTION_CALLS_OPEN),
         ("</function_calls>", consts::TOKEN_FUNCTION_CALLS_CLOSE),
-        ("<|extra_id_1|>", consts::TOKEN_EXTRA_ID_1),
-        ("<|extra_id_6|>", consts::TOKEN_EXTRA_ID_6),
         ("<|endofprompt|>", consts::TOKEN_ENDOFPROMPT),
         ("<|pad|>", consts::TOKEN_PAD),
     ];
-    for (token, expected) in expectations {
+    let channel = channel::TAGS.map(|tag| (tag.spelling(), tag.token_id()));
+    for (token, expected) in expectations.into_iter().chain(channel) {
         match tokenizer.token_to_id(token) {
             Some(actual) if actual == expected => {}
             other => snafu::whatever!(
