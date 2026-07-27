@@ -52,9 +52,13 @@ impl TwoEngine {
         // and clears across turns for the life of the process.
         settings.graph = false;
 
+        // The candle error is lifted into the library's own before it is
+        // flattened, because `message_of` speaks one error type and this
+        // is the only call here that does not already produce it.
         #[cfg(feature = "cuda")]
         let (device, dtype) = (
-            candle_core::Device::new_cuda(0).map_err(message_of)?,
+            candle_core::Device::new_cuda(0)
+                .map_err(|source| message_of(source.into()))?,
             candle_core::DType::BF16,
         );
         #[cfg(not(feature = "cuda"))]
