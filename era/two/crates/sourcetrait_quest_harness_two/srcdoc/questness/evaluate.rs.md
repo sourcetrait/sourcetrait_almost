@@ -82,6 +82,32 @@ Ansi colouring is turned off through `set_config` rather than by assigning the
 field, because the function also propagates plugin garbage-collection settings
 and that propagation is private.
 
+## fn lock_boundary
+
+The boundary this engine claims, asserted where it is built rather than
+only in the test suite.
+
+It moved here because the claim was previously only true of the tests. A
+chapter recorded that the code "carries a lock asserting that none of
+those names resolve, which fails loudly the day someone adds the shell
+context" - and it did not: the assertion lived in `src/tests`, so a
+shipped crate would have widened its sandbox silently and only a test run
+would have said so. Constructing the thing is when the guarantee is worth
+checking, because that is when a caller starts relying on it.
+
+The `PARSE_TIME_LOADERS` half is an INVERSE lock and reads oddly until
+you see what it is for. It requires those names to STILL RESOLVE, which
+is the opposite of a security check. The reason is that their reach is
+what justifies containment sitting at the service level rather than in
+registration: `use` and `overlay use` resolve their argument at parse
+time and read files regardless of what is registered, so no allowlist
+closes them. If a nushell release ever removed that reach, the argument
+for the bubblewrap wrap would have quietly lost one of its legs, and this
+fires rather than letting the note go stale.
+
+It costs one `decl_names` walk per name at construction, which is a few
+hundred string comparisons once per engine. `new` already does far more.
+
 ## fn decl_names
 
 ## fn resolves

@@ -35,11 +35,6 @@ impl<H: harness::ClientHarness> Questness<H> {
         })
     }
 
-    /// The engine that runs the one mode staying inside.
-    pub fn evaluator(&self) -> &QuestnessEvaluator {
-        &self.evaluator
-    }
-
     /// The text a turn shows the model.
     pub fn assemble(&self, request: &turn::Request) -> QuestHarnessResult<turn::Assembled> {
         turn::assemble(request)
@@ -83,7 +78,7 @@ impl<H: harness::ClientHarness> Questness<H> {
 }
 
 /// A sub-turn as the request that crosses to a client harness.
-pub fn request_for(sub: &turn::SubTurn) -> harness::HarnessRequest {
+pub(crate) fn request_for(sub: &turn::SubTurn) -> harness::HarnessRequest {
     harness::HarnessRequest {
         mode: sub.contract.mode.clone(),
         source: sub.source.clone(),

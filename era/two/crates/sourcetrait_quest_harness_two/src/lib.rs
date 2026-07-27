@@ -1,5 +1,5 @@
 pub(crate) mod error;
-pub mod questness {
+pub(crate) mod questness {
     pub mod arbitrate;
     pub mod contract;
     pub mod evaluate;
@@ -19,6 +19,11 @@ pub(crate) use sourcetrait_quest_core::channel::{
 pub(crate) use sourcetrait_quest_core::harness;
 pub(crate) use sourcetrait_quest_core::nu;
 pub(crate) use crate::questness::turn;
+pub(crate) use crate::questness::contract::{
+    NuContract,
+    check_agreements,
+};
+pub(crate) use crate::questness::evaluate::QuestnessEvaluator;
 
 pub(crate) mod r {
     pub(crate) mod nu {
@@ -38,27 +43,15 @@ pub use crate::error::{
     QuestHarnessError,
     QuestHarnessResult,
 };
-pub use crate::questness::contract::{
-    NuContract,
-    check_agreements,
-};
 pub use crate::questness::arbitrate::{
     Questness,
     Step,
-    request_for,
 };
-pub use crate::questness::evaluate::QuestnessEvaluator;
 pub use crate::questness::turn::{
     Answer,
     Assembled,
     Binding,
-    Destination,
-    Outcome,
     Request,
-    SubTurn,
-    assemble,
-    interpret,
-    run_inside,
 };
 
 #[cfg(test)]

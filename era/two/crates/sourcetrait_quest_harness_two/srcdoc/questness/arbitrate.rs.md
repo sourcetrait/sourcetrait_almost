@@ -74,6 +74,11 @@ envelope already exists for exactly this.
 ## fn request_for
 
 The only place a `SubTurn` becomes a `HarnessRequest`, so the mapping
-lives once. It is public because the daemon will want to inspect a
-request before serving it, and because a harness implementation's tests
-want to build one the same way the real path does.
+lives once.
+
+It is `pub(crate)`. An earlier draft made it public on the reasoning that
+a daemon would want to inspect a request before serving it, which was an
+invented consumer: the daemon never sees a `SubTurn`, because Questness
+services one internally, and a harness implementation receives a
+`HarnessRequest` from the core crate rather than building one. Nothing
+outside this crate can reach a `SubTurn` to pass in.

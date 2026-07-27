@@ -42,7 +42,34 @@ impl QuestnessEvaluator {
         base.is_mcp = true;
         base.add_env_var(String::from("PWD"), nu::Value::string("", nu::Span::unknown()));
 
-        Ok(Self { base })
+        let engine = Self { base };
+        engine.lock_boundary()?;
+        Ok(engine)
+    }
+
+    /// Assert the boundary this engine claims, at construction.
+    ///
+    /// Non-registration is what forbids the denied set, so the day
+    /// someone adds the shell context this fails loudly rather than
+    /// quietly widening what a sub-turn can reach.
+    fn lock_boundary(&self) -> QuestHarnessResult<()> {
+        for name in DENIED {
+            if self.resolves(name) {
+                snafu::whatever!(
+                    "`{name}` resolves on the evaluator: the lockdown has been widened"
+                );
+            }
+        }
+        for name in PARSE_TIME_LOADERS {
+            let head = name.split(' ').next().unwrap_or(name);
+            if !(self.resolves(head) || self.resolves(name)) {
+                snafu::whatever!(
+                    "`{name}` no longer resolves: the parse-time reach this records is gone, \
+                     and the sandbox note it justifies wants revisiting"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// The command names this engine resolves, sorted.
