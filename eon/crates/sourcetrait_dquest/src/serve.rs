@@ -37,6 +37,7 @@ pub(crate) async fn serve(
     listener: tokio::net::TcpListener,
     config: rustls::ServerConfig,
     container: ContainerHandle,
+    manager: manager::SessionManager,
 ) {
     let acceptor = r::tls::TlsAcceptor::from(std::sync::Arc::new(config));
     loop {
@@ -45,7 +46,12 @@ pub(crate) async fn serve(
         };
         let acceptor = acceptor.clone();
         let container = container.clone();
+        // Admitted BEFORE the handshake, so a peer that never completes
+        // one is still visible as a connection being attempted - and the
+        // ticket drops on that path exactly as on any other.
+        let ticket = manager.admit();
         tokio::spawn(async move {
+            let _ticket = ticket;
             let Ok(stream) = acceptor.accept(stream).await else {
                 return;
             };

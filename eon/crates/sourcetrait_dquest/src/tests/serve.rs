@@ -69,7 +69,11 @@ impl Engine for Scripted {
 async fn daemon(
     material: &crate::tests::material::Material,
     engine: Scripted,
-) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+) -> (
+    std::net::SocketAddr,
+    tokio::task::JoinHandle<()>,
+    crate::manager::SessionManager,
+) {
     let listener = bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .expect("binds");
@@ -77,8 +81,9 @@ async fn daemon(
     let config =
         sourcetrait_quest_bridge::server_config(&material.files).expect("a server configuration");
     let container = ContainerHandle::spawn(move || engine);
-    let task = tokio::spawn(serve(listener, config, container));
-    (address, task)
+    let manager = crate::manager::SessionManager::for_user("box");
+    let task = tokio::spawn(serve(listener, config, container, manager.clone()));
+    (address, task, manager)
 }
 
 async fn connect(
@@ -129,7 +134,7 @@ fn scripted(chunks: &[&str]) -> Scripted {
 #[tokio::test]
 async fn a_turn_streams_its_chunks_then_reports() {
     let material = crate::tests::material::Material::mint("dquest_turn");
-    let (address, server) = daemon(&material, scripted(&["Hel", "lo", " there"])).await;
+    let (address, server, _manager) = daemon(&material, scripted(&["Hel", "lo", " there"])).await;
     let mut handle = connect(address, &material).await;
 
     handle
@@ -180,6 +185,49 @@ async fn a_turn_streams_its_chunks_then_reports() {
     server.abort();
 }
 
+/// Several clients at once against the one container, and the registry
+/// sees each of them arrive and leave.
+#[tokio::test]
+async fn several_sessions_share_one_container() {
+    let material = crate::tests::material::Material::mint("dquest_several");
+    let (address, server, manager) = daemon(&material, scripted(&["one"])).await;
+
+    let mut handles = Vec::new();
+    for _ in 0..3 {
+        let mut handle = connect(address, &material).await;
+        handle
+            .send(sourcetrait_quest_bridge::ClientToServer::Open(
+                sourcetrait_quest_bridge::OpenRequest {
+                    options: sourcetrait_quest_bridge::all::ChatOptions::default(),
+                },
+            ))
+            .await
+            .expect("sends");
+        let opened = read_until(&mut handle, |m| {
+            matches!(m, sourcetrait_quest_bridge::ServerToClient::Open(_))
+        })
+        .await;
+        assert_eq!(opened.len(), 1, "each session opens against the container");
+        handles.push(handle);
+    }
+
+    assert_eq!(manager.live(), 3, "the registry sees all three");
+    assert_eq!(manager.sessions().len(), 3, "and can name them");
+
+    for mut handle in handles {
+        handle.close(std::time::Duration::from_secs(5)).await;
+    }
+    // The tickets drop with their tasks, which the close only starts.
+    for _ in 0..200 {
+        if manager.live() == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(manager.live(), 0, "every place was given back");
+    server.abort();
+}
+
 /// A refused open is its own message, so a caller is not left reading a
 /// fault notice to learn its session never started.
 #[tokio::test]
@@ -187,7 +235,7 @@ async fn a_refused_open_answers_the_open() {
     let material = crate::tests::material::Material::mint("dquest_refused");
     let mut engine = scripted(&[]);
     engine.refuse_open = true;
-    let (address, server) = daemon(&material, engine).await;
+    let (address, server, _manager) = daemon(&material, engine).await;
     let mut handle = connect(address, &material).await;
 
     handle
@@ -221,7 +269,7 @@ async fn a_failed_turn_answers_the_turn() {
     let material = crate::tests::material::Material::mint("dquest_failed");
     let mut engine = scripted(&[]);
     engine.fail_turn = true;
-    let (address, server) = daemon(&material, engine).await;
+    let (address, server, _manager) = daemon(&material, engine).await;
     let mut handle = connect(address, &material).await;
 
     handle
@@ -251,7 +299,7 @@ async fn a_failed_turn_answers_the_turn() {
 async fn a_cancel_reaches_a_running_turn() {
     let material = crate::tests::material::Material::mint("dquest_cancel");
     let many: Vec<&str> = vec!["tick"; 100_000];
-    let (address, server) = daemon(&material, scripted(&many)).await;
+    let (address, server, _manager) = daemon(&material, scripted(&many)).await;
     let mut handle = connect(address, &material).await;
 
     handle
