@@ -1,10 +1,6 @@
 pub mod channel;
 pub mod config;
-#[cfg(feature = "evaluate")]
-pub mod contract;
 pub(crate) mod error;
-#[cfg(feature = "evaluate")]
-pub mod evaluate;
 pub mod nu;
 pub mod template;
 
@@ -19,16 +15,6 @@ pub(crate) use std::{
     },
 };
 
-#[cfg(feature = "evaluate")]
-pub(crate) use nu_protocol::CompareTypes;
-
-#[cfg(feature = "evaluate")]
-pub(crate) use crate::channel::{
-    Block,
-    Envelope,
-    Tag,
-};
-
 pub(crate) mod r {
     pub(crate) mod nu {
         pub(crate) use nu_parser::parse;
@@ -38,11 +24,6 @@ pub(crate) mod r {
                 EngineState,
                 StateWorkingSet,
             },
-        };
-        #[cfg(feature = "evaluate")]
-        pub(crate) use nu_protocol::{
-            debugger::WithoutDebug,
-            engine::Stack,
         };
     }
 }
@@ -56,10 +37,6 @@ pub use crate::error::{
 mod tests {
     mod channel;
     mod config;
-    #[cfg(feature = "evaluate")]
-    mod contract;
-    #[cfg(feature = "evaluate")]
-    mod evaluate;
     mod nu;
     mod template;
 }

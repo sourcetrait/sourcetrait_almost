@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_quest_core"
-version = "0.0.0-6"
+version = "0.0.0-7"
 edition = "2024"
 description = "The era-independent data and template core of the quest toolset"
 authors = ["SourceTrait <development@sourcetrait.com>"]
@@ -10,17 +10,8 @@ homepage = "https://sourcetrait.com"
 categories = []
 keywords = ["sourcetrait", "quest", "core"]
 
-[features]
-# The locked-down nu engine. Off by default so the data core stays
-# light for every consumer that reads and writes NUON but never
-# evaluates - which is the trainer, the baseliner and the engine.
-evaluate = ["dep:nu-cmd-lang", "dep:nu-command", "dep:nu-engine"]
-
 [dependencies]
 liquid.workspace = true
-nu-cmd-lang = { workspace = true, optional = true }
-nu-command = { workspace = true, optional = true }
-nu-engine = { workspace = true, optional = true }
 nu-parser.workspace = true
 nu-protocol.workspace = true
 nuon.workspace = true
