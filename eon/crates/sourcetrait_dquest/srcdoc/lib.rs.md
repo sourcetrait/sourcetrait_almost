@@ -40,6 +40,6 @@ was the only one.
 ## use bridge::all::Engine
 
 In scope so `container` can bound its factory without naming a path in a
-signature. What it is NOT is a definition: the trait belongs to the API
+signature. What it is not is a definition: the trait belongs to the API
 crate, and the rationale for its shape lives beside it there.
 

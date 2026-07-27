@@ -38,6 +38,13 @@ at all, and admits an unmarked emission under tool-marker aliasing. An
 answer that carries prose only is not a degraded answer, so it is not
 an error case.
 
+`config` is REPORTED here and judged elsewhere, which is the division
+the shape convention needs. Whether the model was entitled to send one
+depends on what the caller declared, and this layer has never seen the
+caller's declaration - it reads an emission. Deciding here would mean
+threading a shape through `interpret` to answer a question `shape`
+already owns.
+
 ## enum Outcome
 
 Four arms, and the split is by who acts next rather than by whether
@@ -109,6 +116,20 @@ template gets its data rendered as the NUON it wrote. The second is
 arguably wrong and is worth revisiting - it hands the caller a data
 literal where prose was expected - but the alternative is inventing a
 rendering the model did not ask for.
+
+## fn emitted_config
+
+A `<config>` travels OUTBOUND as the caller's curation, so one arriving
+back is the model addressing the harness rather than answering the
+question. Reading it is what gives the shape something to police: a block
+left unparsed is indistinguishable from one never sent, and the denial
+would silently never fire.
+
+A malformed payload here is `channel::nuon` rather than a kind of its
+own, because it is the same failure the bindings and the output payload
+have - the model wrote something that is not NUON - and a repairing model
+gains nothing from learning which block it was wrong in beyond the source
+the row already names.
 
 ## fn typed_payload
 

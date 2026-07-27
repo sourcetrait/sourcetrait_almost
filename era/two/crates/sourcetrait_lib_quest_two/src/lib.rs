@@ -34,6 +34,7 @@ pub(crate) mod questness {
     pub mod config;
     pub mod contract;
     pub mod evaluate;
+    pub mod shape;
     pub mod turn;
 }
 pub mod session;
@@ -178,6 +179,10 @@ pub use crate::questness::arbitrate::{
     Questness,
     Step,
 };
+pub use crate::questness::shape::{
+    Shape,
+    ShapeMember,
+};
 pub use crate::questness::turn::{
     Answer,
     Assembled,
@@ -228,6 +233,7 @@ mod tests {
         mod config;
         mod contract;
         mod evaluate;
+        mod shape;
         mod turn;
     }
     mod session;

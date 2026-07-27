@@ -39,12 +39,17 @@ pub struct Assembled {
     pub templated: bool,
 }
 
-/// A finished answer: the value produced, and the prose carrying it.
+/// A finished answer: the value, its prose, and any emitted config.
+///
+/// The config is REPORTED rather than judged here. Whether the model was
+/// entitled to send one is the response shape's question, so this layer
+/// says what arrived and `questness::shape` decides what it is worth.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Answer {
     pub value: Option<nu::Value>,
     pub declared: Option<nu::Type>,
     pub rendered: String,
+    pub config: Option<nu::Value>,
 }
 
 /// Where a `<nu>` mode runs.
@@ -254,6 +259,8 @@ fn answer(blocks: &[Block]) -> LibQuestResult<Outcome> {
         None => output.map(|block| block.content.clone()).unwrap_or_default(),
     };
 
+    let config = emitted_config(blocks, &mut envelope);
+
     if !envelope.is_clean() {
         return Ok(Outcome::Repair(envelope));
     }
@@ -261,7 +268,26 @@ fn answer(blocks: &[Block]) -> LibQuestResult<Outcome> {
         value,
         declared,
         rendered,
+        config,
     }))
+}
+
+/// The config record the emission carried, if it carried one.
+///
+/// A `<config>` travels outbound as the caller's curation, so one coming
+/// BACK is the model addressing the harness. Reading it here is what
+/// gives the shape something to police; a block left unparsed would be
+/// indistinguishable from one never sent.
+fn emitted_config(blocks: &[Block], envelope: &mut Envelope) -> Option<nu::Value> {
+    let block = blocks.iter().find(|block| block.tag == Tag::Config)?;
+    let text = channel::unescape_content(&block.content);
+    match nu::from_nuon_text(&text) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            envelope.error("channel::nuon", Some(Tag::Config.name()), &error.to_string());
+            None
+        }
+    }
 }
 
 /// Parse a block's declared type and its NUON, then conform one to the

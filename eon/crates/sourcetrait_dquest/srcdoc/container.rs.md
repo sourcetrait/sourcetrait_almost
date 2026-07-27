@@ -18,10 +18,10 @@ what they share is the way in rather than the thing itself.
 
 ## fn spawn
 
-IT TAKES A FACTORY RATHER THAN AN ENGINE, and that is forced by the era-two
-model holding `Rc` handles: it is not `Send` and cannot cross a thread
-boundary, while a `FnOnce` returning it IS `Send`. The closure crosses, the
-engine is built here, and it never leaves.
+It takes a factory rather than an engine, and that is forced by the
+era-two model holding `Rc` handles: it is not `Send` and cannot cross a
+thread boundary, while a `FnOnce` returning it is. The closure crosses,
+the engine is built here, and it never leaves.
 
 THE SERIALISATION POINT IS THE LOOP, not something layered over it. The
 thread takes one unit, serves it to completion, then takes the next - so
@@ -30,11 +30,11 @@ and no caller has to arrange it. 03_Platform's one-resident-model rule and
 roughly fourteen gigabytes of weights forbid a second copy regardless, so
 there is nothing to parallelise even if the loop allowed it.
 
-The failed-load arm is a SECOND loop rather than an early return, and that
+The failed-load arm is a second loop rather than an early return, and that
 is the daemon's staying-up property expressed at the only place that can
 express it. The thread has already been spawned and the handle already
-returned by the time a load fails, so refusing each unit with the reason is
-what a caller meets instead of a channel that closed.
+returned by the time a load fails, so refusing each unit with the reason
+is what a caller meets instead of a channel that closed.
 
 ## fn dispatch
 
