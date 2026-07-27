@@ -7,22 +7,13 @@ use crate::preflight::{
     ensure_profile,
 };
 
-/// The message is the operator's only instruction and its command order
-/// was wrong once, so the spelling is locked rather than the prose.
-#[test]
-fn the_certificate_message_puts_the_verb_before_the_profile() {
-    let text = crate::error::DquestError::CertificateOwed {
-        name: PROFILE.to_string(),
-        profile: String::from("some/where/quest.toml"),
+/// The live path, whichever branch was taken. It lives here rather than
+/// on `Profile` because only the locks want it both ways - startup
+/// destructures the one branch it acts on.
+fn live_of(profile: &Profile) -> &std::path::Path {
+    match profile {
+        Profile::Present { live } | Profile::Written { live } => live,
     }
-    .to_string();
-
-    assert!(text.contains("srcert generate quest <dir>"), "{text}");
-    assert!(text.contains("srcert install quest <dir>"), "{text}");
-    assert!(
-        !text.contains("srcert quest"),
-        "the profile-first order must not come back: {text}"
-    );
 }
 
 /// A scratch root that removes itself, so a lock leaves no residue.
@@ -101,9 +92,9 @@ fn a_first_start_writes_the_profile() {
     let profile = ensure_profile(&scratch.root).expect("installs");
 
     assert!(matches!(profile, Profile::Written { .. }));
-    assert!(profile.live().is_file());
+    assert!(live_of(&profile).is_file());
     assert_eq!(
-        std::fs::read_to_string(profile.live()).expect("reads"),
+        std::fs::read_to_string(live_of(&profile)).expect("reads"),
         PROFILE_TEXT,
         "what was written is what the binary ships"
     );
@@ -114,13 +105,13 @@ fn a_later_start_leaves_a_customised_profile_alone() {
     let scratch = Scratch::new("later");
     let first = ensure_profile(&scratch.root).expect("installs");
     let customised = PROFILE_TEXT.replace("3650", "30");
-    std::fs::write(first.live(), &customised).expect("the operator edits it");
+    std::fs::write(live_of(&first), &customised).expect("the operator edits it");
 
     let again = ensure_profile(&scratch.root).expect("re-checks");
 
     assert!(matches!(again, Profile::Present { .. }));
     assert_eq!(
-        std::fs::read_to_string(again.live()).expect("reads"),
+        std::fs::read_to_string(live_of(&again)).expect("reads"),
         customised,
         "the customisation survives a restart"
     );

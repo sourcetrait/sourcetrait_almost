@@ -16,14 +16,6 @@ pub(crate) enum Profile {
     Written { live: PathBuf },
 }
 
-impl Profile {
-    pub(crate) fn live(&self) -> &Path {
-        match self {
-            Self::Present { live } | Self::Written { live } => live,
-        }
-    }
-}
-
 /// Place the shipped profile when the operator has none.
 pub(crate) fn ensure_profile(config_home: &Path) -> DquestResult<Profile> {
     let installed = srcert::install_profile(config_home, PROFILE, PROFILE_TEXT).map_err(

@@ -1896,6 +1896,7 @@ dependencies = [
 name = "sourcetrait_dquest"
 version = "0.0.0-2"
 dependencies = [
+ "anstyle",
  "clap",
  "snafu 0.9.2",
  "sourcetrait_cert_lib",

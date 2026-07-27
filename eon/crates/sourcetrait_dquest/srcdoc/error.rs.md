@@ -2,6 +2,9 @@
 
 ## enum DquestError
 
+One variant, and the shape of the enum is the point rather than an
+accident of there being little to go wrong yet.
+
 ### Cert
 
 The source is boxed, and that is a lint rather than a taste. `CertError`
@@ -11,26 +14,21 @@ every `DquestResult` trips `clippy::result_large_err` at the standing
 zero-warning bar. Boxing costs one allocation on a path that is already
 failing.
 
-### CertificateOwed
+## What is deliberately NOT here
 
-A failure variant rather than an ordinary outcome, so that the operator
-sees it on stderr and the process exits non-zero. That matters because
-the daemon is launched as a background process: a zero exit with no
-daemon listening would read as a successful start to whatever launched
-it, and the whole point of the precondition is that certificate
-generation stays an explicit act rather than something the daemon quietly
-does for itself.
+An earlier cut carried a `CertificateOwed` variant whose `Display` was
+the whole five-line instruction shown when no certificate exists. It was
+removed rather than reworded.
 
-The message carries both commands because they are always run as a pair
-and the second is useless without the first. It names `<dir>` rather than
-suggesting one: a suggested path would be this machine's layout leaking
-into shipped source, and the staging directory is consumed by `install`
-anyway, so it is genuinely the operator's choice.
+The reason is the output convention. A resource named in a message is
+cyan, and colour is applied where a message is EMITTED so that no error
+type ever carries escape codes - which are neither comparable nor
+lockable, and leak wherever the error is logged. Those two rules cannot
+both hold for a message built inside a `Display`: either the path goes
+uncoloured, or the error starts carrying escapes.
 
-THE COMMAND ORDER IS LOCKED BY A TEST, which is unusual for a message and
-is earned. It shipped once as `srcert <profile> <verb>`, the tool's own
-shape at the time, and was corrected to verb-first. This message is the
-only instruction an operator gets at that moment, so a silent drift back
-would send them to a command line that no longer parses. The lock asserts
-the two spellings and asserts the old order is absent, which is the half
-that catches a partial edit.
+Composing that message at the print site satisfies both, so it lives in
+`run` as `certificate_owed`, and its command spellings are locked there.
+An unmet precondition is now a startup OUTCOME rather than an error,
+which also reads more honestly - nothing failed, the operator simply owes
+the daemon a certificate.

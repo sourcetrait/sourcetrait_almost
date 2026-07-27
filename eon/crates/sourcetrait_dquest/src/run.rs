@@ -5,17 +5,29 @@ use crate::*;
 #[command(name = "dquest", version, about)]
 struct Cli {}
 
-/// Binary entry: start, reporting to stderr and exiting non-zero.
+/// How far startup got.
+pub(crate) enum Started {
+    /// Preconditions met; the daemon may serve.
+    Serving,
+    /// The operator owes it a certificate and has been told so.
+    CertificateOwed,
+}
+
+/// Binary entry: start, saying nothing unless something is wrong.
 pub fn run() {
     let _cli = <Cli as clap::Parser>::parse();
-    if let Err(error) = start() {
-        eprintln!("dquest: {error}");
-        std::process::exit(1);
+    match start() {
+        Ok(Started::Serving) => {}
+        Ok(Started::CertificateOwed) => std::process::exit(1),
+        Err(error) => {
+            style::fail(&format!("Unable to start: {error}"));
+            std::process::exit(1);
+        }
     }
 }
 
 /// Satisfy the certificate precondition, then serve.
-fn start() -> DquestResult<()> {
+fn start() -> DquestResult<Started> {
     let config_home = srcert::config_home().map_err(|source| DquestError::Cert {
         context: "resolving the configuration home".to_string(),
         source: Box::new(source),
@@ -23,13 +35,25 @@ fn start() -> DquestResult<()> {
 
     let profile = preflight::ensure_profile(&config_home)?;
     if let preflight::Profile::Written { live } = &profile {
-        return Err(DquestError::CertificateOwed {
-            name: preflight::PROFILE.to_string(),
-            profile: live.display().to_string(),
-        });
+        style::fail(&certificate_owed(live));
+        return Ok(Started::CertificateOwed);
     }
-    eprintln!("dquest: srcert profile {}", profile.live().display());
+    Ok(Started::Serving)
+}
 
-    eprintln!("dquest: the serving half is not built yet");
-    Ok(())
+/// The one thing this binary says to a user.
+///
+/// Composed here rather than inside an error type, so the profile and its
+/// path can be styled without any error carrying escape codes.
+pub(crate) fn certificate_owed(live: &Path) -> String {
+    format!(
+        "Unable to start: no certificate for the {name} profile yet, so the \
+         daemon cannot serve TLS.\nIts profile is at {path}; edit it if you \
+         want different names, then mint from it:\n    srcert generate \
+         {plain} <dir>\n    srcert install {plain} <dir>\nwhere <dir> is a \
+         staging directory that install consumes.",
+        name = style::named(preflight::PROFILE),
+        path = style::resource(live),
+        plain = preflight::PROFILE,
+    )
 }
