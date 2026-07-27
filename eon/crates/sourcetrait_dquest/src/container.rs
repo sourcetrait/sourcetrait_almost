@@ -4,25 +4,6 @@ use crate::*;
 /// Requests are few and each is answered before the next is taken.
 const REQUEST_CAPACITY: usize = 8;
 
-/// What runs a session's work against a loaded model.
-///
-/// Sync and `?Send` BY DESIGN. The era-two model holds `Rc` handles, so
-/// it is not `Send` and one thread must own it for its life - which is
-/// why the container takes a FACTORY rather than an engine: the closure
-/// crosses to the thread, and what it builds never leaves.
-pub(crate) trait Engine {
-    fn open(&mut self, options: &bridge::all::ChatOptions) -> Result<bridge::all::EraInfo, String>;
-
-    /// Emit through `chunk` as the answer forms; return the accounting.
-    fn turn(
-        &mut self,
-        text: &str,
-        chunk: &mut dyn FnMut(bridge::TurnChunk) -> bool,
-    ) -> Result<bridge::all::TurnReport, String>;
-
-    fn reset(&mut self) -> Result<(), String>;
-}
-
 /// One unit of work, and where its answer goes.
 pub(crate) enum Work {
     Open {

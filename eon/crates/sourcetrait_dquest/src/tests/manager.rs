@@ -69,7 +69,7 @@ fn a_session_log_is_addressed_by_space_then_session() {
             .root
             .join(manager.thinkspace().as_str())
             .join(ticket.nom().as_str())
-            .join(crate::lib::session::LOG_FILE)
+            .join(crate::log::LOG_FILE)
     );
 
     log.append("turn", "say hello").expect("appends");

@@ -1,10 +1,8 @@
 //! Serve locks: the daemon's own end, driven by the real bridge client
 //! over a real connection, with the world behind the engine as a
 //! parameter rather than a double.
-use crate::container::{
-    ContainerHandle,
-    Engine,
-};
+use crate::container::ContainerHandle;
+use sourcetrait_quest_bridge::all::Engine;
 use crate::serve::{
     bind,
     serve,
@@ -487,7 +485,7 @@ async fn a_session_writes_its_turn_to_the_log() {
         .collect();
     assert_eq!(sessions.len(), 1, "one connection, one session directory");
 
-    let text = std::fs::read_to_string(sessions[0].join(crate::lib::session::LOG_FILE))
+    let text = std::fs::read_to_string(sessions[0].join(crate::log::LOG_FILE))
         .expect("the log was written");
     assert!(text.contains("== open =="), "{text}");
     assert!(text.contains("say hello"), "the prompt is recorded: {text}");

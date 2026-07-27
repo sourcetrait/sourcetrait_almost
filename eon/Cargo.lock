@@ -5540,7 +5540,6 @@ name = "sourcetrait_dquest"
 version = "0.0.0-5"
 dependencies = [
  "anstyle",
- "candle-core",
  "clap",
  "futures-util",
  "rand 0.9.5",
@@ -5548,9 +5547,8 @@ dependencies = [
  "sha2",
  "snafu 0.9.2",
  "sourcetrait_cert_lib",
- "sourcetrait_lib_quest_two",
  "sourcetrait_quest_bridge",
- "tokenizers 0.23.1",
+ "sourcetrait_quest_bridge_two",
  "tokio",
  "tokio-rustls",
  "tokio-util",
@@ -5595,6 +5593,16 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-util",
+]
+
+[[package]]
+name = "sourcetrait_quest_bridge_two"
+version = "0.0.0-5"
+dependencies = [
+ "candle-core",
+ "sourcetrait_lib_quest_two",
+ "sourcetrait_quest_bridge",
+ "tokenizers 0.23.1",
 ]
 
 [[package]]

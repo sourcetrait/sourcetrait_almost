@@ -1,11 +1,56 @@
-//! The vocabulary both directions of the wire share.
+//! THE api: the traits an era bridge implements, the generics it fills,
+//! and the model types both ends traffic in.
 //!
-//! Everything here is DATA. The trait and the channel pair that used to
-//! sit beside it described an era holding the model in the consumer's own
-//! process, and the daemon holds it now, so what an era once implemented
-//! is a transport conversation instead.
+//! The flow this exists to hold is `eon component -> eon bridge API <-
+//! era bridge -> era component`. An eon component programs against what
+//! is in this file and never names an era's library; an era bridge
+//! implements it against that library. That is what makes another era a
+//! swapped dependency rather than an edit to every consumer.
 #[allow(unused_imports)]
 use crate::*;
+
+/// What an era supplies for something else to drive.
+///
+/// `?Send` BY NATURE rather than by choice: an era's model may hold
+/// thread-bound handles, so one thread owns an engine for its life and a
+/// consumer moves the FACTORY rather than the engine.
+pub trait Engine {
+    fn open(&mut self, options: &ChatOptions) -> Result<EraInfo, String>;
+
+    /// Emit through `chunk` as the answer forms; return the accounting.
+    ///
+    /// The callback answers whether anyone is still listening, which is
+    /// how a consumer cancels without a second channel.
+    fn turn(
+        &mut self,
+        text: &str,
+        chunk: &mut dyn FnMut(TurnChunk) -> bool,
+    ) -> Result<TurnReport, String>;
+
+    fn reset(&mut self) -> Result<(), String>;
+}
+
+/// An era bridge: the entry point an eon component is generic over.
+///
+/// THIS IS THE GENERIC THE API PROVIDES. A consumer takes `E: Era` and
+/// names a concrete era bridge at exactly one instantiation point, so
+/// swapping eras is one line rather than a sweep - and nothing in the
+/// consumer can reach past this into an era's library, because there is
+/// no path from here to one.
+///
+/// The associated engine is built rather than handed over, because a
+/// `FnOnce` returning a not-`Send` value is itself `Send` while the value
+/// is not. That is what lets the engine be constructed on the thread that
+/// will own it.
+pub trait Era {
+    type Engine: Engine;
+
+    /// The era's identity, without loading anything.
+    fn info() -> EraInfo;
+
+    /// Build the engine. Called on the thread that will own it.
+    fn engine() -> Result<Self::Engine, String>;
+}
 
 #[derive(
     Debug,

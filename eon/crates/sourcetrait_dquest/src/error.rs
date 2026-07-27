@@ -31,4 +31,10 @@ pub enum DquestError {
 
     #[snafu(display("starting the runtime: {source}"))]
     Runtime { source: std::io::Error },
+
+    #[snafu(transparent)]
+    Io { source: std::io::Error },
+
+    #[snafu(display("a session path segment is a plain name; got {segment:?}"))]
+    Segment { segment: String },
 }

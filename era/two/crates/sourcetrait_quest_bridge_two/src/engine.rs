@@ -1,22 +1,53 @@
-//! The era engine: the loaded model, behind the container's trait.
+//! Era two behind the bridge API: the engine, and the entry that builds
+//! it.
 use crate::*;
 
+/// Era two: the Olmo-Hybrid DPO checkpoint on the lib_quest engine.
+///
+/// This is the whole of what eon names. Everything era-specific below it
+/// is reached through the API's traits, so a consumer generic over `Era`
+/// has no path into the library at all.
+pub struct BridgeTwo;
+
+impl bridge::all::Era for BridgeTwo {
+    type Engine = TwoEngine;
+
+    /// From constants rather than a load, so a consumer can say what it
+    /// is about to open before paying for the model.
+    fn info() -> bridge::all::EraInfo {
+        bridge::all::EraInfo {
+            era: String::from("two"),
+            model: format!(
+                "{}/{}",
+                lib::consts::MODEL_AUTHOR,
+                lib::consts::DPO_MODEL_NAME
+            ),
+        }
+    }
+
+    fn engine() -> Result<Self::Engine, String> {
+        TwoEngine::load()
+    }
+}
+
 /// The model, its tokenizer, and the conversation so far.
-pub(crate) struct EraEngine {
+pub struct TwoEngine {
     model: lib::OlmoHybrid,
     tokenizer: tokenizers::Tokenizer,
     coordinate: String,
     trail: Vec<u32>,
 }
 
-impl EraEngine {
+impl TwoEngine {
     /// Load from the standing default profile.
     ///
-    /// Called on the container's own thread through the factory, which is
-    /// what makes a not-`Send` model legal here at all.
-    pub(crate) fn load() -> Result<Self, String> {
-        let config = lib::LibConfig::load_from_dir(None::<&str>, None::<&str>).map_err(message_of)?;
-        let mut settings = lib::LibSettings::load_from_dir(None::<&str>, None::<&str>).map_err(message_of)?;
+    /// Called through `Era::engine` on the thread that will own the
+    /// result, which is what makes a not-`Send` model legal here.
+    fn load() -> Result<Self, String> {
+        let config =
+            lib::LibConfig::load_from_dir(None::<&str>, None::<&str>).map_err(message_of)?;
+        let mut settings =
+            lib::LibSettings::load_from_dir(None::<&str>, None::<&str>).map_err(message_of)?;
         // Captured graphs bake buffer addresses, and a daemon restores
         // and clears across turns for the life of the process.
         settings.graph = false;
@@ -45,14 +76,13 @@ impl EraEngine {
     }
 }
 
-impl container::Engine for EraEngine {
+impl bridge::all::Engine for TwoEngine {
     /// Report what is loaded.
     ///
-    /// THE OPTIONS ARE NOT CONSULTED, and that follows from the singleton
-    /// rather than being an oversight. One container owns one model for
-    /// the service's life, so a session cannot ask for a different
-    /// checkpoint or a different settings profile - what it can do is
-    /// learn which one it got, which is what the answer carries.
+    /// THE OPTIONS ARE NOT CONSULTED, and that follows from one container
+    /// owning one model for the service's life rather than from anything
+    /// unfinished here. A session cannot ask for a different checkpoint
+    /// or settings profile; what it can do is learn which one it got.
     fn open(
         &mut self,
         _options: &bridge::all::ChatOptions,
@@ -120,8 +150,9 @@ impl container::Engine for EraEngine {
     }
 }
 
-/// Library errors cross as text, because the container's trait is the
-/// seam between an era and a daemon that must not know which era.
+/// Library errors cross as TEXT, and that is the seam doing its job: an
+/// eon consumer must not have to name an era's error type to report a
+/// failure, or the API would leak the library it exists to hide.
 fn message_of(error: lib::LibQuestError) -> String {
     error.to_string()
 }

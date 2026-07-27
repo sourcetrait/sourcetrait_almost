@@ -60,8 +60,10 @@ fn serve_forever() -> DquestResult<()> {
         let listener = serve::bind(ADDRESS).await?;
         // The engine loads on the container's own thread; a failure
         // there leaves the daemon up and refusing, rather than exiting
-        // before any client can be told why.
-        let container = ContainerHandle::spawn(era::EraEngine::load);
+        // before any client can be told why. The factory comes from the
+        // API's `Era` trait, so this is the only line that names one.
+        let container =
+            ContainerHandle::spawn(<era::BridgeTwo as bridge::all::Era>::engine);
         let manager =
             manager::SessionManager::for_user(&username, preflight::session_log_root());
         serve::serve(listener, config, container, manager).await;

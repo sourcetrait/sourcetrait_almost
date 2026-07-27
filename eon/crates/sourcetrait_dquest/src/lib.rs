@@ -1,6 +1,6 @@
 pub(crate) mod container;
-pub(crate) mod era;
 pub(crate) mod error;
+pub(crate) mod log;
 pub(crate) mod manager;
 pub(crate) mod nom;
 pub(crate) mod preflight;
@@ -22,8 +22,10 @@ pub(crate) use std::{
 };
 
 pub(crate) use sourcetrait_cert_lib as srcert;
-pub(crate) use sourcetrait_lib_quest_two as lib;
 pub(crate) use sourcetrait_quest_bridge as bridge;
+/// The one place an era is named. Everything else is generic over the
+/// API's `Era` trait, so another era is this line.
+pub(crate) use sourcetrait_quest_bridge_two as era;
 
 /// In scope so `next`, `send` and `close` dispatch on framed halves.
 pub(crate) use futures_util::{
@@ -50,6 +52,10 @@ pub(crate) mod r {
         };
     }
 }
+
+/// The era-facing contract, which is the API's rather than ours. The
+/// container runs whatever satisfies it and never learns which era did.
+pub(crate) use bridge::all::Engine;
 
 pub(crate) use crate::container::ContainerHandle;
 pub(crate) use crate::error::{

@@ -43,9 +43,9 @@ impl SessionManager {
     /// session that cannot be logged is still served, because refusing a
     /// connection over a log is the wrong trade - the log records the
     /// work rather than being part of it.
-    pub(crate) fn log(&self, ticket: &SessionTicket) -> Option<lib::session::SessionLog> {
+    pub(crate) fn log(&self, ticket: &SessionTicket) -> Option<log::SessionLog> {
         let root = self.log_root.as_ref()?;
-        lib::session::SessionLog::open(
+        log::SessionLog::open(
             root,
             &[self.thinkspace().as_str(), ticket.nom().as_str()],
         )

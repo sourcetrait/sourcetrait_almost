@@ -61,7 +61,7 @@ pub(crate) async fn serve(
 /// A logging failure is dropped rather than reported, which is the same
 /// rule the Questness side holds to: the log is a record of the work and
 /// never part of it, so nothing a turn does depends on it landing.
-fn record(log: &Option<lib::session::SessionLog>, label: &str, body: &str) {
+fn record(log: &Option<log::SessionLog>, label: &str, body: &str) {
     if let Some(log) = log {
         let _ = log.append(label, body);
     }
@@ -71,7 +71,7 @@ fn record(log: &Option<lib::session::SessionLog>, label: &str, body: &str) {
 pub(crate) async fn session(
     stream: r::tls::ServerStream<tokio::net::TcpStream>,
     container: ContainerHandle,
-    log: Option<lib::session::SessionLog>,
+    log: Option<log::SessionLog>,
 ) {
     let (read, write) = tokio::io::split(stream);
     let mut reader = Reader::new(read, bridge::BitcodeCodec::new());
@@ -143,7 +143,7 @@ async fn turn(
     writer: &mut Writer,
     container: &ContainerHandle,
     text: String,
-    log: &Option<lib::session::SessionLog>,
+    log: &Option<log::SessionLog>,
 ) -> bool {
     record(log, "turn", &text);
     let (chunks, mut arriving) = r::tokio::channel(CHUNK_CAPACITY);
