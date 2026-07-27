@@ -16,6 +16,21 @@ fn value(nuon: &str) -> nu::Value {
     nu::from_nuon_text(nuon).expect("fixture parses")
 }
 
+/// QUESTNESS IS A BLOCKING API ALL THE WAY DOWN, and this is the lock
+/// that says the daemon can still use it.
+///
+/// Making only `ClientHarness::serve` async would buy nothing, which is
+/// what closes that open decision: the evaluator half spawns a sized
+/// thread and joins it, so an `evaluate` sub-turn blocks its caller
+/// whether or not the trait is async. The whole of `step` is blocking by
+/// construction, so the one correct way to drive it from an async daemon
+/// is `spawn_blocking` - and that needs the value to be `Send`.
+#[test]
+fn questness_can_cross_to_a_blocking_task() {
+    fn assert_send<T: Send>() {}
+    assert_send::<Questness<crate::bubble::BubbleHarness>>();
+}
+
 /// A client harness whose world is one record, modifiable between turns.
 ///
 /// The fixture is the WORLD rather than the response: the test sets the
