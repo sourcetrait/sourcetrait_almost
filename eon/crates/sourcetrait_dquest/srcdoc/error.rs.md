@@ -2,8 +2,9 @@
 
 ## enum DquestError
 
-One variant, and the shape of the enum is the point rather than an
-accident of there being little to go wrong yet.
+Two variants, and what separates them is who has to act: one names a
+certificate operation that failed, the other names an environment the
+operator has not set.
 
 ### Cert
 
@@ -13,6 +14,21 @@ makes its largest variant about 144 bytes, and an unboxed copy inside
 every `DquestResult` trips `clippy::result_large_err` at the standing
 zero-warning bar. Boxing costs one allocation on a path that is already
 failing.
+
+### Unset
+
+An ERROR rather than a `Started` variant, which is the opposite call to
+the one made for a missing certificate, and the difference is what the
+operator can do next. A missing certificate is an expected state of a
+correctly configured box with a documented remedy, so it is an outcome. An
+unnamed secret data home means the daemon cannot even look, so nothing
+about the certificate is known and reporting one as missing would be a
+finding manufactured out of a configuration fault.
+
+The variable is `&'static str` because it can only ever be the constant
+beside it. Carrying it as a field rather than baking it into the message
+keeps the name in one place, so a lock asserts the message names the
+variable it actually reads.
 
 ## What is deliberately NOT here
 

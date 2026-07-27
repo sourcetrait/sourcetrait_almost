@@ -12,11 +12,18 @@ shipped profile fails at the first start rather than at the first
 handshake. The parse is also locked in-crate, which is the earlier of the
 two and the one that fails during a build rather than in front of a user.
 
-## enum Profile
+## const SECRET_DATA_ENV
 
-Carries the live path in both variants rather than only in the written
-one, because the caller wants to name the file either way - to tell the
-operator where to mint from, or to report which profile a run is using.
+A sourcetrait extension rather than an XDG variable, so nothing else on a
+box sets it and there is no platform default to fall back to. That is why
+an absent value is an error rather than a guess: the daemon genuinely
+cannot know where the material lives, and inventing a location would put
+a lookup somewhere nothing installed to.
+
+There is deliberately no flag for it, matching the crate's standing
+position that configuration surface is a decision rather than a
+convenience. The variable is also the one `srcert` itself reads, so the
+two tools agree about the location without either telling the other.
 
 ## fn ensure_profile
 
@@ -28,17 +35,49 @@ whole job, since it is what a customised profile gets diffed against and
 a stale one is worse than none. Guarding the call would silently freeze
 the reference at whichever build first ran.
 
-WHAT THIS DOES NOT CHECK, and it is the known hole rather than an
-oversight. The precondition is the PROFILE, not the material. A second
-start after a first one finds the profile present and proceeds, even
-though no certificate has been generated or installed - so the check
-keeps certificate generation an explicit act only on the very first run.
-Once the bridge actually serves TLS that becomes a handshake failure
+It hands back the library's own `ProfileInstall` rather than rewrapping
+it. An earlier cut carried a two-variant enum here whose whole purpose was
+to tell startup whether the profile had just been written, because that
+was the condition startup branched on. It is not any more - the condition
+is now whether the MATERIAL exists - so the enum was carrying a
+distinction nothing read, and the library already answers the same
+question for whoever still wants it.
+
+## fn secret_data_home
+
+Splits into an environment read and a pure `named_home` so both branches
+are reachable from a lock without mutating process environment, which is
+unsound to do from a test thread. Same shape as taking the colour decision
+as an argument in `style`.
+
+## fn named_home
+
+BLANK IS THE SAME CONDITION AS ABSENT, and treating them alike is the
+point rather than tidiness. A variable exported empty is the ordinary
+result of a shell assignment that resolved to nothing, and an empty string
+joined to the layout below it would produce a RELATIVE path - so the
+daemon would look for its certificate under whatever directory it happened
+to be started from, find nothing, and report a missing certificate rather
+than a misconfigured environment. Refusing here is what keeps those two
+failures distinguishable.
+
+## fn material_exists
+
+The whole of the check is delegated, and that is deliberate: the layout
+under the secret data home belongs to the certificate library, so
+reconstructing it here would duplicate the knowledge that library exists
+to hold and would drift the day a filename changes.
+
+WHAT IT CLOSES. The precondition used to be the PROFILE rather than the
+material, so a second start found the profile present and proceeded
+whether or not a certificate had ever been generated. Once the bridge
+serves TLS that would surface as a handshake failure at connect time
 rather than a startup failure, which is the worse of the two places to
 learn it.
 
-The library already carries what would close it: `secret_certs_dir` gives
-the install destination, and the four artifacts under it are what
-`install` places. Adding the check needs the secret data home, which the
-command line reads from the environment, and it widens the certificate
-library's public face, so it is a decision rather than an omission.
+WHAT IT STILL DOES NOT BUY. Presence is not validity. It answers
+never-minted and material-deleted, and says nothing about an expired
+certificate or one that no longer matches its profile. Answering those
+means resolving the trust store as well, and a daemon that refuses to
+start because no trust store was detected is a worse failure mode than
+the one being prevented.

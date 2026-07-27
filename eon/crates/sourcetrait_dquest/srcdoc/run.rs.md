@@ -32,6 +32,25 @@ The exit code carries what the silence does not. A start that could not
 proceed exits non-zero, so a supervisor sees a failure rather than a
 daemon that came up and vanished.
 
+## fn start
+
+THE ORDER IS THE DESIGN. The secret data home is resolved BEFORE the
+profile is placed, so the one step that mutates anything runs only after
+every check that can fail has passed. That is the same
+preflight-before-mutation rule the certificate library follows, applied to
+a startup path rather than to an install.
+
+It also decides which failure an operator sees first. Resolving the home
+last would place a profile, report a missing certificate, and leave the
+real fault - an unset variable - unmentioned.
+
+The two branches this used to carry collapsed into one condition. The
+trigger was whether the profile had just been written, which answered
+"has this box ever been set up" rather than "can this daemon serve TLS";
+it is now whether the material exists, with the profile write happening on
+the way. The message needed no rewording, because it already said that no
+certificate exists yet rather than that no profile did.
+
 ## fn certificate_owed
 
 The only thing this binary ever says to a user, and it is composed here

@@ -26,16 +26,17 @@ pub fn run() {
     }
 }
 
-/// Satisfy the certificate precondition, then serve.
+/// Satisfy the certificate preconditions, then serve.
 fn start() -> DquestResult<Started> {
     let config_home = srcert::config_home().map_err(|source| DquestError::Cert {
         context: "resolving the configuration home".to_string(),
         source: Box::new(source),
     })?;
+    let secret_data = preflight::secret_data_home()?;
 
     let profile = preflight::ensure_profile(&config_home)?;
-    if let preflight::Profile::Written { live } = &profile {
-        style::fail(&certificate_owed(live));
+    if !preflight::material_exists(&secret_data) {
+        style::fail(&certificate_owed(&profile.live));
         return Ok(Started::CertificateOwed);
     }
     Ok(Started::Serving)

@@ -11,4 +11,10 @@ pub enum DquestError {
         context: String,
         source: Box<srcert::CertError>,
     },
+
+    #[snafu(display(
+        "${variable} is not set, so the daemon cannot locate its certificate \
+         material"
+    ))]
+    Unset { variable: &'static str },
 }
