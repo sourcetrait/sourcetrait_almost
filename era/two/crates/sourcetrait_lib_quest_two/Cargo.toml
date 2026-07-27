@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_lib_quest_two"
-version = "0.0.0-50"
+version = "0.0.0-51"
 edition = "2024"
 description = "The shared library common to the quest toolset"
 authors = ["SourceTrait <development@sourcetrait.com>"]
@@ -22,7 +22,6 @@ candle-nn.workspace = true
 candle-transformers.workspace = true
 cudarc = { workspace = true, optional = true }
 half = { workspace = true, optional = true }
-hf-hub.workspace = true
 safetensors.workspace = true
 serde.workspace = true
 serde_json.workspace = true

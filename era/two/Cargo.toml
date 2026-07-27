@@ -17,7 +17,6 @@ candle-transformers = { version = "0.11" }
 clap = { version = "4", features = ["derive"] }
 cudarc = { version = "0.19", features = ["cuda-version-from-build-system"] }
 half = { version = "2" }
-hf-hub = { version = "1", features = ["blocking"] }
 nu-cmd-lang = { git = "https://github.com/nushell/nushell", tag = "0.114.1" }
 nu-command = { git = "https://github.com/nushell/nushell", tag = "0.114.1" }
 nu-engine = { git = "https://github.com/nushell/nushell", tag = "0.114.1" }
