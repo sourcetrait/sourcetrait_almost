@@ -19,6 +19,7 @@ use crate::wire::{
     MAX_FRAME_BYTES,
     OpenRequest,
     OpenResponse,
+    OpenRefusedResponse,
     ResetRequest,
     ResetResponse,
     ServerFaultNotice,
@@ -26,6 +27,7 @@ use crate::wire::{
     ServerShutdownNotice,
     ServerToClient,
     TurnChunk,
+    TurnFailedResponse,
     TurnRequest,
     TurnResponse,
 };
@@ -60,8 +62,14 @@ fn server_messages() -> Vec<ServerToClient> {
                 model: String::from("allenai/Olmo-Hybrid-Instruct-DPO-7B"),
             },
         }),
+        ServerToClient::OpenRefused(OpenRefusedResponse {
+            message: String::from("the checkpoint did not load"),
+        }),
         ServerToClient::TurnChunk(TurnChunk {
             text: String::from("Hello"),
+        }),
+        ServerToClient::TurnFailed(TurnFailedResponse {
+            message: String::from("the engine faulted mid-generation"),
         }),
         ServerToClient::Turn(TurnResponse {
             report: TurnReport {

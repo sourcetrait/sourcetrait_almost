@@ -27,6 +27,7 @@ pub use wire::{
     CancelResponse,
     ClientToServer,
     MAX_FRAME_BYTES,
+    OpenRefusedResponse,
     OpenRequest,
     OpenResponse,
     ResetRequest,
@@ -36,6 +37,7 @@ pub use wire::{
     ServerShutdownNotice,
     ServerToClient,
     TurnChunk,
+    TurnFailedResponse,
     TurnRequest,
     TurnResponse,
 };

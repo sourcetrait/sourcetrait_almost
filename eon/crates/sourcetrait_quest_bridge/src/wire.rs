@@ -34,6 +34,25 @@ pub struct OpenResponse {
     pub info: all::EraInfo,
 }
 
+/// The session did not open, so nothing is loaded behind it.
+///
+/// Its own message rather than an outcome inside `OpenResponse`, because
+/// a refusal has no era to report and a caller that must branch anyway
+/// is better served branching on the message.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    bitcode::Encode,
+    bitcode::Decode,
+)]
+pub struct OpenRefusedResponse {
+    pub message: String,
+}
+
 /// The next user turn; chunks stream as events until it answers.
 #[derive(
     Debug,
@@ -49,7 +68,7 @@ pub struct TurnRequest {
     pub text: String,
 }
 
-/// The turn ended, however it ended.
+/// The turn ran to an ending, and this is its accounting.
 #[derive(
     Debug,
     Clone,
@@ -61,6 +80,25 @@ pub struct TurnRequest {
 )]
 pub struct TurnResponse {
     pub report: all::TurnReport,
+}
+
+/// The turn did not run to an ending.
+///
+/// Its own message because a failed turn has no accounting to give -
+/// token counts and timings would be fiction - so folding it into
+/// `TurnResponse` would mean inventing a report to carry a failure.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    bitcode::Encode,
+    bitcode::Decode,
+)]
+pub struct TurnFailedResponse {
+    pub message: String,
 }
 
 /// Stop the in-flight generation early; the turn still answers.
@@ -223,7 +261,9 @@ pub enum ClientToServer {
 )]
 pub enum ServerToClient {
     Open(OpenResponse),
+    OpenRefused(OpenRefusedResponse),
     Turn(TurnResponse),
+    TurnFailed(TurnFailedResponse),
     TurnChunk(TurnChunk),
     Cancel(CancelResponse),
     Reset(ResetResponse),
