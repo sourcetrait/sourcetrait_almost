@@ -15,6 +15,8 @@ pub enum BquestError {
     #[snafu(transparent)]
     Lib { source: lib::LibQuestError },
     #[snafu(transparent)]
+    Core { source: lib::QuestCoreError },
+    #[snafu(transparent)]
     Shell {
         #[snafu(source(from(lib::nu::ShellError, Box::new)))]
         source: Box<lib::nu::ShellError>,

@@ -28,6 +28,7 @@ sha2 = { version = "0.10" }
 snafu = { version = "0.9" }
 sourcetrait_lib_quest_two = { path = "crates/sourcetrait_lib_quest_two" }
 sourcetrait_quest_bridge = { path = "../../eon/crates/sourcetrait_quest_bridge" }
+sourcetrait_quest_core = { path = "../../eon/crates/sourcetrait_quest_core" }
 tokenizers = { version = "0.23" }
 tokio = { version = "1", features = ["sync"] }
 toml = { version = "0.9" }

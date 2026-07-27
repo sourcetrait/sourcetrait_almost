@@ -18,8 +18,8 @@ uniquely named; `consts` is the deliberate exception and is always pathed.
 
 The re-export hub for external items whose qualifying path is long. A hub
 module's name must DIFFER from the crate it re-exports, or `use crate::*` makes
-the identifier ambiguous - which is why these are `flash`, `nu` and `sampling`
-rather than the crate names.
+the identifier ambiguous - which is why these are `flash` and `sampling` rather
+than the crate names.
 
 `gen` is unusable as a family name here: edition 2024 reserves it as a keyword,
 and it bites re-export hubs first.
@@ -35,3 +35,9 @@ Two of these exist only for the offline replay instrument - the speculation
 index and policy - so that the replay drives the shipped code rather than a
 copy of it. That is the one case where a public entry is justified by a test
 harness.
+
+The block opens by re-exporting the eon core crate's `nu` module and its error
+pair. That is a compatibility surface rather than a convenience: the module
+used to live in this crate, and hundreds of call sites across bquest reach it
+as `lib::nu`. Re-exporting under the historical path is what made moving the
+implementation a zero-call-site change.

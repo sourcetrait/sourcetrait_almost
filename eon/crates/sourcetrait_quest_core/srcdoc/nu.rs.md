@@ -1,8 +1,14 @@
 # nu.rs
 
-The one owner of the nushell dependencies in the whole toolset. Sister crates
-reach `lib::nu` and never the nu crates directly, so the estate's single
-nushell pin has exactly one place to move.
+The one owner of the nushell dependencies in the whole toolset. Every other
+crate reaches this module and never the nu crates directly, so the estate's
+single nushell pin has exactly one place to move.
+
+It sits in eon rather than in an era because nothing in it is era-specific:
+there is no model here, no candle, and no checkpoint. That is what lets an eon
+binary speak the program's data language without linking an era's engine, and
+it is the whole reason this crate exists. The era library re-exports the module
+under its old path, so `lib::nu` still resolves and no call site moved.
 
 NUON is the program's primary data format. Artifacts we author are `.nuon` -
 one whole value per file, usually a table or a record - while stream-shaped
@@ -25,6 +31,11 @@ Sugar note that surfaces in every rendered typedef: `path` and `directory` are
 valid spellings that COLLAPSE to string in the Type enum, so a derived typedef
 shows the base type. Conformance is unaffected because string values conform;
 `glob` survives as its own type.
+
+It parses, which matters to any host that calls it. Parsing recurses and its
+stack cost scales with nesting depth, and a stack overflow in the parser is a
+fatal abort rather than a catchable error - so a caller must not run this on an
+async runtime worker, whose stack is roughly a quarter of a default thread's.
 
 ## fn from_nuon_text
 

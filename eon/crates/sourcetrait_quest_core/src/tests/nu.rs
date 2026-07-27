@@ -18,7 +18,7 @@ use crate::nu::{
 };
 
 fn temp_root(tag: &str) -> PathBuf {
-    let root = env::temp_dir().join(format!("lib_quest_nu_{tag}_{}", std::process::id()));
+    let root = env::temp_dir().join(format!("quest_core_nu_{tag}_{}", std::process::id()));
     if root.exists() {
         fs::remove_dir_all(&root).expect("clean temp root");
     }

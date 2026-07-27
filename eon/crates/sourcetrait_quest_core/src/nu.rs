@@ -12,7 +12,7 @@ pub use nu_protocol::{
 };
 
 /// Parse a nu typedef string into a Type, oneof included.
-pub fn parse_typedef(typedef: &str) -> LibQuestResult<Type> {
+pub fn parse_typedef(typedef: &str) -> QuestCoreResult<Type> {
     let mut engine_state = r::nu::EngineState::new();
     engine_state.add_env_var(String::from("PWD"), Value::string("", Span::unknown()));
     let mut working_set = r::nu::StateWorkingSet::new(&engine_state);
@@ -40,7 +40,7 @@ pub fn parse_typedef(typedef: &str) -> LibQuestResult<Type> {
 }
 
 /// NUON text -> Value (the nuon crate's own parser; no engine).
-pub fn from_nuon_text(text: &str) -> LibQuestResult<Value> {
+pub fn from_nuon_text(text: &str) -> QuestCoreResult<Value> {
     match nuon::from_nuon(text, None) {
         Ok(value) => Ok(value),
         Err(error) => snafu::whatever!("nuon parse failed: {error}"),
@@ -48,21 +48,21 @@ pub fn from_nuon_text(text: &str) -> LibQuestResult<Value> {
 }
 
 /// Value -> NUON text, compact and single-line.
-pub fn to_nuon_text(value: &Value) -> LibQuestResult<String> {
+pub fn to_nuon_text(value: &Value) -> QuestCoreResult<String> {
     render_nuon(value, nuon::ToStyle::Default)
 }
 
 /// Value -> CONDENSED NUON, what `to nuon --raw` emits.
-pub fn to_nuon_condensed(value: &Value) -> LibQuestResult<String> {
+pub fn to_nuon_condensed(value: &Value) -> QuestCoreResult<String> {
     render_nuon(value, nuon::ToStyle::Raw)
 }
 
 /// Value -> PRETTY NUON, two-space indented as `to nuon --pretty`.
-pub fn to_nuon_pretty(value: &Value) -> LibQuestResult<String> {
+pub fn to_nuon_pretty(value: &Value) -> QuestCoreResult<String> {
     render_nuon(value, nuon::ToStyle::Spaces(2))
 }
 
-fn render_nuon(value: &Value, style: nuon::ToStyle) -> LibQuestResult<String> {
+fn render_nuon(value: &Value, style: nuon::ToStyle) -> QuestCoreResult<String> {
     let engine_state = r::nu::EngineState::new();
     let config = nuon::ToNuonConfig::default().style(style);
     match nuon::to_nuon(&engine_state, value, config) {
@@ -72,7 +72,7 @@ fn render_nuon(value: &Value, style: nuon::ToStyle) -> LibQuestResult<String> {
 }
 
 /// Deep value-vs-typedef conformance via nu's own subtype machinery.
-pub fn conform(value: &Value, declared: &Type) -> LibQuestResult<()> {
+pub fn conform(value: &Value, declared: &Type) -> QuestCoreResult<()> {
     snafu::ensure_whatever!(
         value.is_subtype_of(declared),
         "value does not conform: declared {declared}, derived {}",
@@ -83,12 +83,12 @@ pub fn conform(value: &Value, declared: &Type) -> LibQuestResult<()> {
 
 /// Read one whole-value .nuon file (a dataset: one table/record/value
 /// per file).
-pub fn load_value(path: &Path) -> LibQuestResult<Value> {
+pub fn load_value(path: &Path) -> QuestCoreResult<Value> {
     from_nuon_text(&fs::read_to_string(path)?)
 }
 
 /// Write one whole-value .nuon file, newline-terminated.
-pub fn save_value(path: &Path, value: &Value) -> LibQuestResult<()> {
+pub fn save_value(path: &Path, value: &Value) -> QuestCoreResult<()> {
     let text = to_nuon_text(value)?;
     ensure_parent(path)?;
     Ok(fs::write(path, text + "\n")?)
@@ -96,7 +96,7 @@ pub fn save_value(path: &Path, value: &Value) -> LibQuestResult<()> {
 
 /// Read a NUON-LINES file (one record literal per line); blank lines
 /// skip.
-pub fn load_lines(path: &Path) -> LibQuestResult<Vec<Value>> {
+pub fn load_lines(path: &Path) -> QuestCoreResult<Vec<Value>> {
     fs::read_to_string(path)?
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -105,7 +105,7 @@ pub fn load_lines(path: &Path) -> LibQuestResult<Vec<Value>> {
 }
 
 /// Write a NUON-LINES file whole, one asserted single-line value each.
-pub fn save_lines(path: &Path, values: &[Value]) -> LibQuestResult<()> {
+pub fn save_lines(path: &Path, values: &[Value]) -> QuestCoreResult<()> {
     let mut out = String::new();
     for value in values {
         out.push_str(&render_line(value)?);
@@ -116,7 +116,7 @@ pub fn save_lines(path: &Path, values: &[Value]) -> LibQuestResult<()> {
 }
 
 /// Append one value to a NUON-LINES file as a single line.
-pub fn append_line(path: &Path, value: &Value) -> LibQuestResult<()> {
+pub fn append_line(path: &Path, value: &Value) -> QuestCoreResult<()> {
     let line = render_line(value)?;
     ensure_parent(path)?;
     let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
@@ -124,7 +124,7 @@ pub fn append_line(path: &Path, value: &Value) -> LibQuestResult<()> {
 }
 
 /// One value as one line, guarded against a multi-line rendering.
-fn render_line(value: &Value) -> LibQuestResult<String> {
+fn render_line(value: &Value) -> QuestCoreResult<String> {
     let text = to_nuon_text(value)?;
     snafu::ensure_whatever!(
         !text.contains('\n'),
@@ -133,7 +133,7 @@ fn render_line(value: &Value) -> LibQuestResult<String> {
     Ok(text)
 }
 
-fn ensure_parent(path: &Path) -> LibQuestResult<()> {
+fn ensure_parent(path: &Path) -> QuestCoreResult<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {

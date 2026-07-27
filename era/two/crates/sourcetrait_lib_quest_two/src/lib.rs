@@ -23,7 +23,6 @@ pub(crate) mod model {
 }
 pub(crate) mod needle;
 pub(crate) mod norms;
-pub mod nu;
 #[cfg(feature = "attn-profile")]
 pub(crate) mod profile;
 pub(crate) mod snapshot;
@@ -60,16 +59,6 @@ pub(crate) mod r {
     pub(crate) mod flash {
         pub(crate) use candle_flash_attn::flash_attn;
     }
-    pub(crate) mod nu {
-        pub(crate) use nu_parser::parse;
-        pub(crate) use nu_protocol::{
-            ast::Expr,
-            engine::{
-                EngineState,
-                StateWorkingSet,
-            },
-        };
-    }
     pub(crate) mod sampling {
         pub(crate) use candle_transformers::generation::{
             LogitsProcessor,
@@ -77,6 +66,12 @@ pub(crate) mod r {
         };
     }
 }
+
+pub use sourcetrait_quest_core::{
+    QuestCoreError,
+    QuestCoreResult,
+    nu,
+};
 
 pub use crate::adapter::{
     adapter_path,
@@ -178,7 +173,6 @@ mod tests {
     mod model;
     mod needle;
     mod norms;
-    mod nu;
     #[cfg(feature = "attn-profile")]
     mod profile;
     mod snapshot;
