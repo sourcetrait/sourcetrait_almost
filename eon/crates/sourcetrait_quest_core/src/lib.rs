@@ -1,4 +1,6 @@
 pub mod channel;
+#[cfg(feature = "evaluate")]
+pub mod contract;
 pub(crate) mod error;
 #[cfg(feature = "evaluate")]
 pub mod evaluate;
@@ -13,6 +15,16 @@ pub(crate) use std::{
         Path,
         PathBuf,
     },
+};
+
+#[cfg(feature = "evaluate")]
+pub(crate) use nu_protocol::CompareTypes;
+
+#[cfg(feature = "evaluate")]
+pub(crate) use crate::channel::{
+    Block,
+    Envelope,
+    Tag,
 };
 
 pub(crate) mod r {
@@ -41,6 +53,8 @@ pub use crate::error::{
 #[cfg(test)]
 mod tests {
     mod channel;
+    #[cfg(feature = "evaluate")]
+    mod contract;
     #[cfg(feature = "evaluate")]
     mod evaluate;
     mod nu;

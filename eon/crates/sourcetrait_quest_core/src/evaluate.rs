@@ -61,6 +61,38 @@ impl QuestnessEvaluator {
         self.decl_names().iter().any(|known| known == name)
     }
 
+    /// Parse a body and return the one declaration it introduces.
+    pub(crate) fn parse_fresh_decl(
+        &self,
+        source: &str,
+        before: &[String],
+    ) -> QuestCoreResult<(String, nu_protocol::Signature)> {
+        let mut engine = self.base.clone();
+        let mut working_set = r::nu::StateWorkingSet::new(&engine);
+        let _block = r::nu::parse(&mut working_set, None, source.as_bytes(), false);
+        if let Some(error) = working_set.parse_errors.first() {
+            let rendered = nu_protocol::format_cli_error(None, &working_set, error, None);
+            snafu::whatever!("{rendered}");
+        }
+        let delta = working_set.render();
+        if let Err(error) = engine.merge_delta(delta) {
+            snafu::whatever!("merging the parsed definition failed: {error}");
+        }
+        let mut fresh: Vec<(String, nu_protocol::Signature)> = Vec::new();
+        for (name, id) in engine.get_decls_sorted(false) {
+            let name = String::from_utf8_lossy(&name).to_string();
+            if before.contains(&name) {
+                continue;
+            }
+            fresh.push((name, engine.get_decl(id).signature()));
+        }
+        match fresh.len() {
+            1 => Ok(fresh.remove(0)),
+            0 => snafu::whatever!("the body declares nothing; a nu block carries a definition"),
+            count => snafu::whatever!("the body declares {count} definitions; expected one"),
+        }
+    }
+
     /// Evaluate one source body, optionally piping a value into it.
     ///
     /// Runs on its own sized thread: a stack overflow in the parser is
