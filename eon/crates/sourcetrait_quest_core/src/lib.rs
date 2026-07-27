@@ -1,5 +1,7 @@
 pub mod channel;
 pub(crate) mod error;
+#[cfg(feature = "evaluate")]
+pub mod evaluate;
 pub mod nu;
 
 #[allow(unused_imports)]
@@ -23,6 +25,11 @@ pub(crate) mod r {
                 StateWorkingSet,
             },
         };
+        #[cfg(feature = "evaluate")]
+        pub(crate) use nu_protocol::{
+            debugger::WithoutDebug,
+            engine::Stack,
+        };
     }
 }
 
@@ -34,5 +41,7 @@ pub use crate::error::{
 #[cfg(test)]
 mod tests {
     mod channel;
+    #[cfg(feature = "evaluate")]
+    mod evaluate;
     mod nu;
 }
