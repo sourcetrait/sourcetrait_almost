@@ -12,7 +12,7 @@ would be a contract with nobody.
 
 Aliased to the binary name rather than to a shortening of the crate name,
 because every call site reads as an instruction about `srcert` the tool:
-the profile it places is the one `srcert quest generate` will read. The
+the profile it places is the one `srcert generate quest` will read. The
 alias is what keeps those call sites path-referenced without a long
 qualifier.
 

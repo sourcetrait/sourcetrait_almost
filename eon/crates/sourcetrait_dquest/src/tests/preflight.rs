@@ -7,6 +7,24 @@ use crate::preflight::{
     ensure_profile,
 };
 
+/// The message is the operator's only instruction and its command order
+/// was wrong once, so the spelling is locked rather than the prose.
+#[test]
+fn the_certificate_message_puts_the_verb_before_the_profile() {
+    let text = crate::error::DquestError::CertificateOwed {
+        name: PROFILE.to_string(),
+        profile: String::from("some/where/quest.toml"),
+    }
+    .to_string();
+
+    assert!(text.contains("srcert generate quest <dir>"), "{text}");
+    assert!(text.contains("srcert install quest <dir>"), "{text}");
+    assert!(
+        !text.contains("srcert quest"),
+        "the profile-first order must not come back: {text}"
+    );
+}
+
 /// A scratch root that removes itself, so a lock leaves no residue.
 struct Scratch {
     root: std::path::PathBuf,

@@ -26,3 +26,11 @@ and the second is useless without the first. It names `<dir>` rather than
 suggesting one: a suggested path would be this machine's layout leaking
 into shipped source, and the staging directory is consumed by `install`
 anyway, so it is genuinely the operator's choice.
+
+THE COMMAND ORDER IS LOCKED BY A TEST, which is unusual for a message and
+is earned. It shipped once as `srcert <profile> <verb>`, the tool's own
+shape at the time, and was corrected to verb-first. This message is the
+only instruction an operator gets at that moment, so a silent drift back
+would send them to a command line that no longer parses. The lock asserts
+the two spellings and asserts the old order is absent, which is the half
+that catches a partial edit.
