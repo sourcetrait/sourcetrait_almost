@@ -17,4 +17,15 @@ pub enum DquestError {
          material"
     ))]
     Unset { variable: &'static str },
+
+    #[snafu(display("binding {address}: {source}"))]
+    Listen {
+        address: std::net::SocketAddr,
+        source: std::io::Error,
+    },
+
+    #[snafu(transparent)]
+    Bridge {
+        source: Box<bridge::BridgeError>,
+    },
 }

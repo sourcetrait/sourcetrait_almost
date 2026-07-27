@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_dquest"
-version = "0.0.0-3"
+version = "0.0.0-4"
 edition = "2024"
 description = "DaemonQuest: the inference daemon serving quest and camp"
 authors = ["SourceTrait <development@sourcetrait.com>"]
@@ -17,5 +17,11 @@ path = "src/main.rs"
 [dependencies]
 anstyle.workspace = true
 clap.workspace = true
+futures-util.workspace = true
+rustls.workspace = true
 snafu.workspace = true
 sourcetrait_cert_lib.workspace = true
+sourcetrait_quest_bridge.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tokio-util.workspace = true
