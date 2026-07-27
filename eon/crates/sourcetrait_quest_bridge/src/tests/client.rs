@@ -164,6 +164,51 @@ async fn a_server_close_ends_the_handles_stream() {
     let _ = server.await;
 }
 
+/// Accept, handshake, then say nothing ever again.
+async fn accept_then_go_silent(
+    listener: tokio::net::TcpListener,
+    config: rustls::ServerConfig,
+) {
+    let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config));
+    let (stream, _) = listener.accept().await.expect("accepts");
+    let stream = acceptor.accept(stream).await.expect("handshakes");
+    // Hold the connection open without reading or answering.
+    std::future::pending::<()>().await;
+    drop(stream);
+}
+
+/// The bound on the polite close, which is the branch nothing else
+/// reaches. A peer that has gone silent never answers the goodbye, so
+/// without the timeout `close` would wait the full grace period - and
+/// without the abort it would wait forever on a peer that also never
+/// drops the socket.
+#[tokio::test]
+async fn closing_against_a_silent_peer_is_bounded_by_its_timeout() {
+    let material = Material::mint("client_silent");
+    let (listener, address) = bind().await;
+    let server = tokio::spawn(accept_then_go_silent(
+        listener,
+        server_config(&material.files).expect("a server configuration"),
+    ));
+
+    let mut handle = TlsClientHandle::connect(TlsClientOptions {
+        address,
+        files: material.files.clone(),
+    })
+    .await
+    .expect("connects");
+
+    let started = std::time::Instant::now();
+    handle.close(std::time::Duration::from_millis(150)).await;
+    let waited = started.elapsed();
+
+    assert!(
+        waited < std::time::Duration::from_secs(1),
+        "close waited {waited:?}, so the timeout did not bound it"
+    );
+    server.abort();
+}
+
 /// A refused handshake is an ERROR FROM CONNECT rather than a message
 /// the caller has to go looking for, which is why the handshake is
 /// awaited before the task is spawned.

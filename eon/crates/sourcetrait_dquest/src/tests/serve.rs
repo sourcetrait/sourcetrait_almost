@@ -228,6 +228,55 @@ async fn several_sessions_share_one_container() {
     server.abort();
 }
 
+/// One bad connection is that connection's problem. A peer that fails
+/// the handshake must end its own task and nothing else, or a single
+/// malformed client is a denial of service.
+#[tokio::test]
+async fn a_failed_handshake_does_not_take_the_daemon_down() {
+    let material = crate::tests::material::Material::mint("dquest_survives");
+    let foreign = crate::tests::material::Material::mint("dquest_foreign");
+    let (address, server, manager) = daemon(&material, scripted(&["after"])).await;
+
+    let refused = sourcetrait_quest_bridge::TlsClientHandle::connect(
+        sourcetrait_quest_bridge::TlsClientOptions {
+            address,
+            files: foreign.files.clone(),
+        },
+    )
+    .await;
+    assert!(refused.is_err(), "a foreign authority was admitted");
+
+    // The daemon keeps serving, and the refused peer left no place behind.
+    let mut handle = connect(address, &material).await;
+    handle
+        .send(sourcetrait_quest_bridge::ClientToServer::Open(
+            sourcetrait_quest_bridge::OpenRequest {
+                options: sourcetrait_quest_bridge::all::ChatOptions::default(),
+            },
+        ))
+        .await
+        .expect("sends");
+    let opened = read_until(&mut handle, |m| {
+        matches!(m, sourcetrait_quest_bridge::ServerToClient::Open(_))
+    })
+    .await;
+    assert_eq!(opened.len(), 1, "the daemon still serves");
+
+    handle.close(std::time::Duration::from_secs(5)).await;
+    for _ in 0..200 {
+        if manager.live() == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        manager.live(),
+        0,
+        "the refused peer's ticket dropped with its task"
+    );
+    server.abort();
+}
+
 /// A refused open is its own message, so a caller is not left reading a
 /// fault notice to learn its session never started.
 #[tokio::test]
