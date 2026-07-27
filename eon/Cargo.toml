@@ -11,6 +11,7 @@ members = [
 
 [workspace.dependencies]
 anstyle = { version = "1" }
+bitcode = { version = "0.6" }
 clap = { version = "4", features = ["derive"] }
 liquid = { version = "0.26" }
 nu-cmd-lang = { git = "https://github.com/nushell/nushell", tag = "0.114.1" }
@@ -31,4 +32,5 @@ sourcetrait_cert_lib = { path = "../../sourcetrait_cert/crates/sourcetrait_cert_
 sourcetrait_quest_bridge = { path = "crates/sourcetrait_quest_bridge" }
 sourcetrait_quest_bridge_two = { path = "../era/two/crates/sourcetrait_quest_bridge_two" }
 sourcetrait_quest_core = { path = "crates/sourcetrait_quest_core" }
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["codec"] }

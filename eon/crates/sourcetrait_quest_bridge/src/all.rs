@@ -48,14 +48,33 @@ pub enum ChatEvent {
     Closed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    bitcode::Encode,
+    bitcode::Decode,
+)]
 pub struct EraInfo {
     pub era: String,
     pub model: String,
 }
 
 /// Session-open options: the suite's profile tokens and a budget.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    bitcode::Encode,
+    bitcode::Decode,
+)]
 pub struct ChatOptions {
     pub dir: Option<String>,
     pub config: Option<String>,
@@ -64,7 +83,15 @@ pub struct ChatOptions {
 }
 
 /// One turn's accounting.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    bitcode::Encode,
+    bitcode::Decode,
+)]
 pub struct TurnReport {
     pub finish: FinishReason,
     pub prompt_token_count: usize,
@@ -74,7 +101,17 @@ pub struct TurnReport {
 }
 
 /// How a turn ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    bitcode::Encode,
+    bitcode::Decode,
+)]
 pub enum FinishReason {
     StopToken,
     SampleLen,
