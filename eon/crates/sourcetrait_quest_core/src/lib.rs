@@ -1,4 +1,5 @@
 pub mod channel;
+pub mod config;
 #[cfg(feature = "evaluate")]
 pub mod contract;
 pub(crate) mod error;
@@ -54,6 +55,7 @@ pub use crate::error::{
 #[cfg(test)]
 mod tests {
     mod channel;
+    mod config;
     #[cfg(feature = "evaluate")]
     mod contract;
     #[cfg(feature = "evaluate")]
