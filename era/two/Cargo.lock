@@ -7794,30 +7794,19 @@ dependencies = [
  "candle-transformers",
  "cudarc 0.19.8",
  "half",
+ "liquid",
  "nu-cmd-lang",
  "nu-command",
  "nu-engine",
  "nu-parser",
  "nu-protocol",
+ "nuon",
  "safetensors 0.8.0",
  "serde",
  "serde_json",
  "snafu",
- "sourcetrait_quest_core",
  "tokenizers 0.23.1",
  "toml 0.9.12+spec-1.1.0",
-]
-
-[[package]]
-name = "sourcetrait_quest_core"
-version = "0.0.0-9"
-dependencies = [
- "liquid",
- "nu-parser",
- "nu-protocol",
- "nuon",
- "serde",
- "snafu",
 ]
 
 [[package]]

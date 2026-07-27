@@ -10,7 +10,7 @@ pub fn binding_name(pass: &str) -> &str {
 }
 
 /// Render a template against its bound channels.
-pub fn render(source: &str, bindings: &[(String, nu::Value)]) -> QuestCoreResult<String> {
+pub fn render(source: &str, bindings: &[(String, nu::Value)]) -> LibQuestResult<String> {
     let parser = match liquid::ParserBuilder::with_stdlib().build() {
         Ok(parser) => parser,
         Err(error) => snafu::whatever!("the liquid parser did not build: {error}"),
@@ -31,7 +31,7 @@ pub fn render(source: &str, bindings: &[(String, nu::Value)]) -> QuestCoreResult
 }
 
 /// A nu value as liquid data; anything exotic rides its NUON form.
-pub fn to_liquid(value: &nu::Value) -> QuestCoreResult<liquid::model::Value> {
+pub fn to_liquid(value: &nu::Value) -> LibQuestResult<liquid::model::Value> {
     Ok(match value {
         nu::Value::Nothing { .. } => liquid::model::Value::Nil,
         nu::Value::Bool { val, .. } => liquid::model::Value::scalar(*val),

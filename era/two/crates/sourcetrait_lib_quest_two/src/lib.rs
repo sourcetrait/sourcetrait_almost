@@ -1,4 +1,6 @@
 pub(crate) mod adapter;
+pub mod bubble;
+pub mod channel;
 pub(crate) mod chat;
 pub(crate) mod checkpoint;
 pub(crate) mod config;
@@ -13,6 +15,7 @@ pub(crate) mod gdn;
 pub(crate) mod generate;
 #[cfg(feature = "cuda")]
 pub(crate) mod graph;
+pub mod harness;
 pub(crate) mod load;
 pub(crate) mod model {
     pub(crate) mod attn_layer;
@@ -23,16 +26,20 @@ pub(crate) mod model {
 }
 pub(crate) mod needle;
 pub(crate) mod norms;
+pub mod nu;
 #[cfg(feature = "attn-profile")]
 pub(crate) mod profile;
 pub(crate) mod questness {
     pub mod arbitrate;
+    pub mod config;
     pub mod contract;
     pub mod evaluate;
     pub mod turn;
 }
+pub mod session;
 pub(crate) mod snapshot;
 pub(crate) mod speculate;
+pub mod template;
 pub(crate) mod tokenizer;
 
 #[allow(unused_imports)]
@@ -48,17 +55,19 @@ pub(crate) use std::{
         Path,
         PathBuf,
     },
+    process,
+    thread,
+    time,
 };
 
 pub(crate) use candle_nn::Module;
 pub(crate) use nu_protocol::CompareTypes;
 
-pub(crate) use sourcetrait_quest_core::channel::{
+pub(crate) use crate::channel::{
     Block,
     Envelope,
     Tag,
 };
-
 pub(crate) use crate::model::attn_layer::AttnLayer;
 pub(crate) use crate::model::gdn_layer::GdnLayer;
 pub(crate) use crate::model::mask::{
@@ -81,6 +90,7 @@ pub(crate) mod r {
     pub(crate) mod nu {
         pub(crate) use nu_parser::parse;
         pub(crate) use nu_protocol::{
+            ast::Expr,
             debugger::WithoutDebug,
             engine::{
                 EngineState,
@@ -96,15 +106,6 @@ pub(crate) mod r {
         };
     }
 }
-
-pub use sourcetrait_quest_core::{
-    QuestCoreError,
-    QuestCoreResult,
-    channel,
-    harness,
-    nu,
-    session,
-};
 
 pub use crate::adapter::{
     adapter_path,
@@ -200,6 +201,8 @@ pub use crate::tokenizer::{
 #[cfg(test)]
 mod tests {
     mod adapter;
+    mod bubble;
+    mod channel;
     mod chat;
     mod checkpoint;
     mod config;
@@ -212,19 +215,24 @@ mod tests {
     mod generate;
     #[cfg(feature = "cuda")]
     mod graph;
+    mod harness;
     mod load;
     mod model;
     mod needle;
     mod norms;
+    mod nu;
     #[cfg(feature = "attn-profile")]
     mod profile;
     mod questness {
         mod arbitrate;
+        mod config;
         mod contract;
         mod evaluate;
         mod turn;
     }
+    mod session;
     mod snapshot;
     mod speculate;
+    mod template;
     mod tokenizer;
 }

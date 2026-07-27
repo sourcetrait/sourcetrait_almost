@@ -42,13 +42,22 @@ index and policy - so that the replay drives the shipped code rather than a
 copy of it. That is the one case where a public entry is justified by a test
 harness.
 
-The block opens by re-exporting the eon core crate's `nu` module and its error
-pair. That is a compatibility surface rather than a convenience: the module
-used to live in this crate, and hundreds of call sites across bquest reach it
-as `lib::nu`. Re-exporting under the historical path is what made moving the
-implementation a zero-call-site change. `channel`, `harness` and `session` ride
-the same re-export for the same reason, and the last two are what a consumer
-implementing `ClientHarness` or opening a session log actually needs.
+SIX MODULES ARE `pub` RATHER THAN FACED, which is the one deliberate exception
+to the rule above. `bubble`, `channel`, `harness`, `nu`, `session` and
+`template` are pathed into by consumers - bquest alone reaches `lib::nu` from
+several hundred call sites - so their contents are the contract and a curated
+re-export would only be a second name for the same thing. Everything else stays
+private behind the face.
+
+They were a separate crate until they were folded in, and the honest reason
+that crate existed is worth keeping because the reasoning was the same one that
+had already been wrong once. It was there so an eon binary could speak the
+program's data language "without linking an era's engine" - a compile-weight
+claim, unmeasured, of exactly the kind that had produced the harness crate. It
+did not survive contact: every eon binary already depended on this library,
+directly or through the era bridge, so the property the split protected was
+held by nothing. And a binary carries only what it CALLS, so a consumer that
+never touches the engine was never carrying it whatever the manifest said.
 
 ## mod questness
 

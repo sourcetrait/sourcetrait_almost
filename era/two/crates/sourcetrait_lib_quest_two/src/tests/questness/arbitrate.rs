@@ -1,12 +1,12 @@
 //! Arbitration locks: the whole turn loop, against a stub harness.
-use sourcetrait_quest_core::channel::Aliasing;
-use sourcetrait_quest_core::harness::{
+use crate::channel::Aliasing;
+use crate::harness::{
     ClientHarness,
     HarnessRequest,
     HarnessResponse,
 };
-use sourcetrait_quest_core::nu;
-use sourcetrait_quest_core::QuestCoreResult;
+use crate::nu;
+use crate::LibQuestResult;
 use crate::questness::arbitrate::{
     Questness,
     Step,
@@ -36,7 +36,7 @@ impl World {
 }
 
 impl ClientHarness for World {
-    fn serve(&mut self, request: &HarnessRequest) -> QuestCoreResult<HarnessResponse> {
+    fn serve(&mut self, request: &HarnessRequest) -> LibQuestResult<HarnessResponse> {
         self.served.push(request.mode.clone());
         Ok(HarnessResponse::value(self.state.clone()))
     }
@@ -142,7 +142,7 @@ fn an_inside_mode_never_reaches_the_client() {
 fn a_failing_client_becomes_feedback_rather_than_an_error() {
     struct Refuses;
     impl ClientHarness for Refuses {
-        fn serve(&mut self, _request: &HarnessRequest) -> QuestCoreResult<HarnessResponse> {
+        fn serve(&mut self, _request: &HarnessRequest) -> LibQuestResult<HarnessResponse> {
             Ok(HarnessResponse::failed(
                 "harness::denied",
                 "interact is not built",
@@ -162,7 +162,7 @@ fn a_session_log_records_both_sides_of_the_turn() {
     let root = std::env::temp_dir().join("quest_arbitrate_log");
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("scratch");
-    let log = sourcetrait_quest_core::session::SessionLog::open(&root, &["space", "session"])
+    let log = crate::session::SessionLog::open(&root, &["space", "session"])
         .expect("opens");
 
     let mut questness = Questness::new(World::new("{cwd: '/tmp/foo'}"), Aliasing::Strict)

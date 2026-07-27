@@ -83,7 +83,7 @@ pub fn assemble(request: &Request) -> LibQuestResult<Assembled> {
         .iter()
         .map(|binding| (binding.pass.clone(), binding.value.clone()))
         .collect();
-    let prepared = sourcetrait_quest_core::config::prepare(
+    let prepared = questness::config::prepare(
         &request.config,
         &request.prompt,
         &bindings,
@@ -101,7 +101,7 @@ pub fn assemble(request: &Request) -> LibQuestResult<Assembled> {
 
     let mut text = String::new();
     if !blocks.is_empty() {
-        text.push_str(&sourcetrait_quest_core::channel::render_blocks(&blocks));
+        text.push_str(&channel::render_blocks(&blocks));
         text.push('\n');
     }
     text.push_str(&prepared.prompt);
@@ -121,13 +121,13 @@ pub fn assemble(request: &Request) -> LibQuestResult<Assembled> {
 pub fn interpret(
     evaluator: &QuestnessEvaluator,
     text: &str,
-    aliasing: sourcetrait_quest_core::channel::Aliasing,
+    aliasing: channel::Aliasing,
     insufficient: bool,
 ) -> LibQuestResult<Outcome> {
     if insufficient {
         return Ok(Outcome::Insufficient);
     }
-    let blocks = match sourcetrait_quest_core::channel::parse_blocks(text, aliasing) {
+    let blocks = match channel::parse_blocks(text, aliasing) {
         Ok(blocks) => blocks,
         Err(error) => {
             let mut envelope = Envelope::default();
@@ -239,7 +239,7 @@ fn answer(blocks: &[Block]) -> LibQuestResult<Outcome> {
     let rendered = match blocks.iter().find(|block| block.tag == Tag::Liquid) {
         Some(block) => {
             let bindings = liquid_bindings(blocks, value.as_ref());
-            match sourcetrait_quest_core::template::render(&block.content, &bindings) {
+            match template::render(&block.content, &bindings) {
                 Ok(text) => text,
                 Err(error) => {
                     envelope.error(
@@ -269,24 +269,24 @@ fn answer(blocks: &[Block]) -> LibQuestResult<Outcome> {
 fn typed_payload(
     header: &str,
     content: &str,
-) -> Result<(nu::Type, nu::Value), sourcetrait_quest_core::channel::Diagnostic> {
+) -> Result<(nu::Type, nu::Value), channel::Diagnostic> {
     let declared = nu::parse_typedef(header).map_err(|error| {
-        sourcetrait_quest_core::channel::Diagnostic::new(
+        channel::Diagnostic::new(
             "channel::typedef",
             Some(Tag::Output.name()),
             &error.to_string(),
         )
     })?;
-    let text = sourcetrait_quest_core::channel::unescape_content(content);
+    let text = channel::unescape_content(content);
     let value = nu::from_nuon_text(&text).map_err(|error| {
-        sourcetrait_quest_core::channel::Diagnostic::new(
+        channel::Diagnostic::new(
             "channel::nuon",
             Some(Tag::Output.name()),
             &error.to_string(),
         )
     })?;
     nu::conform(&value, &declared).map_err(|error| {
-        sourcetrait_quest_core::channel::Diagnostic::new(
+        channel::Diagnostic::new(
             "channel::conformance",
             Some(Tag::Output.name()),
             &error.to_string(),
@@ -300,7 +300,7 @@ fn decode_bindings(blocks: &[Block], envelope: &mut Envelope) -> Vec<Binding> {
     let mut bindings = Vec::new();
     for (pass, block) in bound_blocks(blocks) {
         let Some(block) = block else { continue };
-        let text = sourcetrait_quest_core::channel::unescape_content(&block.content);
+        let text = channel::unescape_content(&block.content);
         match nu::from_nuon_text(&text) {
             Ok(value) => bindings.push(Binding::new(&pass, value)),
             Err(error) => envelope.error("channel::nuon", Some(&pass), &error.to_string()),
@@ -342,7 +342,7 @@ fn nu_source(block: &Block) -> String {
 
 /// A NUON payload, escaped so no string's newline can forge a closer.
 fn nuon_payload(value: &nu::Value) -> LibQuestResult<String> {
-    Ok(sourcetrait_quest_core::channel::escape_content(&nu::to_nuon_text(value)?))
+    Ok(channel::escape_content(&nu::to_nuon_text(value)?))
 }
 
 /// Whether the visible config carries nothing worth sending.

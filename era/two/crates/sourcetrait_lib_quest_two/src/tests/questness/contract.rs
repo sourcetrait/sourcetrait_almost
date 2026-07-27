@@ -1,6 +1,6 @@
 //! Contract locks: reading a def's channels back out of its signature,
 //! and the three agreements checkable before anything executes.
-use sourcetrait_quest_core::channel::{
+use crate::channel::{
     Aliasing,
     parse_blocks,
 };

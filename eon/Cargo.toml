@@ -1,7 +1,6 @@
 [workspace]
 resolver = "3"
 members = [
-  "crates/sourcetrait_quest_core",
   "crates/sourcetrait_quest_bridge",
   "crates/sourcetrait_dquest",
   # Parked while the harness and daemon are built; camp returns as the
@@ -18,13 +17,6 @@ bitcode = { version = "0.6" }
 candle-core = { version = "0.11" }
 clap = { version = "4", features = ["derive"] }
 futures-util = { version = "0.3", features = ["sink"] }
-liquid = { version = "0.26" }
-nu-cmd-lang = { git = "https://github.com/nushell/nushell", tag = "0.114.1" }
-nu-command = { git = "https://github.com/nushell/nushell", tag = "0.114.1" }
-nu-engine = { git = "https://github.com/nushell/nushell", tag = "0.114.1" }
-nu-parser = { git = "https://github.com/nushell/nushell", tag = "0.114.1" }
-nu-protocol = { git = "https://github.com/nushell/nushell", tag = "0.114.1", default-features = false }
-nuon = { git = "https://github.com/nushell/nushell", tag = "0.114.1" }
 rand = { version = "0.9" }
 ratatui = { version = "0.29" }
 # Default features pull aws_lc_rs, and prefer-post-quantum pulls it again
@@ -43,7 +35,6 @@ snafu = { version = "0.9" }
 sourcetrait_cert_lib = { path = "../../sourcetrait_cert/crates/sourcetrait_cert_lib" }
 sourcetrait_quest_bridge = { path = "crates/sourcetrait_quest_bridge" }
 sourcetrait_lib_quest_two = { path = "../era/two/crates/sourcetrait_lib_quest_two" }
-sourcetrait_quest_core = { path = "crates/sourcetrait_quest_core" }
 tokenizers = { version = "0.23" }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }

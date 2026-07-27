@@ -18,7 +18,7 @@ pub struct PreparedTurn {
 }
 
 /// Split a config record into the Questness half and the visible half.
-pub fn split(config: &nu::Value) -> QuestCoreResult<(nu::Record, nu::Record)> {
+pub fn split(config: &nu::Value) -> LibQuestResult<(nu::Record, nu::Record)> {
     let nu::Value::Record { val, .. } = config else {
         snafu::whatever!(
             "a config is a record; got {}",
@@ -42,7 +42,7 @@ pub fn prepare(
     config: &nu::Value,
     prompt: &str,
     bindings: &[(String, nu::Value)],
-) -> QuestCoreResult<PreparedTurn> {
+) -> LibQuestResult<PreparedTurn> {
     let (questness, visible) = split(config)?;
     let templated = questness.get(LIQUID_KEY).is_some();
     let prompt = if templated {

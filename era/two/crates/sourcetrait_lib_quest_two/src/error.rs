@@ -15,8 +15,6 @@ pub enum LibQuestError {
     Candle { source: candle_core::Error },
     #[snafu(transparent)]
     Toml { source: toml::de::Error },
-    #[snafu(transparent)]
-    Core { source: QuestCoreError },
     #[snafu(whatever, display("{message}"))]
     Whatever {
         message: String,

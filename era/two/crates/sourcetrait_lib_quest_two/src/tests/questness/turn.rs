@@ -1,6 +1,6 @@
 //! Turn locks: what the model is shown, and what its emission means.
-use sourcetrait_quest_core::channel::Aliasing;
-use sourcetrait_quest_core::nu;
+use crate::channel::Aliasing;
+use crate::nu;
 use crate::questness::evaluate::QuestnessEvaluator;
 use crate::questness::turn::{
     Binding,

@@ -15,6 +15,7 @@ candle-transformers = { version = "0.11" }
 clap = { version = "4", features = ["derive"] }
 cudarc = { version = "0.19", features = ["cuda-version-from-build-system"] }
 half = { version = "2" }
+liquid = { version = "0.26" }
 nu-cmd-lang = { git = "https://github.com/nushell/nushell", tag = "0.114.1" }
 nu-command = { git = "https://github.com/nushell/nushell", tag = "0.114.1" }
 nu-engine = { git = "https://github.com/nushell/nushell", tag = "0.114.1" }
@@ -28,7 +29,6 @@ serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
 sha2 = { version = "0.10" }
 snafu = { version = "0.9" }
 sourcetrait_lib_quest_two = { path = "crates/sourcetrait_lib_quest_two" }
-sourcetrait_quest_core = { path = "../../eon/crates/sourcetrait_quest_core" }
 tokenizers = { version = "0.23" }
 toml = { version = "0.9" }
 unicode-normalization = { version = "0.1" }

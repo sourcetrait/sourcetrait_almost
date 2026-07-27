@@ -14,12 +14,12 @@ impl QuestNuValue {
     }
 
     /// The value's NUON spelling, which is what crosses the seam.
-    pub fn to_nuon(&self) -> QuestCoreResult<String> {
+    pub fn to_nuon(&self) -> LibQuestResult<String> {
         nu::to_nuon_text(&self.0)
     }
 
     /// Read one back from its NUON spelling.
-    pub fn from_nuon(text: &str) -> QuestCoreResult<Self> {
+    pub fn from_nuon(text: &str) -> LibQuestResult<Self> {
         Ok(Self(nu::from_nuon_text(text)?))
     }
 
@@ -129,5 +129,5 @@ impl HarnessResponse {
 /// Questness is generic over this rather than boxing it, because a given
 /// instance talks to one harness for its life.
 pub trait ClientHarness {
-    fn serve(&mut self, request: &HarnessRequest) -> QuestCoreResult<HarnessResponse>;
+    fn serve(&mut self, request: &HarnessRequest) -> LibQuestResult<HarnessResponse>;
 }

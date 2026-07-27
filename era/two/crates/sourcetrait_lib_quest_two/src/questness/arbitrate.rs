@@ -20,14 +20,14 @@ pub enum Step {
 pub struct Questness<H: harness::ClientHarness> {
     evaluator: QuestnessEvaluator,
     harness: H,
-    aliasing: sourcetrait_quest_core::channel::Aliasing,
+    aliasing: channel::Aliasing,
     log: Option<session::SessionLog>,
 }
 
 impl<H: harness::ClientHarness> Questness<H> {
     pub fn new(
         harness: H,
-        aliasing: sourcetrait_quest_core::channel::Aliasing,
+        aliasing: channel::Aliasing,
     ) -> LibQuestResult<Self> {
         Ok(Self {
             evaluator: QuestnessEvaluator::new()?,
@@ -101,7 +101,7 @@ impl<H: harness::ClientHarness> Questness<H> {
         };
         match response.as_block() {
             Ok(block) => Ok(Step::Continue(
-                sourcetrait_quest_core::channel::render_block(&block),
+                channel::render_block(&block),
             )),
             Err(diagnostic) => {
                 let mut envelope = Envelope::default();

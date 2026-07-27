@@ -176,7 +176,7 @@ pub fn render_blocks(blocks: &[Block]) -> String {
 }
 
 /// Parse a decoded turn into its blocks, line-anchored.
-pub fn parse_blocks(text: &str, aliasing: Aliasing) -> QuestCoreResult<Vec<Block>> {
+pub fn parse_blocks(text: &str, aliasing: Aliasing) -> LibQuestResult<Vec<Block>> {
     let lines: Vec<&str> = text.lines().collect();
     let mut blocks = Vec::new();
     let mut index = 0usize;

@@ -130,7 +130,7 @@ fn a_newline_in_a_response_cannot_forge_a_closer() {
 struct Echo;
 
 impl ClientHarness for Echo {
-    fn serve(&mut self, request: &HarnessRequest) -> crate::QuestCoreResult<HarnessResponse> {
+    fn serve(&mut self, request: &HarnessRequest) -> crate::LibQuestResult<HarnessResponse> {
         Ok(match request.binding("$args") {
             Some(carried) => HarnessResponse::value(carried.0.clone()),
             None => HarnessResponse::failed("harness::unbound", "nothing bound $args"),

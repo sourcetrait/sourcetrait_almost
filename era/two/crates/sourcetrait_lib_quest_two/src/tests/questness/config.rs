@@ -1,6 +1,6 @@
 //! Config locks: which keys reach the model, and which one switches
 //! the prompt from text into a template.
-use crate::config::{
+use crate::questness::config::{
     LIQUID_KEY,
     prepare,
     split,

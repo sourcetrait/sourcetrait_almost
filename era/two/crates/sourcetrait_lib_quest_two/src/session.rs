@@ -15,7 +15,7 @@ pub struct SessionLog {
 
 impl SessionLog {
     /// Open a log at `root` under the given segments, creating both.
-    pub fn open(root: &Path, segments: &[&str]) -> QuestCoreResult<Self> {
+    pub fn open(root: &Path, segments: &[&str]) -> LibQuestResult<Self> {
         for segment in segments {
             snafu::ensure_whatever!(
                 is_plain_segment(segment),
@@ -38,7 +38,7 @@ impl SessionLog {
     }
 
     /// Append one labelled record.
-    pub fn append(&self, label: &str, body: &str) -> QuestCoreResult<()> {
+    pub fn append(&self, label: &str, body: &str) -> LibQuestResult<()> {
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -48,7 +48,7 @@ impl SessionLog {
     }
 
     /// The whole log as text, for a caller reading its own session back.
-    pub fn read(&self) -> QuestCoreResult<String> {
+    pub fn read(&self) -> LibQuestResult<String> {
         match fs::read_to_string(&self.path) {
             Ok(text) => Ok(text),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(String::new()),
