@@ -1,23 +1,8 @@
 # container.rs
 
-## trait Engine
-
-SYNC AND NOT `Send`, and both halves are forced rather than chosen. The
-era-two model holds `Rc` handles in its graph cache and its prefill
-scratch, so it cannot cross a thread boundary at all, and one thread must
-own it for its life.
-
-That is why `spawn` takes a FACTORY rather than an engine. A `FnOnce`
-returning the engine is `Send` even when the engine is not, so the closure
-crosses to the thread and what it builds never leaves. Taking an engine by
-value would have made the trait unimplementable by the only engine that
-matters.
-
-The chunk callback returns a `bool`, which is also the CANCEL mechanism
-rather than a courtesy. A false return means nobody is listening any more,
-so an implementation stops and reports what it managed - and closing the
-receiving end is how a session cancels a turn that is already running,
-without a second channel or a shared flag.
+The trait this file is built around is the API's rather than ours, so why
+it is shaped as it is lives in that crate's mirror. What is recorded here
+is what consuming it costs.
 
 ## enum Work
 
@@ -33,12 +18,23 @@ what they share is the way in rather than the thing itself.
 
 ## fn spawn
 
+IT TAKES A FACTORY RATHER THAN AN ENGINE, and that is forced by the era-two
+model holding `Rc` handles: it is not `Send` and cannot cross a thread
+boundary, while a `FnOnce` returning it IS `Send`. The closure crosses, the
+engine is built here, and it never leaves.
+
 THE SERIALISATION POINT IS THE LOOP, not something layered over it. The
 thread takes one unit, serves it to completion, then takes the next - so
 one generation runs at a time because that is the only shape the loop has,
 and no caller has to arrange it. 03_Platform's one-resident-model rule and
 roughly fourteen gigabytes of weights forbid a second copy regardless, so
 there is nothing to parallelise even if the loop allowed it.
+
+The failed-load arm is a SECOND loop rather than an early return, and that
+is the daemon's staying-up property expressed at the only place that can
+express it. The thread has already been spawned and the handle already
+returned by the time a load fails, so refusing each unit with the reason is
+what a caller meets instead of a channel that closed.
 
 ## fn dispatch
 

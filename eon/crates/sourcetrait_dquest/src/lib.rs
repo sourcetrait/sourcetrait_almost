@@ -23,9 +23,8 @@ pub(crate) use std::{
 
 pub(crate) use sourcetrait_cert_lib as srcert;
 pub(crate) use sourcetrait_quest_bridge as bridge;
-/// The one place an era is named. Everything else is generic over the
-/// API's `Era` trait, so another era is this line.
-pub(crate) use sourcetrait_quest_bridge_two as era;
+/// The one place an era is named; everything else says `EraBridge`.
+pub(crate) use sourcetrait_quest_bridge_two::BridgeTwo as EraBridge;
 
 /// In scope so `next`, `send` and `close` dispatch on framed halves.
 pub(crate) use futures_util::{
