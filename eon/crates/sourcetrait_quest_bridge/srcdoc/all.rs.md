@@ -72,15 +72,30 @@ is about to open before paying for the model. Its answer and
 the other is what actually loaded - and a configuration pointing at
 another checkpoint is exactly that case.
 
+`engine` TAKES THE OPTIONS because the factory is the only place they can
+be obeyed. They decide what gets loaded - which profile root, which
+config and settings tokens - and a consumer holding one engine for the
+service's life has finished loading before any session opens. Offering
+them at `open` instead would be offering a choice already made.
+
+That is also what lets a consumer read its OWN profile root rather than
+the era suite's shared default, so one consumer choosing a posture cannot
+silently make it everybody's.
+
 ## struct EraInfo
 
 ## struct ChatOptions
 
-The daemon does not consult these, and that is a property of the singleton
-rather than an unfinished path. One container owns one model for the
-service's life, so a session cannot select a checkpoint or a settings
+`Engine::open` does not consult these, and that is a property of the
+singleton rather than an unfinished path. One container owns one model for
+the service's life, so a session cannot select a checkpoint or a settings
 profile; what it can do is learn which one it got, which is what `EraInfo`
 answers.
+
+THE SAME TYPE IS CONSULTED AT BUILD TIME, through `Era::engine`, where the
+profile fields decide what loads. So they are not inert - they are obeyed
+once, for the process, by whoever builds the engine, and a session
+carrying them afterwards carries a copy of a decision already taken.
 
 A decode budget is the field that reads like it should still work and does
 not. It could only be stored on the shared engine, where one session would

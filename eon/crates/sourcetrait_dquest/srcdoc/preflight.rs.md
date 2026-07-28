@@ -38,6 +38,38 @@ for a real reason: without key material the daemon cannot serve at all,
 while without a cache home it can serve perfectly and merely says nothing
 about it afterwards.
 
+## fn config_home
+
+Wrapped rather than called at each site, because two callers need it now
+- the startup path and the engine options - and each would otherwise
+carry its own copy of the error context. The certificate library is what
+resolves it, which keeps the daemon and its certificates agreeing about
+where configuration lives rather than each deciding separately.
+
+## fn profile_root
+
+THIS DAEMON DOES NOT READ THE QUEST SUITE'S PROFILES, and the reason is
+blast radius rather than tidiness. The suite's `default` profile is what
+every consumer gets by saying nothing, and the trainer's staged curve is
+read against exactly that: each of the five per-stage config profiles
+spells its control "no -c at all", meaning the embedded defaults with no
+adapter. Writing this daemon's posture there would make that sentence
+false, and a later bench run would measure the adapter while reading as
+the base - with nothing in the output to say so.
+
+Its own root costs one directory and cannot reach anybody else's
+readings, which is the whole of the argument for it.
+
+It takes the home as an argument rather than resolving one, for the same
+reason `named_home` does: a lock drives it against a scratch root
+without mutating process environment.
+
+The root is a directory the daemon INVENTS under a home the platform
+defines, so its absence is not an error. `load_from_dir` falls back to
+the embedded defaults exactly as it does when nothing is configured at
+all, which means the plumbing changes nothing until a profile is
+actually written there.
+
 ## fn ensure_profile
 
 Called on every start rather than guarded behind `profile_exists`, and

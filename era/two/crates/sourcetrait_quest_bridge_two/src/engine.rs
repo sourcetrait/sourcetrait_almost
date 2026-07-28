@@ -26,8 +26,8 @@ impl bridge::all::Era for BridgeTwo {
         }
     }
 
-    fn engine() -> Result<Self::Engine, String> {
-        TwoEngine::load()
+    fn engine(options: &bridge::all::ChatOptions) -> Result<Self::Engine, String> {
+        TwoEngine::load(options)
     }
 
     fn questness() -> Result<Self::Questness, String> {
@@ -142,15 +142,21 @@ pub struct TwoEngine {
 }
 
 impl TwoEngine {
-    /// Load from the standing default profile.
+    /// Load the posture the consumer's options name.
     ///
     /// Called through `Era::engine` on the thread that will own the
-    /// result, which is what makes a not-`Send` model legal here.
-    fn load() -> Result<Self, String> {
+    /// result, which is what makes a not-`Send` model legal here. A
+    /// consumer naming its own `dir` reads profiles from its own root,
+    /// so it picks a posture - which adapter, above all - without
+    /// writing into the suite's shared default and redefining what an
+    /// un-tokened run means for every other consumer.
+    fn load(options: &bridge::all::ChatOptions) -> Result<Self, String> {
         let config =
-            lib::LibConfig::load_from_dir(None::<&str>, None::<&str>).map_err(message_of)?;
+            lib::LibConfig::load_from_dir(options.dir.as_ref(), options.config.as_ref())
+                .map_err(message_of)?;
         let mut settings =
-            lib::LibSettings::load_from_dir(None::<&str>, None::<&str>).map_err(message_of)?;
+            lib::LibSettings::load_from_dir(options.dir.as_ref(), options.settings.as_ref())
+                .map_err(message_of)?;
         // Captured graphs bake buffer addresses, and a daemon restores
         // and clears across turns for the life of the process.
         settings.graph = false;

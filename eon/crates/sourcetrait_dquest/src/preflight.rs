@@ -38,6 +38,26 @@ pub(crate) fn session_log_root() -> Option<PathBuf> {
     )
 }
 
+/// The configuration home, as the certificate library resolves it.
+pub(crate) fn config_home() -> DquestResult<PathBuf> {
+    srcert::config_home().map_err(|source| DquestError::Cert {
+        context: String::from("resolving the configuration home"),
+        source: Box::new(source),
+    })
+}
+
+/// This daemon's own profile root, which is NOT the quest suite's.
+///
+/// dquest picks the posture it loads - which adapter, above all - and
+/// the suite's `default` profile is shared with every other consumer, so
+/// writing a posture there would silently redefine what an un-tokened
+/// run means for all of them, the adapter-off control the trainer's
+/// staged curve is read against included. Its own root costs one
+/// directory and cannot reach anybody else's readings.
+pub(crate) fn profile_root(config_home: &Path) -> PathBuf {
+    config_home.join("sourcetrait").join("dquest")
+}
+
 /// Place the shipped profile when the operator has none.
 pub(crate) fn ensure_profile(config_home: &Path) -> DquestResult<srcert::ProfileInstall> {
     srcert::install_profile(config_home, PROFILE, PROFILE_TEXT).map_err(|source| {

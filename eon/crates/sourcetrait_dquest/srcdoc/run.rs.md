@@ -81,6 +81,20 @@ Verified against the real binary with a scratch configuration home, so
 the engine could not load: it bound, stayed up past a timeout, and said
 nothing.
 
+THE POSTURE IS CHOSEN HERE AND CARRIED INTO THE FACTORY. The options
+name this daemon's own profile root, so what the engine loads is a
+dquest decision rather than whatever the suite's shared default happens
+to say. They are built before the runtime and moved into the closure,
+which stays `Send` because the options are - the not-`Send` engine is
+still constructed on the thread that will own it.
+
+THEY ARRIVE AT THE FACTORY RATHER THAN AT `open`, because that is the
+only place they can be obeyed. The same three fields ride `OpenRequest`
+and `Engine::open` documents them as unconsulted: by the time a session
+opens, one container has already loaded one model for the service's
+life, so a session asking for a different checkpoint or settings profile
+is asking for something there is no longer any way to give it.
+
 ## fn certificate_owed
 
 The only thing this binary ever says to a user, and it is composed here

@@ -50,7 +50,13 @@ pub trait Era {
     fn info() -> EraInfo;
 
     /// Build the engine. Called on the thread that will own it.
-    fn engine() -> Result<Self::Engine, String>;
+    ///
+    /// The options decide WHAT LOADS, which is why they arrive here
+    /// rather than at `open`. A consumer holding one engine for the
+    /// service's life has already built it by the time a session opens,
+    /// so the same fields carried on `OpenRequest` cannot be honoured
+    /// there and `Engine::open` documents them as unconsulted.
+    fn engine(options: &ChatOptions) -> Result<Self::Engine, String>;
 
     /// Build a Questness. One per Thinkspace, carrying that space's
     /// conversation, so a consumer builds one per space rather than
@@ -133,7 +139,7 @@ pub struct EraInfo {
     pub model: String,
 }
 
-/// Session-open options: the suite's profile tokens and a budget.
+/// Profile tokens and a budget: what a consumer asks an era to load.
 #[derive(
     Debug,
     Clone,

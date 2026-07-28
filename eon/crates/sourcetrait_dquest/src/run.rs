@@ -59,13 +59,24 @@ fn serve_forever() -> DquestResult<()> {
         .build()
         .map_err(|source| DquestError::Runtime { source })?;
 
+    let engine_options = bridge::all::ChatOptions {
+        dir: Some(
+            preflight::profile_root(&preflight::config_home()?)
+                .display()
+                .to_string(),
+        ),
+        ..bridge::all::ChatOptions::default()
+    };
+
     runtime.block_on(async move {
         let listener = serve::bind(bridge::LOOPBACK_ADDRESS).await?;
         // The engine loads on the container's own thread; a failure
         // there leaves the daemon up and refusing, rather than exiting
         // before any client can be told why. The factory comes from the
         // API's `Era` trait, so this is the only line that names one.
-        let container = ContainerHandle::spawn(<EraBridge as bridge::all::Era>::engine);
+        let container = ContainerHandle::spawn(move || {
+            <EraBridge as bridge::all::Era>::engine(&engine_options)
+        });
         let manager = manager::SessionManager::for_user(
             &username,
             preflight::session_log_root(),
@@ -78,10 +89,7 @@ fn serve_forever() -> DquestResult<()> {
 
 /// Satisfy the certificate preconditions, then serve.
 fn start() -> DquestResult<Started> {
-    let config_home = srcert::config_home().map_err(|source| DquestError::Cert {
-        context: "resolving the configuration home".to_string(),
-        source: Box::new(source),
-    })?;
+    let config_home = preflight::config_home()?;
     let secret_data = preflight::secret_data_home()?;
 
     let profile = preflight::ensure_profile(&config_home)?;

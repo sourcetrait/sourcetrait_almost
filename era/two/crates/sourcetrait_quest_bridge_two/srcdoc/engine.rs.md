@@ -32,6 +32,13 @@ on the thread that will own it, and it never leaves. Handing over a loaded
 engine would have made this trait unimplementable by the only engine that
 matters.
 
+The options ride the FACTORY rather than the session, which is what makes
+a consumer's own posture reachable at all. A consumer naming its own
+`dir` reads profiles from its own root, so it decides which adapter and
+which settings get loaded without writing into the suite's shared
+default - where the same choice would silently reach every other consumer
+of that default rather than only the one that made it.
+
 ## struct TwoEngine
 
 Holds the trail as well as the model, because the era library's
@@ -60,6 +67,18 @@ arbitrary: the token map is verified before the weights are loaded, so a
 checkpoint whose vocabulary does not match fails in a second rather than
 after fourteen gigabytes of mmap.
 
+THE PROFILE ROOT COMES FROM THE CALLER rather than being resolved here.
+Passing nothing reads the suite's own root, which is what every consumer
+got before and still gets by saying nothing; naming a root reads that one
+instead.
+
+The trap either way is what an ABSENT profile means. A missing
+`config/default/lib.toml` falls through to the embedded defaults, and
+those carry no adapter at all - so a consumer that has not written a
+profile is running the plain base, bit-exact, and nothing anywhere in the
+load path says so. It cost a daemon run measured against the base while
+everyone believed it was on the supervised adapter.
+
 ## impl Engine for TwoEngine
 
 ### fn open
@@ -69,6 +88,10 @@ than being an oversight. One container owns one model for the service's
 life, so a session cannot ask for a different checkpoint or a different
 settings profile. What it can do is learn which one it got, which is what
 the answer carries.
+
+The same TYPE is consulted at build time, through `Era::engine`, which is
+the only place its profile fields can be obeyed. What reaches here is a
+session's own copy of them, arriving after the model is already loaded.
 
 The consequence worth naming: per-session generation options are not
 expressible today. A sample length arriving in `ChatOptions` would have to
