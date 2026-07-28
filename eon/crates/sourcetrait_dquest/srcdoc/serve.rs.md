@@ -65,3 +65,27 @@ the log testable without waiting on anything: a client that has read the
 turn response has already caused the turn, the answer and the report to
 land. The answer is also recorded on the path where the peer vanished
 mid-turn, because a partial answer is the interesting one to have kept.
+
+THE RECORDS ARE ROUTED BY GRAIN, and the routing is the readable half of
+the split. Transport takes the connection conversation, turn takes what a
+turn DID in a line or two, and emission takes the bulky pair - what the
+model was fed and what it wrote. A think leaves a marker on the turn log
+and its text on the emission log rather than one record on both, which is
+what keeps the turn file a readable outline of a multi-generation turn
+instead of a wall of thought text.
+
+THE CHUNK SINK IS THE ONE RECORD WRITTEN WHILE THE MODEL WORKS. Every
+other record here lands only once a generation has ended, so before it
+existed a turn running to the 32,768 budget was indistinguishable from a
+hung one for as long as it mattered - the log was correct, complete, and
+silent. It is opened per generation and held, because it is written per
+token rather than per turn.
+
+That does not make the reassembly above redundant. The sink carries the
+stream as it arrives, tokenizer boundaries and all; the emission record
+carries the answer someone read. They answer different questions and the
+cost of both is one copy.
+
+It is also the reason the sink writes VERBATIM. Framing each piece as a
+labelled record would make the file complete and useless, because the
+whole point is that a `tail -f` reads as the answer forming.

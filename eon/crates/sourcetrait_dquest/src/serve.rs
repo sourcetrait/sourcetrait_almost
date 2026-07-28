@@ -65,9 +65,14 @@ pub(crate) async fn serve(
 /// A logging failure is dropped rather than reported, which is the same
 /// rule the Questness side holds to: the log is a record of the work and
 /// never part of it, so nothing a turn does depends on it landing.
-fn record(log: &Option<log::SessionLog>, label: &str, body: &str) {
+fn record(
+    log: &Option<log::SessionLog>,
+    file: log::LogFile,
+    label: &str,
+    body: &str,
+) {
     if let Some(log) = log {
-        let _ = log.append(label, body);
+        let _ = log.append(file, label, body);
     }
 }
 
@@ -87,11 +92,16 @@ pub(crate) async fn session(
             bridge::ClientToServer::Open(request) => {
                 let answer = match container.open(request.options).await {
                     Ok(info) => {
-                        record(&log, "open", &format!("{} {}", info.era, info.model));
+                        record(
+                            &log,
+                            log::LogFile::Transport,
+                            "open",
+                            &format!("{} {}", info.era, info.model),
+                        );
                         bridge::ServerToClient::Open(bridge::OpenResponse { info })
                     }
                     Err(message) => {
-                        record(&log, "open-refused", &message);
+                        record(&log, log::LogFile::Transport, "open-refused", &message);
                         bridge::ServerToClient::OpenRefused(
                             bridge::OpenRefusedResponse { message },
                         )
@@ -112,11 +122,11 @@ pub(crate) async fn session(
             bridge::ClientToServer::Reset(_) => {
                 let answer = match container.reset().await {
                     Ok(()) => {
-                        record(&log, "reset", "");
+                        record(&log, log::LogFile::Transport, "reset", "");
                         bridge::ServerToClient::Reset(bridge::ResetResponse)
                     }
                     Err(message) => {
-                        record(&log, "fault", &message);
+                        record(&log, log::LogFile::Transport, "fault", &message);
                         bridge::ServerToClient::Notice(bridge::ServerNotice::Fault(
                             bridge::ServerFaultNotice { message },
                         ))
@@ -125,7 +135,7 @@ pub(crate) async fn session(
                 writer.send(answer).await.is_ok()
             }
             bridge::ClientToServer::Close => {
-                record(&log, "close", "");
+                record(&log, log::LogFile::Transport, "close", "");
                 let _ = writer.send(bridge::ServerToClient::Close).await;
                 false
             }
@@ -163,7 +173,7 @@ async fn turn(
         Ok(text) => text,
         Err(message) => return failed(writer, log, message).await,
     };
-    record(log, "assembled", &feed);
+    record(log, log::LogFile::Emission, "assembled", &feed);
 
     loop {
         let (emission, report) = match generate(reader, writer, container, feed, log).await {
@@ -176,8 +186,13 @@ async fn turn(
             Err(message) => return failed(writer, log, message).await,
         };
         let answer = match step {
+            // A think leaves a MARKER on the turn log and its text on the
+            // emission log, so the turn file stays a readable outline of
+            // what happened while the thought itself sits with the other
+            // model-facing text.
             bridge::all::Step::Continue(next) => {
-                record(log, "think", &next);
+                record(log, log::LogFile::Turn, "think", "the turn generates again");
+                record(log, log::LogFile::Emission, "thought", &next);
                 feed = next;
                 continue;
             }
@@ -214,7 +229,7 @@ async fn turn(
                 return failed(writer, log, message).await;
             }
         };
-        record(log, "answered", &summary(&answer));
+        record(log, log::LogFile::Turn, "answered", &summary(&answer));
         return writer
             .send(bridge::ServerToClient::Turn(answer))
             .await
@@ -246,7 +261,13 @@ async fn generate(
     text: String,
     log: &Option<log::SessionLog>,
 ) -> Generated {
-    record(log, "generate", &text);
+    record(log, log::LogFile::Emission, "generate", &text);
+    // Held open for the whole generation and written per chunk. This is
+    // the ONLY record that appears while the model is still working -
+    // every other one here is written after the generation has already
+    // ended, which is what made a long turn indistinguishable from a
+    // hung one.
+    let mut streaming = log.as_ref().and_then(|log| log.chunks().ok());
     let (chunks, mut arriving) = r::tokio::channel(CHUNK_CAPACITY);
     let running = container.turn(text, chunks);
     tokio::pin!(running);
@@ -265,6 +286,9 @@ async fn generate(
             chunk = arriving.recv(), if !draining => match chunk {
                 Some(chunk) => {
                     answer.push_str(&chunk.text);
+                    if let Some(sink) = streaming.as_mut() {
+                        sink.write(&chunk.text);
+                    }
                     alive = writer.send(bridge::ServerToClient::TurnChunk(chunk)).await.is_ok();
                 }
                 None => draining = true,
@@ -313,13 +337,16 @@ async fn generate(
 
     // Logged whatever the ending was, including a peer that vanished
     // mid-turn: a partial emission is the interesting one to have kept.
-    record(log, "emission", &answer);
+    if let Some(sink) = streaming.as_mut() {
+        sink.end();
+    }
+    record(log, log::LogFile::Emission, "emission", &answer);
     if !alive {
         return Generated::Gone;
     }
     match report {
         Some(Ok(report)) => {
-            record(log, "report", &accounting(&report));
+            record(log, log::LogFile::Turn, "report", &accounting(&report));
             Generated::Emitted {
                 emission: answer,
                 report,
@@ -336,7 +363,7 @@ async fn failed(
     log: &Option<log::SessionLog>,
     message: String,
 ) -> bool {
-    record(log, "turn-failed", &message);
+    record(log, log::LogFile::Turn, "turn-failed", &message);
     writer
         .send(bridge::ServerToClient::TurnFailed(
             bridge::TurnFailedResponse { message },

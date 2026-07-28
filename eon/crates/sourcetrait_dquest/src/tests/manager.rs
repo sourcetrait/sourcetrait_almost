@@ -100,16 +100,69 @@ fn a_session_log_is_addressed_by_space_then_session() {
     let log = manager.log(&ticket).expect("a log opens under the root");
 
     assert_eq!(
-        log.path(),
+        log.path(crate::log::LogFile::Turn),
         scratch
             .root
             .join(manager.thinkspace().as_str())
             .join(ticket.nom().as_str())
-            .join(crate::log::LOG_FILE)
+            .join(crate::log::LogFile::Turn.file_name())
     );
 
-    log.append("turn", "say hello").expect("appends");
-    assert!(log.read().expect("reads back").contains("say hello"));
+    log.append(crate::log::LogFile::Turn, "turn", "say hello")
+        .expect("appends");
+    assert!(
+        log.read(crate::log::LogFile::Turn)
+            .expect("reads back")
+            .contains("say hello")
+    );
+}
+
+/// The split is the whole point: a record on one grain never lands on
+/// another, so a bulky emission cannot drown the turn outline beside it.
+#[test]
+fn each_grain_is_its_own_file() {
+    let scratch = crate::tests::material::Scratch::make("manager_grains");
+    let manager = SessionManager::for_user("box", Some(scratch.root.clone()), StubQuestness);
+    let ticket = manager.admit();
+    let log = manager.log(&ticket).expect("a log opens under the root");
+
+    log.append(crate::log::LogFile::Transport, "open", "two")
+        .expect("appends");
+    log.append(crate::log::LogFile::Emission, "emission", "a long answer")
+        .expect("appends");
+
+    let transport = log.read(crate::log::LogFile::Transport).expect("reads");
+    let emission = log.read(crate::log::LogFile::Emission).expect("reads");
+    assert!(transport.contains("two"), "the transport record landed");
+    assert!(
+        !transport.contains("a long answer"),
+        "the emission did not land beside it"
+    );
+    assert!(emission.contains("a long answer"), "the emission landed");
+    assert!(
+        !emission.contains("== open =="),
+        "the transport record did not land beside it"
+    );
+}
+
+/// The chunk sink writes VERBATIM and unframed, so a tail on it reads as
+/// the answer forming rather than as a record format.
+#[test]
+fn the_chunk_sink_writes_the_stream_unframed() {
+    let scratch = crate::tests::material::Scratch::make("manager_chunks");
+    let manager = SessionManager::for_user("box", Some(scratch.root.clone()), StubQuestness);
+    let ticket = manager.admit();
+    let log = manager.log(&ticket).expect("a log opens under the root");
+
+    let mut sink = log.chunks().expect("the sink opens");
+    sink.write("Hello, ");
+    sink.write("world");
+    sink.end();
+
+    assert_eq!(
+        log.read(crate::log::LogFile::Chunks).expect("reads"),
+        "Hello, world\n"
+    );
 }
 
 /// No root means no log rather than a failure, which is what keeps a

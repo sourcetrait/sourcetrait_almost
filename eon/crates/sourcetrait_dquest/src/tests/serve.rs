@@ -489,15 +489,40 @@ async fn a_session_writes_its_turn_to_the_log() {
         .collect();
     assert_eq!(sessions.len(), 1, "one connection, one session directory");
 
-    let text = std::fs::read_to_string(sessions[0].join(crate::log::LOG_FILE))
-        .expect("the log was written");
-    assert!(text.contains("== open =="), "{text}");
-    assert!(text.contains("say hello"), "the prompt is recorded: {text}");
+    let session = &sessions[0];
+    let read_log = |file: crate::log::LogFile| {
+        std::fs::read_to_string(session.join(file.file_name()))
+            .unwrap_or_else(|_| panic!("{} was written", file.file_name()))
+    };
+    let transport = read_log(crate::log::LogFile::Transport);
+    let emission = read_log(crate::log::LogFile::Emission);
+    let turn = read_log(crate::log::LogFile::Turn);
+    let chunks = read_log(crate::log::LogFile::Chunks);
+
+    assert!(transport.contains("== open =="), "{transport}");
     assert!(
-        text.contains("Hello there"),
-        "the streamed answer is reassembled whole: {text}"
+        emission.contains("say hello"),
+        "the prompt is recorded beside the emission: {emission}"
     );
-    assert!(text.contains("StopToken"), "the accounting is recorded: {text}");
+    assert!(
+        emission.contains("Hello there"),
+        "the streamed answer is reassembled whole: {emission}"
+    );
+    assert!(
+        turn.contains("StopToken"),
+        "the accounting is recorded on the turn: {turn}"
+    );
+    // The one record written WHILE the model is working. Everything else
+    // here lands only once the generation has ended, which is what made a
+    // long turn indistinguishable from a hung one.
+    assert!(
+        chunks.contains("Hello there"),
+        "the live stream was written as it arrived: {chunks}"
+    );
+    assert!(
+        !turn.contains("Hello there"),
+        "the emission did not drown the turn outline: {turn}"
+    );
 
     handle.close(std::time::Duration::from_secs(5)).await;
     server.abort();
