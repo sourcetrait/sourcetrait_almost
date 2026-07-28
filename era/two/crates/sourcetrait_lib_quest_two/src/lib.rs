@@ -39,6 +39,7 @@ pub mod railroad;
 pub mod session;
 pub(crate) mod snapshot;
 pub(crate) mod speculate;
+pub mod syllabus;
 pub mod template;
 pub(crate) mod tokenizer;
 
@@ -243,6 +244,7 @@ mod tests {
     mod session;
     mod snapshot;
     mod speculate;
+    mod syllabus;
     mod template;
     mod tokenizer;
 }
