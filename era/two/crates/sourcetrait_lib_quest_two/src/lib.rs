@@ -35,6 +35,7 @@ pub(crate) mod questness {
     pub mod shape;
     pub mod turn;
 }
+pub mod railroad;
 pub mod session;
 pub(crate) mod snapshot;
 pub(crate) mod speculate;
@@ -86,6 +87,9 @@ pub(crate) mod r {
     #[cfg(feature = "flash-attn")]
     pub(crate) mod flash {
         pub(crate) use candle_flash_attn::flash_attn;
+    }
+    pub(crate) mod hash {
+        pub(crate) use xxhash_rust::xxh3::xxh3_64;
     }
     pub(crate) mod nu {
         pub(crate) use nu_parser::parse;
@@ -234,6 +238,7 @@ mod tests {
         mod shape;
         mod turn;
     }
+    mod railroad;
     mod session;
     mod snapshot;
     mod speculate;

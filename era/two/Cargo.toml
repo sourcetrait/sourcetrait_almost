@@ -35,4 +35,5 @@ tokenizers = { version = "0.23" }
 toml = { version = "0.9" }
 unicode-normalization = { version = "0.1" }
 unicode-properties = { version = "0.1" }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 zstd = { version = "0.13" }

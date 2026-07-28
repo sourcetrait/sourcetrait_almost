@@ -7956,7 +7956,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_lib_quest_two"
-version = "0.0.0-54"
+version = "0.0.0-55"
 dependencies = [
  "candle-core 0.11.0",
  "candle-flash-attn",
@@ -7978,6 +7978,7 @@ dependencies = [
  "sourcetrait_quest_bridge",
  "tokenizers 0.23.1",
  "toml 0.9.12+spec-1.1.0",
+ "xxhash-rust",
 ]
 
 [[package]]
