@@ -192,6 +192,48 @@ fn a_contract_whose_template_is_gone_is_refused() {
 }
 
 #[test]
+fn an_emitted_set_lands_in_a_railroad_as_its_first_rev() {
+    let scratch = Scratch::new("emit");
+    one_case_method(&scratch);
+    let dpo = scratch.method("dpo", &["formatting"], "relax_one_constraint");
+    write(dpo.join("tmpl").join("relax.liquid"), "Relax {{ train.proc.path }}.");
+    write(dpo.join("tmpl").join("relax.nutype"), CONTRACT);
+    write(
+        dpo.join("set").join("mounts.nuon"),
+        "{\n  proc: {\n    path: /proc/mounts\n  }\n}",
+    );
+
+    let yard = scratch.root.join("yard");
+    let road = crate::railroad::Railroad::lay_in(&yard).expect("lays");
+    let emitted = crate::syllabus::emit(&scratch.root, &road).expect("emits");
+
+    assert_eq!(emitted.rev, 1, "the generated set is the first change");
+    assert_eq!(emitted.methods, 2);
+    assert_eq!(emitted.cases, 2);
+
+    let provenance = crate::nu::load_value(&road.dir().join("provenance.nuon"))
+        .expect("provenance reads back");
+    let version = provenance
+        .get_data_by_key("training_version")
+        .expect("carries the scheme version");
+    assert_eq!(
+        version.as_str().expect("a string"),
+        crate::consts::TRAINING_VERSION,
+        "a set names the scheme version its binary was built from"
+    );
+
+    for stage in ["sft", "dpo"] {
+        let path = road.dir().join(format!("{stage}.nuon"));
+        assert!(path.is_file(), "{stage} carries cases, so it carries a file");
+        assert!(crate::nu::load_value(&path).is_ok(), "{stage} reads back");
+    }
+    assert!(
+        !road.dir().join("rlvr.nuon").exists(),
+        "a stage with no cases writes no file"
+    );
+}
+
+#[test]
 fn a_method_with_no_cases_is_refused() {
     let scratch = Scratch::new("caseless");
     let dir = scratch.method("rlvr", &["verifying"], "value_equals");

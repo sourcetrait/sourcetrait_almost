@@ -154,6 +154,72 @@ pub fn render(root: &Path, method: &MethodPath) -> LibQuestResult<Vec<RenderedCa
     Ok(rendered)
 }
 
+/// What one emitted set amounted to, and the REV it landed as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Emitted {
+    pub rev: usize,
+    pub methods: usize,
+    pub cases: usize,
+}
+
+/// Render every method under a root into a railroad, and commit it.
+///
+/// One file per stage that has cases, plus the provenance beside them,
+/// which is the treatment the document packer gives its own inputs.
+pub fn emit(root: &Path, railroad: &railroad::Railroad) -> LibQuestResult<Emitted> {
+    let span = nu::Span::unknown();
+    let found = methods(root)?;
+    snafu::ensure_whatever!(
+        !found.is_empty(),
+        "{} carries no method, so there is nothing to generate",
+        root.display()
+    );
+
+    let mut drawn = Vec::with_capacity(found.len());
+    let mut total = 0usize;
+    for stage in STAGES {
+        let mut cases = Vec::new();
+        for method in found.iter().filter(|method| method.stage == stage) {
+            let rendered = render(root, method)?;
+            drawn.push(nu::Value::record(
+                nu::record! {
+                    "stage" => nu::Value::string(method.stage.clone(), span),
+                    "syllabus" => nu::Value::string(method.syllabus_path(), span),
+                    "method" => nu::Value::string(method.method.clone(), span),
+                    "cases" => nu::Value::int(rendered.len() as i64, span),
+                },
+                span,
+            ));
+            cases.extend(rendered.iter().map(RenderedCase::to_value));
+        }
+        if cases.is_empty() {
+            continue;
+        }
+        total += cases.len();
+        nu::save_value(
+            &railroad.dir().join(format!("{stage}.{CASE_EXT}")),
+            &nu::Value::list(cases, span),
+        )?;
+    }
+
+    nu::save_value(
+        &railroad.dir().join(format!("provenance.{CASE_EXT}")),
+        &nu::Value::record(
+            nu::record! {
+                "training_version" => nu::Value::string(consts::TRAINING_VERSION, span),
+                "drawn" => nu::Value::list(drawn.clone(), span),
+            },
+            span,
+        ),
+    )?;
+
+    Ok(Emitted {
+        rev: railroad.commit()?,
+        methods: drawn.len(),
+        cases: total,
+    })
+}
+
 /// Descend a stage, collecting the directories that hold templates.
 fn walk(
     dir: &Path,

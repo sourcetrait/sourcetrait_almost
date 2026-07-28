@@ -95,6 +95,36 @@ An orphaned contract is refused alongside an uncontracted template, and
 that pairing is the point: a rename that landed on only one of the two
 leaves exactly one of these behind, and catching either catches the rename.
 
+## struct Emitted
+
+Scalars rather than a per-stage breakdown, because the breakdown is in the
+artifact the call just wrote and a caller reading it back has better
+information than a summary could carry.
+
+## fn emit
+
+Writing and committing are one act rather than two. The design's flow is
+that a set going into a railroad is that railroad's first change, so a
+caller that could write without committing could leave a set standing
+uncommitted, which is precisely the state the railroad exists to make
+impossible.
+
+One file per stage, and a stage with no cases writes nothing rather than
+an empty file. An empty artifact and an absent one mean different things
+to whoever reads the railroad later - the first says a stage was generated
+and came out empty, the second says it was not generated.
+
+Provenance records what the design named and stops there. The syllabus and
+method paths drawn from, their case counts, and the scheme version; the
+fills ride the cases themselves, so recording them again would duplicate
+the larger half of the artifact. There is no seed, because rendering is
+deterministic and inventing a field to look complete would be worse than
+its absence.
+
+The source root is deliberately not recorded. It would be an absolute path
+on one machine baked into an artifact meant to be readable anywhere, and
+the method paths already say what was drawn from.
+
 ## fn walk
 
 ## fn sorted_dirs
