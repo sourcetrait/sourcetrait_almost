@@ -104,22 +104,37 @@ information than a summary could carry.
 ## fn emit
 
 Writing and committing are one act rather than two. The design's flow is
-that a set going into a railroad is that railroad's first change, so a
-caller that could write without committing could leave a set standing
-uncommitted, which is precisely the state the railroad exists to make
-impossible.
+that a run's provenance going into a railroad is that railroad's first
+change, so a caller that could write without committing could leave one
+standing uncommitted, which is precisely the state the railroad exists to
+make impossible.
 
-One file per stage, and a stage with no cases writes nothing rather than
-an empty file. An empty artifact and an absent one mean different things
-to whoever reads the railroad later - the first says a stage was generated
-and came out empty, the second says it was not generated.
+Nothing rendered is written. A prompt is a pure function of the template,
+the fill and the renderer, so the source commit reproduces every one of
+them exactly, and storing the text as well would double the artifact to
+say the same thing twice. The render still runs here, because running it
+is what proves every fill conforms and every template fills - an emission
+fails on a tree that could not be generated from, rather than later, when
+someone tries to answer it.
 
-Provenance records what the design named and stops there. The syllabus and
-method paths drawn from, their case counts, and the scheme version; the
-fills ride the cases themselves, so recording them again would duplicate
-the larger half of the artifact. There is no seed, because rendering is
-deterministic and inventing a field to look complete would be worse than
-its absence.
+What the railroad carries is the answers, laid under each method's own
+`accept` by the tooling that generates them. That is why nothing here
+creates those directories: git does not carry an empty one, so a mirrored
+skeleton committed ahead of the answers would be a commit of nothing.
+
+The method is the unit, so there is no per-stage aggregate. Stage order
+survives only in the walk, which is what keeps `drawn` reproducible.
+
+Provenance records what the design named and stops there: the method paths
+drawn from with their case counts, the scheme version, and where the
+source tree stood. There is no seed, because rendering is deterministic
+and inventing a field to look complete would be worse than its absence.
+
+`source_dirty` neither warns nor refuses. It states whether the commit
+beside it is a complete description of what was drawn - a fact the reader
+of a finished run needs and one only this moment can establish. An
+unversioned tree is refused outright, because there the question cannot be
+answered at all.
 
 The source root is deliberately not recorded. It would be an absolute path
 on one machine baked into an artifact meant to be readable anywhere, and

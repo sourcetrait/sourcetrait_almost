@@ -7956,7 +7956,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_lib_quest_two"
-version = "0.0.0-56"
+version = "0.0.0-57"
 dependencies = [
  "candle-core 0.11.0",
  "candle-flash-attn",

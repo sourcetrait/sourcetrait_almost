@@ -136,6 +136,26 @@ impl Railroad {
     }
 }
 
+/// Where a working tree stands: its commit, and whether it is clean.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Revision {
+    pub commit: String,
+    pub dirty: bool,
+}
+
+/// Read a working tree's position, so what it produced is reproducible.
+pub fn revision_of(dir: &Path) -> LibQuestResult<Revision> {
+    snafu::ensure_whatever!(
+        dir.is_dir(),
+        "{} is not a directory, so it stands at no revision",
+        dir.display()
+    );
+    Ok(Revision {
+        commit: git(dir, &["rev-parse", "HEAD"])?,
+        dirty: !git(dir, &["status", "--porcelain"])?.is_empty(),
+    })
+}
+
 /// Refuse before anything is created if git cannot author a commit.
 fn identity_ready(root: &Path) -> LibQuestResult<()> {
     for field in ["user.name", "user.email"] {

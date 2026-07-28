@@ -10,18 +10,29 @@ const CONTRACT: &str = "record<\n  proc: record<\n    path: path\n  >\n>";
 
 /// A scratch root that removes itself, so a lock leaves no residue.
 struct Scratch {
+    base: std::path::PathBuf,
     root: std::path::PathBuf,
+    yard: std::path::PathBuf,
 }
 
 impl Scratch {
     fn new(name: &str) -> Self {
-        let root = std::env::temp_dir().join(format!(
+        let base = std::env::temp_dir().join(format!(
             "quest_syllabus_{name}_{}",
             std::process::id()
         ));
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("mix");
+        let yard = base.join("yard");
         std::fs::create_dir_all(&root).expect("scratch root");
-        Self { root }
+        Self { base, root, yard }
+    }
+
+    /// Put the tree under version control, so a render can be pinned.
+    fn version(&self) {
+        run_git(&self.root, &["init", "-b", "main"]);
+        run_git(&self.root, &["add", "--all"]);
+        run_git(&self.root, &["commit", "-m", "fixture"]);
     }
 
     /// Lay one method's two directories and hand back where it sits.
@@ -39,12 +50,26 @@ impl Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
+        let _ = std::fs::remove_dir_all(&self.base);
     }
 }
 
 fn write(path: std::path::PathBuf, text: &str) {
     std::fs::write(path, text).expect("writes");
+}
+
+fn run_git(dir: &std::path::Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// A method carrying one template, its contract, and one case.
@@ -192,7 +217,7 @@ fn a_contract_whose_template_is_gone_is_refused() {
 }
 
 #[test]
-fn an_emitted_set_lands_in_a_railroad_as_its_first_rev() {
+fn an_emission_lands_in_a_railroad_as_its_first_rev() {
     let scratch = Scratch::new("emit");
     one_case_method(&scratch);
     let dpo = scratch.method("dpo", &["formatting"], "relax_one_constraint");
@@ -202,12 +227,12 @@ fn an_emitted_set_lands_in_a_railroad_as_its_first_rev() {
         dpo.join("set").join("mounts.nuon"),
         "{\n  proc: {\n    path: /proc/mounts\n  }\n}",
     );
+    scratch.version();
 
-    let yard = scratch.root.join("yard");
-    let road = crate::railroad::Railroad::lay_in(&yard).expect("lays");
+    let road = crate::railroad::Railroad::lay_in(&scratch.yard).expect("lays");
     let emitted = crate::syllabus::emit(&scratch.root, &road).expect("emits");
 
-    assert_eq!(emitted.rev, 1, "the generated set is the first change");
+    assert_eq!(emitted.rev, 1, "the provenance is the railroad's first change");
     assert_eq!(emitted.methods, 2);
     assert_eq!(emitted.cases, 2);
 
@@ -219,17 +244,67 @@ fn an_emitted_set_lands_in_a_railroad_as_its_first_rev() {
     assert_eq!(
         version.as_str().expect("a string"),
         crate::consts::TRAINING_VERSION,
-        "a set names the scheme version its binary was built from"
+        "a run names the scheme version its binary was built from"
+    );
+    let commit = provenance
+        .get_data_by_key("source_commit")
+        .expect("carries the source commit");
+    assert_eq!(
+        commit.as_str().expect("a string").len(),
+        40,
+        "the render is reproducible from the tree it was drawn at"
+    );
+    assert!(
+        !provenance
+            .get_data_by_key("source_dirty")
+            .expect("carries the source state")
+            .as_bool()
+            .expect("a bool"),
+        "a fixture committed whole is clean"
     );
 
-    for stage in ["sft", "dpo"] {
-        let path = road.dir().join(format!("{stage}.nuon"));
-        assert!(path.is_file(), "{stage} carries cases, so it carries a file");
-        assert!(crate::nu::load_value(&path).is_ok(), "{stage} reads back");
+    for stage in ["sft", "dpo", "rlvr"] {
+        assert!(
+            !road.dir().join(format!("{stage}.nuon")).exists(),
+            "{stage} writes no aggregate; the method is the unit"
+        );
     }
+}
+
+#[test]
+fn an_unversioned_source_tree_is_refused() {
+    let scratch = Scratch::new("unversioned");
+    one_case_method(&scratch);
+
+    let road = crate::railroad::Railroad::lay_in(&scratch.yard).expect("lays");
     assert!(
-        !road.dir().join("rlvr.nuon").exists(),
-        "a stage with no cases writes no file"
+        crate::syllabus::emit(&scratch.root, &road).is_err(),
+        "a run that cannot name the tree it drew from is not reproducible"
+    );
+}
+
+#[test]
+fn a_dirty_source_tree_is_recorded_as_dirty() {
+    let scratch = Scratch::new("dirty");
+    let method = one_case_method(&scratch);
+    scratch.version();
+    write(
+        method.dir(&scratch.root).join("set").join("meminfo.nuon"),
+        "{\n  proc: {\n    path: /proc/meminfo\n  }\n}",
+    );
+
+    let road = crate::railroad::Railroad::lay_in(&scratch.yard).expect("lays");
+    crate::syllabus::emit(&scratch.root, &road).expect("emits");
+
+    let provenance = crate::nu::load_value(&road.dir().join("provenance.nuon"))
+        .expect("provenance reads back");
+    assert!(
+        provenance
+            .get_data_by_key("source_dirty")
+            .expect("carries the source state")
+            .as_bool()
+            .expect("a bool"),
+        "an uncommitted case means the commit does not describe the render"
     );
 }
 

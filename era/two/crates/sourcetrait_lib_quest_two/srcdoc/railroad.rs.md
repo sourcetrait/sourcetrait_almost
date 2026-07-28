@@ -124,6 +124,31 @@ railroad nobody has moved, and they differ exactly when something has, so
 naming the branch keeps the numbering anchored to the design's own
 history rather than to wherever a caller happens to be standing.
 
+## struct Revision
+
+Two fields rather than one, because a commit alone is a half-truth. A
+commit says what a tree held at some point; whether the tree still holds
+exactly that is a separate question, and the answer stops being knowable
+the moment the reader has walked away. Both are cheap here and neither is
+recoverable later.
+
+## fn revision_of
+
+This lives in the railroad module rather than beside the caller that
+wants it, because the railroad module is where the crate's git plumbing
+is - specifically the diagnostic in `git`, which reports what git said
+even when git said it on stdout. A second invocation written elsewhere
+would be that fix waiting to be re-lost.
+
+The directory check comes first so the common mistake - a path that is
+not there at all - reads as a path that is not there, rather than as
+git's report about the working directory it was launched in.
+
+`status --porcelain` is asked without a pathspec, so a change anywhere in
+the repository counts, not only under the directory named. That is the
+right reading for reproducibility: the question is whether the commit
+describes the checkout, and the checkout is the whole repository.
+
 ## fn identity_ready
 
 No identity is invented here, and that is deliberate rather than
