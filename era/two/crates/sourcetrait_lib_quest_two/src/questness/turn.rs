@@ -2,11 +2,9 @@
 use crate::*;
 
 /// The Thinkspace's own turn, which never crosses the wire. A reasoning
-/// FORM is the request - `<nu> repl` or a `<nu> def evaluate` - the
-/// Thinkspace answers on a thought, and the model finishes inside the
-/// same turn.
-#[allow(dead_code)]
-pub const THINK_ROLE: &str = "think";
+/// FORM is the request - `<nu> repl` or a `<nu> def evaluate` - so the
+/// model emitting one is an ordinary assistant turn; the Thinkspace
+/// answers on a thought, and the model finishes inside the same turn.
 pub const THOUGHT_ROLE: &str = "thought";
 
 /// The `<nu>` mode carrying a bare expression rather than a typed def.

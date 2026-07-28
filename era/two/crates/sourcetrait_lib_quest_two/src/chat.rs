@@ -35,9 +35,8 @@ pub enum ChatRole {
     System,
     User,
     Assistant,
-    /// The model's own reasoning turn, which a reasoning form requests.
-    Think,
-    /// The Thinkspace's answer to a think; supplied, never generated.
+    /// The Thinkspace's answer to a reasoning form; supplied, never
+    /// generated, so it is context rather than a target.
     Thought,
     Environment,
     Tool,
@@ -51,7 +50,6 @@ impl ChatRole {
             Self::System => "system",
             Self::User => "user",
             Self::Assistant => "assistant",
-            Self::Think => turn::THINK_ROLE,
             Self::Thought => turn::THOUGHT_ROLE,
             Self::Environment | Self::Tool => "environment",
         }
@@ -63,7 +61,6 @@ impl ChatRole {
             "system" => Self::System,
             "user" => Self::User,
             "assistant" => Self::Assistant,
-            turn::THINK_ROLE => Self::Think,
             turn::THOUGHT_ROLE => Self::Thought,
             "environment" => Self::Environment,
             "tool" => Self::Tool,
@@ -173,6 +170,11 @@ pub fn chat_render(messages: &[ChatMessage], add_generation_prompt: bool) -> Cha
                 }
                 text.push_str("<|im_end|>\n");
             }
+            // Every assistant turn is GENERATED, so every one carries a
+            // span. An offload sequence has two - the model reaching for
+            // the tool, and the answer it finishes with - and leaving the
+            // first out of the loss would train everything about the
+            // answer except the decision that produced it.
             ChatRole::Assistant => {
                 text.push_str("<|im_start|>assistant\n");
                 let start = text.len();
@@ -193,23 +195,9 @@ pub fn chat_render(messages: &[ChatMessage], add_generation_prompt: bool) -> Cha
                     text.push('\n');
                 }
             }
-            // A think is GENERATED, so it trains like an assistant turn.
-            // Reaching for the tool is the capability being learned, so
-            // leaving it out of the loss would train everything about the
-            // answer except the decision that produced it.
-            ChatRole::Think => {
-                text.push_str("<|im_start|>");
-                text.push_str(role.rendered());
-                text.push('\n');
-                let start = text.len();
-                if let Some(content) = &message.content {
-                    text.push_str(content);
-                }
-                text.push_str("<|im_end|>");
-                assistant_spans.push(AssistantSpan { start, end: text.len() });
-                text.push('\n');
-            }
-            // A thought is SUPPLIED, so it is context and never a span.
+            // A thought is SUPPLIED, so it is context and never a span:
+            // training it would train the model to predict its own tool's
+            // output, which is the inference the offload exists to remove.
             ChatRole::Thought | ChatRole::Environment | ChatRole::Tool => {
                 text.push_str("<|im_start|>");
                 text.push_str(role.rendered());
