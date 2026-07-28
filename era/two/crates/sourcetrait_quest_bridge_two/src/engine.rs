@@ -87,7 +87,12 @@ impl bridge::all::Questness for TwoQuestness {
         emission: &str,
         insufficient: bool,
     ) -> Result<bridge::all::Step, String> {
-        Ok(match self.inner.step(emission, insufficient).map_err(message_of)? {
+        // Reasoning is permitted unconditionally here because nothing yet
+        // reads a think role out of an emission, so there is no signal to
+        // pass. The enforcement lives in the library and is locked there;
+        // what is missing is the reader, not the rule.
+        let thinking = true;
+        Ok(match self.inner.step(emission, insufficient, thinking).map_err(message_of)? {
             lib::Step::Continue(text) => bridge::all::Step::Continue(text),
             lib::Step::Insufficient => bridge::all::Step::Insufficient,
             lib::Step::Ask { form, bindings } => bridge::all::Step::Ask {

@@ -11,6 +11,9 @@ use crate::*;
 pub const THINK_ROLE: &str = "think";
 pub const THOUGHT_ROLE: &str = "thought";
 
+/// The `<nu>` mode carrying a bare expression rather than a typed def.
+pub const REPL_MODE: &str = "repl";
+
 /// A `<pass>` binding and the value travelling on it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Binding {
@@ -70,6 +73,10 @@ pub enum Outcome {
         signature: NuSignature,
         bindings: Vec<Binding>,
     },
+    /// A bare expression whose rendering comes back as text.
+    Repl {
+        source: String,
+    },
     /// Every other form. Questness never runs one - it rides back to the
     /// caller with what it consumes, and the turn pauses there.
     Ask {
@@ -100,7 +107,7 @@ pub fn assemble(request: &Request) -> LibQuestResult<Assembled> {
         blocks.push(Block::new(Tag::Config, "", &nuon_payload(&prepared.visible)?));
     }
     for binding in &request.bindings {
-        let declared = binding.value.get_type().to_string();
+        let declared = channel::Descriptor::nuon(binding.value.get_type()).render();
         blocks.push(Block::new(Tag::Input, &declared, &nuon_payload(&binding.value)?));
         blocks.push(Block::new(Tag::Pass, "", &binding.pass));
     }
@@ -124,11 +131,13 @@ pub fn assemble(request: &Request) -> LibQuestResult<Assembled> {
 /// `insufficient` comes from the caller because the insufficiency tag is
 /// special and a skip-special decode strips it, so it is detectable by
 /// token id at the engine layer and never by scanning this text.
+/// `thinking` says whether this emission may reach a reasoning mode.
 pub fn interpret(
     evaluator: &QuestnessEvaluator,
     text: &str,
     aliasing: channel::Aliasing,
     insufficient: bool,
+    thinking: bool,
 ) -> LibQuestResult<Outcome> {
     if insufficient {
         return Ok(Outcome::Insufficient);
@@ -142,9 +151,20 @@ pub fn interpret(
         }
     };
     match blocks.iter().find(|block| block.tag == Tag::Nu) {
-        Some(nu_block) => sub_turn(evaluator, &blocks, nu_block),
+        Some(nu_block) => sub_turn(evaluator, &blocks, nu_block, thinking),
         None => answer(&blocks),
     }
+}
+
+/// A reasoning mode emitted where reasoning is not permitted.
+fn denied(mode: &str) -> Outcome {
+    let mut envelope = Envelope::default();
+    envelope.error(
+        "channel::not_thinking",
+        Some(Tag::Nu.name()),
+        &format!("`{mode}` is a reasoning mode and runs only in a think turn"),
+    );
+    Outcome::Repair(envelope)
 }
 
 /// Run an `evaluate` sub-turn here and hand its value back.
@@ -210,7 +230,20 @@ fn sub_turn(
     evaluator: &QuestnessEvaluator,
     blocks: &[Block],
     nu_block: &Block,
+    thinking: bool,
 ) -> LibQuestResult<Outcome> {
+    // `repl` is read before the parser sees anything, because it carries
+    // a bare expression rather than a def and there is no signature to
+    // diff out of the declaration set.
+    if nu_block.header.trim() == REPL_MODE {
+        return Ok(if thinking {
+            Outcome::Repl {
+                source: nu_block.content.clone(),
+            }
+        } else {
+            denied(REPL_MODE)
+        });
+    }
     let source = nu_source(nu_block);
     let signature = match evaluator.signature_of(&source) {
         Ok(signature) => signature,
@@ -232,6 +265,9 @@ fn sub_turn(
             return Ok(Outcome::Repair(envelope));
         }
     };
+    if form.is_think() && !thinking {
+        return Ok(denied(form.mode()));
+    }
     Ok(if form.is_think() {
         Outcome::Think {
             form,
@@ -311,35 +347,39 @@ fn emitted_config(blocks: &[Block], envelope: &mut Envelope) -> Option<nu::Value
     }
 }
 
-/// Parse a block's declared type and its NUON, then conform one to the
-/// other.
+/// Read a block's descriptor and content into a value it can carry.
 fn typed_payload(
     header: &str,
     content: &str,
 ) -> Result<(nu::Type, nu::Value), channel::Diagnostic> {
-    let declared = nu::parse_typedef(header).map_err(|error| {
-        channel::Diagnostic::new(
-            "channel::typedef",
-            Some(Tag::Output.name()),
-            &error.to_string(),
-        )
-    })?;
+    let fault = |kind: &str, error: LibQuestError| {
+        channel::Diagnostic::new(kind, Some(Tag::Output.name()), &error.to_string())
+    };
+    let span = nu::Span::unknown();
+    let descriptor = channel::Descriptor::parse(header)
+        .map_err(|error| fault("channel::descriptor", error))?;
     let text = channel::unescape_content(content);
-    let value = nu::from_nuon_text(&text).map_err(|error| {
-        channel::Diagnostic::new(
-            "channel::nuon",
-            Some(Tag::Output.name()),
-            &error.to_string(),
-        )
-    })?;
-    nu::conform(&value, &declared).map_err(|error| {
-        channel::Diagnostic::new(
-            "channel::conformance",
-            Some(Tag::Output.name()),
-            &error.to_string(),
-        )
-    })?;
-    Ok((declared, value))
+    match descriptor.declared {
+        channel::Declared::Conforms(declared) => {
+            let value = nu::from_nuon_text(&text)
+                .map_err(|error| fault("channel::nuon", error))?;
+            nu::conform(&value, &declared)
+                .map_err(|error| fault("channel::conformance", error))?;
+            Ok((declared, value))
+        }
+        // A typedef is carried as a string, so what is checked is that
+        // the content parses AS a type - its own contract - rather than
+        // that some value conforms to it.
+        channel::Declared::Typedef => {
+            let typedef = text.trim().to_string();
+            nu::parse_typedef(&typedef)
+                .map_err(|error| fault("channel::typedef", error))?;
+            Ok((nu::Type::String, nu::Value::string(typedef, span)))
+        }
+        channel::Declared::Untyped => {
+            Ok((nu::Type::String, nu::Value::string(text, span)))
+        }
+    }
 }
 
 /// Decode every bound block's NUON into the value its channel carries.

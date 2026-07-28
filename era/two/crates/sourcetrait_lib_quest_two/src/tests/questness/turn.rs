@@ -21,7 +21,7 @@ fn value(nuon: &str) -> nu::Value {
 
 /// The design's worked answer: a typed record, bound, and a template.
 const ANSWERED: &str = "\
-<|extra_id_2|> record<my_name: string, their_name: string, cwd: directory>
+<|extra_id_2|> nuon record<my_name: string, their_name: string, cwd: directory>
 {my_name: Quest, their_name: Roy, cwd: '/tmp/foo'}
 <|extra_id_6|>
 <|extra_id_3|>$in<|extra_id_6|>
@@ -31,7 +31,7 @@ Hello, {{ in.their_name }}. My name is {{ in.my_name }}.
 
 #[test]
 fn an_answer_comes_back_as_a_value_and_a_rendering() {
-    let outcome = interpret(&evaluator(), ANSWERED, Aliasing::Strict, false).expect("interprets");
+    let outcome = interpret(&evaluator(), ANSWERED, Aliasing::Strict, false, true).expect("interprets");
     let Outcome::Answered(answer) = outcome else {
         panic!("expected an answer, got {outcome:?}");
     };
@@ -57,10 +57,10 @@ fn an_answer_comes_back_as_a_value_and_a_rendering() {
 #[test]
 fn a_value_that_misses_its_declared_type_asks_for_repair() {
     let emission = "\
-<|extra_id_2|> record<count: int>
+<|extra_id_2|> nuon record<count: int>
 {count: nope}
 <|extra_id_6|>";
-    let outcome = interpret(&evaluator(), emission, Aliasing::Strict, false).expect("interprets");
+    let outcome = interpret(&evaluator(), emission, Aliasing::Strict, false, true).expect("interprets");
     let Outcome::Repair(envelope) = outcome else {
         panic!("expected a repair, got {outcome:?}");
     };
@@ -76,13 +76,13 @@ fn a_value_that_misses_its_declared_type_asks_for_repair() {
 #[test]
 fn evaluate_is_a_think_turn_and_every_other_form_is_an_ask() {
     let inside = "\
-<|extra_id_2|> list<string>
+<|extra_id_2|> nuon list<string>
 [a, b]
 <|extra_id_6|>
 <|extra_id_3|>$in<|extra_id_6|>
 <|extra_id_4|> def evaluate []: list<string> -> int { $in | length }
 <|extra_id_6|>";
-    let outcome = interpret(&evaluator(), inside, Aliasing::Strict, false).expect("interprets");
+    let outcome = interpret(&evaluator(), inside, Aliasing::Strict, false, true).expect("interprets");
     let Outcome::Think { form, bindings, .. } = outcome else {
         panic!("evaluate is ALWAYS a think turn, got {outcome:?}");
     };
@@ -91,7 +91,7 @@ fn evaluate_is_a_think_turn_and_every_other_form_is_an_ask() {
     assert_eq!(bindings[0].pass, "$in");
 
     let leaves = inside.replace("def evaluate ", "def --env interact ");
-    let outcome = interpret(&evaluator(), &leaves, Aliasing::Strict, false).expect("interprets");
+    let outcome = interpret(&evaluator(), &leaves, Aliasing::Strict, false, true).expect("interprets");
     let Outcome::Ask { form, bindings } = outcome else {
         panic!("every other form is an ask, got {outcome:?}");
     };
@@ -106,14 +106,14 @@ fn evaluate_is_a_think_turn_and_every_other_form_is_an_ask() {
 #[test]
 fn a_think_turns_bound_value_reaches_the_evaluator() {
     let emission = "\
-<|extra_id_2|> list<string>
+<|extra_id_2|> nuon list<string>
 [a, b, c]
 <|extra_id_6|>
 <|extra_id_3|>$in<|extra_id_6|>
 <|extra_id_4|> def evaluate []: list<string> -> int { $in | length }
 <|extra_id_6|>";
     let evaluator = evaluator();
-    let outcome = interpret(&evaluator, emission, Aliasing::Strict, false).expect("interprets");
+    let outcome = interpret(&evaluator, emission, Aliasing::Strict, false, true).expect("interprets");
     let Outcome::Think {
         form,
         signature,
@@ -130,14 +130,14 @@ fn a_think_turns_bound_value_reaches_the_evaluator() {
 #[test]
 fn an_args_positional_reaches_the_def_as_a_literal() {
     let emission = "\
-<|extra_id_2|> list<string>
+<|extra_id_2|> nuon list<string>
 [a, b, c, d]
 <|extra_id_6|>
 <|extra_id_3|>$args<|extra_id_6|>
 <|extra_id_4|> def evaluate [args: list<string>]: nothing -> int { $args | length }
 <|extra_id_6|>";
     let evaluator = evaluator();
-    let outcome = interpret(&evaluator, emission, Aliasing::Strict, false).expect("interprets");
+    let outcome = interpret(&evaluator, emission, Aliasing::Strict, false, true).expect("interprets");
     let Outcome::Think {
         form,
         signature,
@@ -159,7 +159,7 @@ fn an_ask_is_never_run_here() {
 <|extra_id_4|> def --env interact []: nothing -> int { 1 }
 <|extra_id_6|>";
     let evaluator = evaluator();
-    let outcome = interpret(&evaluator, emission, Aliasing::Strict, false).expect("interprets");
+    let outcome = interpret(&evaluator, emission, Aliasing::Strict, false, true).expect("interprets");
     let Outcome::Ask { form, .. } = outcome else {
         panic!("expected an ask, got {outcome:?}");
     };
@@ -174,15 +174,15 @@ fn an_ask_is_never_run_here() {
 
 #[test]
 fn insufficiency_is_the_callers_verdict_rather_than_a_text_scan() {
-    let outcome = interpret(&evaluator(), "anything at all", Aliasing::Strict, true)
+    let outcome = interpret(&evaluator(), "anything at all", Aliasing::Strict, true, true)
         .expect("interprets");
     assert!(matches!(outcome, Outcome::Insufficient));
 }
 
 #[test]
 fn an_unclosed_block_asks_for_repair_rather_than_erroring() {
-    let emission = "<|extra_id_2|> list<string>\n[a, b]";
-    let outcome = interpret(&evaluator(), emission, Aliasing::Strict, false).expect("interprets");
+    let emission = "<|extra_id_2|> nuon list<string>\n[a, b]";
+    let outcome = interpret(&evaluator(), emission, Aliasing::Strict, false, true).expect("interprets");
     let Outcome::Repair(envelope) = outcome else {
         panic!("expected a repair, got {outcome:?}");
     };
@@ -206,7 +206,7 @@ fn assembly_shows_the_model_its_config_input_and_prompt() {
     );
     assert!(assembled.text.contains("<|extra_id_0|>"), "config block");
     assert!(
-        assembled.text.contains("<|extra_id_1|> list<string>"),
+        assembled.text.contains("<|extra_id_1|> nuon list<string>"),
         "the input block self-describes: {}",
         assembled.text
     );
@@ -258,4 +258,91 @@ fn a_newline_inside_a_payload_cannot_forge_a_closer() {
         .filter(|line| line.trim() == "<|extra_id_6|>")
         .count();
     assert_eq!(closers, 1, "only the real closer stands alone: {}", assembled.text);
+}
+
+/// The offload the model is trained to reach for: a bare expression.
+const REPLS: &str = "\
+<|extra_id_4|> repl
+5 + 5
+<|extra_id_6|>";
+
+#[test]
+fn a_repl_carries_a_bare_expression_rather_than_a_def() {
+    let outcome =
+        interpret(&evaluator(), REPLS, Aliasing::Strict, false, true).expect("interprets");
+    let Outcome::Repl { source } = outcome else {
+        panic!("expected a repl, got {outcome:?}");
+    };
+    assert_eq!(
+        source, "5 + 5",
+        "nothing is parsed as a def, so the expression arrives whole"
+    );
+}
+
+#[test]
+fn the_reasoning_modes_are_refused_outside_a_think_turn() {
+    let evaluate = "\
+<|extra_id_4|> def evaluate []: nothing -> int {
+    5 + 5
+}
+<|extra_id_6|>";
+    for emission in [REPLS, evaluate] {
+        let outcome =
+            interpret(&evaluator(), emission, Aliasing::Strict, false, false).expect("interprets");
+        let Outcome::Repair(envelope) = outcome else {
+            panic!("expected a refusal, got {outcome:?}");
+        };
+        assert_eq!(envelope.errors.len(), 1);
+        assert_eq!(envelope.errors[0].kind, "channel::not_thinking");
+    }
+}
+
+#[test]
+fn a_typedef_answer_arrives_as_a_string_that_parses_as_a_type() {
+    let emission = "\
+<|extra_id_2|> nu type
+record<foo: string>
+<|extra_id_6|>";
+    let outcome =
+        interpret(&evaluator(), emission, Aliasing::Strict, false, true).expect("interprets");
+    let Outcome::Answered(answer) = outcome else {
+        panic!("expected an answer, got {outcome:?}");
+    };
+    assert_eq!(
+        answer.declared.as_ref().map(ToString::to_string),
+        Some(String::from("string")),
+        "a typedef is carried as a string for now"
+    );
+    assert_eq!(
+        answer.value,
+        Some(nu::Value::string("record<foo: string>", nu::Span::unknown()))
+    );
+}
+
+#[test]
+fn a_typedef_answer_that_is_not_a_type_asks_for_repair() {
+    let emission = "\
+<|extra_id_2|> nu type
+not a type at all
+<|extra_id_6|>";
+    let outcome =
+        interpret(&evaluator(), emission, Aliasing::Strict, false, true).expect("interprets");
+    let Outcome::Repair(envelope) = outcome else {
+        panic!("expected a repair, got {outcome:?}");
+    };
+    assert_eq!(envelope.errors[0].kind, "channel::typedef");
+}
+
+#[test]
+fn a_block_naming_a_format_we_cannot_read_asks_for_repair() {
+    let emission = "\
+<|extra_id_2|> yaml record<foo: string>
+foo: bar
+<|extra_id_6|>";
+    let outcome =
+        interpret(&evaluator(), emission, Aliasing::Strict, false, true).expect("interprets");
+    let Outcome::Repair(envelope) = outcome else {
+        panic!("expected a repair, got {outcome:?}");
+    };
+    assert_eq!(envelope.errors[0].kind, "channel::descriptor");
 }

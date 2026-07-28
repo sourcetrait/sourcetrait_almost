@@ -5,7 +5,11 @@ use crate::*;
 use crate::channel::{
     Aliasing,
     Block,
+    Declared,
+    Descriptor,
     Envelope,
+    FORMATS,
+    Format,
     TAGS,
     Tag,
     escape_content,
@@ -48,10 +52,10 @@ fn every_tag_carries_a_distinct_id_spelling_and_name() {
 
 #[test]
 fn a_block_round_trips_through_the_line_anchored_form() {
-    let block = Block::new(Tag::Output, "list<string>", "[Var, bar, Car]");
+    let block = Block::new(Tag::Output, "nuon list<string>", "[Var, bar, Car]");
     let text = render_block(&block);
     let mut lines = text.lines();
-    assert_eq!(lines.next(), Some("<|extra_id_2|> list<string>"));
+    assert_eq!(lines.next(), Some("<|extra_id_2|> nuon list<string>"));
     assert_eq!(lines.next(), Some("[Var, bar, Car]"));
     assert_eq!(lines.next(), Some("<|extra_id_6|>"));
     let parsed = parse_blocks(&text, Aliasing::Strict).expect("parses");
@@ -111,7 +115,7 @@ fn an_escaped_payload_cannot_forge_a_boundary() {
 
 #[test]
 fn an_unclosed_block_is_an_error_naming_its_tag() {
-    let text = "<|extra_id_2|> list<string>\n[a, b]";
+    let text = "<|extra_id_2|> nuon list<string>\n[a, b]";
     let error = parse_blocks(text, Aliasing::Strict)
         .expect_err("unclosed rejects")
         .to_string();
@@ -120,9 +124,9 @@ fn an_unclosed_block_is_an_error_naming_its_tag() {
 
 #[test]
 fn strict_refuses_unmarked_content() {
-    let text = "here is some prose\n<|extra_id_2|> int\n4\n<|extra_id_6|>";
+    let text = "here is some prose\n<|extra_id_2|> nuon int\n4\n<|extra_id_6|>";
     assert!(parse_blocks(text, Aliasing::Strict).is_err());
-    let trailing = "<|extra_id_2|> int\n4\n<|extra_id_6|>\nand a trailing remark";
+    let trailing = "<|extra_id_2|> nuon int\n4\n<|extra_id_6|>\nand a trailing remark";
     assert!(parse_blocks(trailing, Aliasing::Strict).is_err());
 }
 
@@ -159,4 +163,53 @@ fn the_diagnostic_envelope_renders_as_a_nuon_record() {
     )
     .expect("typedef");
     nu::conform(&envelope.to_value(), &ty).expect("the envelope conforms");
+}
+
+#[test]
+fn every_descriptor_round_trips_through_its_header() {
+    let cases = [
+        ("nuon list<string>", Descriptor::nuon(nu::parse_typedef("list<string>").expect("a type"))),
+        ("nu type", Descriptor::typedef()),
+        ("string", Descriptor::text()),
+    ];
+    for (header, expected) in cases {
+        let parsed = Descriptor::parse(header).expect(header);
+        assert_eq!(parsed, expected, "{header}");
+        assert_eq!(parsed.render(), header, "a descriptor renders as it reads");
+    }
+}
+
+#[test]
+fn the_format_vocabulary_is_closed() {
+    for format in FORMATS {
+        assert_eq!(Format::parse(format.spelling()).expect("known"), format);
+    }
+    let refused = Format::parse("yaml").expect_err("a format we cannot read");
+    assert!(
+        refused.to_string().contains("nuon"),
+        "the diagnostic names the vocabulary rather than only the miss"
+    );
+}
+
+#[test]
+fn a_descriptors_pairing_is_part_of_the_vocabulary() {
+    // Each of these is a legal format word in an illegal pairing, so the
+    // refusal has to come from the pairing rather than from the word.
+    for header in ["nuon", "nu", "nu list<string>", "string int", ""] {
+        assert!(
+            Descriptor::parse(header).is_err(),
+            "{header:?} pairs a format with the wrong type slot"
+        );
+    }
+}
+
+#[test]
+fn a_typedef_descriptor_declares_no_value_type() {
+    let parsed = Descriptor::parse("nu type").expect("parses");
+    assert_eq!(parsed.format, Format::Nu);
+    assert_eq!(
+        parsed.declared,
+        Declared::Typedef,
+        "the slot says what the content IS, not what a value conforms to"
+    );
 }

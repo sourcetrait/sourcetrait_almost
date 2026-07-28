@@ -18,7 +18,7 @@ fn questness_can_cross_to_a_blocking_task() {
 
 /// The model works something out for itself.
 const THINKS: &str = "\
-<|extra_id_2|> list<string>
+<|extra_id_2|> nuon list<string>
 [a, b, c]
 <|extra_id_6|>
 <|extra_id_3|>$in<|extra_id_6|>
@@ -27,7 +27,7 @@ const THINKS: &str = "\
 
 /// The model asks the CALLER to run something against the world.
 const ASKS: &str = "\
-<|extra_id_2|> record<cwd: string>
+<|extra_id_2|> nuon record<cwd: string>
 {cwd: ''}
 <|extra_id_6|>
 <|extra_id_3|>$in<|extra_id_6|>
@@ -36,7 +36,7 @@ const ASKS: &str = "\
 
 /// The model answers.
 const ANSWERS: &str = "\
-<|extra_id_2|> record<cwd: string>
+<|extra_id_2|> nuon record<cwd: string>
 {cwd: '/tmp/foo'}
 <|extra_id_6|>
 <|extra_id_3|>$in<|extra_id_6|>
@@ -47,7 +47,7 @@ We are currently in the {{ in.cwd }} directory.
 #[test]
 fn a_think_turn_runs_here_and_comes_back_as_a_thought() {
     let mut questness = Questness::new(Aliasing::Strict).expect("builds");
-    let Step::Continue(back) = questness.step(THINKS, false).expect("steps") else {
+    let Step::Continue(back) = questness.step(THINKS, false, true).expect("steps") else {
         panic!("evaluate runs on the Thinkspace's own evaluator");
     };
     assert!(
@@ -55,7 +55,7 @@ fn a_think_turn_runs_here_and_comes_back_as_a_thought() {
         "the answer rides a thought turn: {back}"
     );
     assert!(
-        back.contains("<|extra_id_2|> int"),
+        back.contains("<|extra_id_2|> nuon int"),
         "and it returns TYPED: {back}"
     );
     assert!(back.contains('3'), "the evaluator's own answer: {back}");
@@ -70,7 +70,7 @@ fn a_think_turn_runs_here_and_comes_back_as_a_thought() {
 #[test]
 fn an_ask_pauses_the_turn_rather_than_being_served() {
     let mut questness = Questness::new(Aliasing::Strict).expect("builds");
-    let Step::Ask { form, bindings } = questness.step(ASKS, false).expect("steps") else {
+    let Step::Ask { form, bindings } = questness.step(ASKS, false, true).expect("steps") else {
         panic!("an ask is never serviced here");
     };
     assert_eq!(form.mode(), "interact");
@@ -82,7 +82,7 @@ fn an_ask_pauses_the_turn_rather_than_being_served() {
 #[test]
 fn a_plain_answer_touches_no_engine_at_all() {
     let mut questness = Questness::new(Aliasing::Strict).expect("builds");
-    let Step::Answered(answer) = questness.step(ANSWERS, false).expect("steps") else {
+    let Step::Answered(answer) = questness.step(ANSWERS, false, true).expect("steps") else {
         panic!("expected an answer");
     };
     assert_eq!(
@@ -100,7 +100,7 @@ fn a_failing_think_becomes_feedback() {
 <|extra_id_4|> def evaluate []: nothing -> int { 1 / 0 }
 <|extra_id_6|>";
     let mut questness = Questness::new(Aliasing::Strict).expect("builds");
-    match questness.step(broken, false).expect("steps") {
+    match questness.step(broken, false, true).expect("steps") {
         Step::Repair(envelope) => {
             assert!(!envelope.errors.is_empty(), "the failure is reported back");
         }
@@ -112,7 +112,7 @@ fn a_failing_think_becomes_feedback() {
 fn insufficiency_is_the_callers_verdict() {
     let mut questness = Questness::new(Aliasing::Strict).expect("builds");
     assert!(matches!(
-        questness.step("anything at all", true).expect("steps"),
+        questness.step("anything at all", true, true).expect("steps"),
         Step::Insufficient
     ));
 }
@@ -128,10 +128,49 @@ fn a_session_log_records_both_sides_of_the_turn() {
     let mut questness = Questness::new(Aliasing::Strict)
         .expect("builds")
         .logging_to(log.clone());
-    questness.step(THINKS, false).expect("steps");
+    questness.step(THINKS, false, true).expect("steps");
 
     let text = log.read().expect("reads");
     assert!(text.contains("== emission =="), "what the model wrote");
     assert!(text.contains("== thought =="), "what it was told back");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The model offloads arithmetic rather than inferring it.
+const OFFLOADS: &str = "\
+<|extra_id_4|> repl
+5 + 5
+<|extra_id_6|>";
+
+#[test]
+fn a_repl_comes_back_as_text_on_a_thought_turn() {
+    let mut questness = Questness::new(Aliasing::Strict).expect("builds");
+    let Step::Continue(back) = questness.step(OFFLOADS, false, true).expect("steps") else {
+        panic!("a repl continues the turn");
+    };
+    assert!(back.contains("<|im_start|>thought"), "got {back}");
+    assert!(
+        back.contains("<|extra_id_1|> string"),
+        "the rendering returns as text with no type; got {back}"
+    );
+    assert!(back.contains("10"), "got {back}");
+}
+
+#[test]
+fn a_repl_outside_a_think_turn_is_refused_rather_than_run() {
+    let mut questness = Questness::new(Aliasing::Strict).expect("builds");
+    let Step::Repair(envelope) = questness.step(OFFLOADS, false, false).expect("steps") else {
+        panic!("a reasoning mode outside a think is refused");
+    };
+    assert_eq!(envelope.errors[0].kind, "channel::not_thinking");
+}
+
+#[test]
+fn a_repl_that_does_not_evaluate_asks_for_repair() {
+    let broken = "<|extra_id_4|> repl\nnot_a_command_at_all\n<|extra_id_6|>";
+    let mut questness = Questness::new(Aliasing::Strict).expect("builds");
+    let Step::Repair(envelope) = questness.step(broken, false, true).expect("steps") else {
+        panic!("a failed repl is feedback rather than a block");
+    };
+    assert_eq!(envelope.errors[0].kind, "questness::repl");
 }

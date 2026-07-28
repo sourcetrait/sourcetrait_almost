@@ -9,11 +9,11 @@ use crate::questness::evaluate::QuestnessEvaluator;
 
 /// The worked example from the channel design, in wire spelling.
 const WORKED: &str = "\
-<|extra_id_2|> list<string>
+<|extra_id_2|> nuon list<string>
 [Var, bar, Car]
 <|extra_id_6|>
 <|extra_id_3|>$args<|extra_id_6|>
-<|extra_id_2|> record<name: string>
+<|extra_id_2|> nuon record<name: string>
 {name: foo}
 <|extra_id_6|>
 <|extra_id_3|>$in<|extra_id_6|>";
@@ -115,7 +115,7 @@ fn the_worked_example_agrees_with_its_def() {
 
 #[test]
 fn a_missing_in_binding_is_reported() {
-    let text = "<|extra_id_2|> list<string>\n[a]\n<|extra_id_6|>\n<|extra_id_3|>$args<|extra_id_6|>";
+    let text = "<|extra_id_2|> nuon list<string>\n[a]\n<|extra_id_6|>\n<|extra_id_3|>$args<|extra_id_6|>";
     let blocks = parse_blocks(text, Aliasing::Strict).expect("parses");
     let contract = evaluator().signature_of(INTERACT).expect("contract");
     let envelope = check_agreements(&blocks, &contract);
@@ -129,7 +129,7 @@ fn a_missing_in_binding_is_reported() {
 
 #[test]
 fn binding_args_against_a_def_without_one_is_reported() {
-    let text = "<|extra_id_2|> list<string>\n[a]\n<|extra_id_6|>\n<|extra_id_3|>$args<|extra_id_6|>";
+    let text = "<|extra_id_2|> nuon list<string>\n[a]\n<|extra_id_6|>\n<|extra_id_3|>$args<|extra_id_6|>";
     let blocks = parse_blocks(text, Aliasing::Strict).expect("parses");
     let contract = evaluator()
         .signature_of("def evaluate []: nothing -> int { 1 }")
@@ -146,8 +146,8 @@ fn binding_args_against_a_def_without_one_is_reported() {
 
 #[test]
 fn a_type_disagreement_names_both_sides() {
-    let text = "<|extra_id_2|> list<int>\n[1]\n<|extra_id_6|>\n<|extra_id_3|>$args<|extra_id_6|>\
-                \n<|extra_id_2|> record<name: string>\n{name: foo}\n<|extra_id_6|>\
+    let text = "<|extra_id_2|> nuon list<int>\n[1]\n<|extra_id_6|>\n<|extra_id_3|>$args<|extra_id_6|>\
+                \n<|extra_id_2|> nuon record<name: string>\n{name: foo}\n<|extra_id_6|>\
                 \n<|extra_id_3|>$in<|extra_id_6|>";
     let blocks = parse_blocks(text, Aliasing::Strict).expect("parses");
     let contract = evaluator().signature_of(INTERACT).expect("contract");
@@ -176,9 +176,9 @@ fn the_envelope_collects_rather_than_bailing() {
 
 #[test]
 fn a_duplicate_binding_is_reported_once() {
-    let text = "<|extra_id_2|> list<string>\n[a]\n<|extra_id_6|>\n\
+    let text = "<|extra_id_2|> nuon list<string>\n[a]\n<|extra_id_6|>\n\
                 <|extra_id_3|>$args<|extra_id_6|>\n\
-                <|extra_id_2|> list<string>\n[b]\n<|extra_id_6|>\n\
+                <|extra_id_2|> nuon list<string>\n[b]\n<|extra_id_6|>\n\
                 <|extra_id_3|>$args<|extra_id_6|>";
     let blocks = parse_blocks(text, Aliasing::Strict).expect("parses");
     let contract = evaluator().signature_of(INTERACT).expect("contract");

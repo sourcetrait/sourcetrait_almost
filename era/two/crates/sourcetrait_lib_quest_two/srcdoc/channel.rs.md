@@ -124,3 +124,49 @@ envelope - errors and warnings, each row carrying a kind, a source and a message
 Diagnostics are needed at all because nushell's own rejection reads `Input type
 not supported.` with no element index and no field name. The pipe is the fast
 gate; this is what tells anyone why it closed.
+
+## enum Format
+
+The vocabulary is closed on purpose, and the reason is a promise rather
+than a preference: naming a format asserts the harness can read it. An
+open set would let a model emit `yaml` fluently and correctly-looking
+while nothing downstream could take it, which is the worst failure shape
+available - confident and unreadable.
+
+That is why it is an enum here and not a string. This type IS the
+vocabulary, so the vocabulary and the processing cannot drift apart
+without the compiler noticing, which is the same requirement the `<nu>`
+mode set already carries.
+
+The diagnostic lists every member rather than only reporting the miss,
+because the reader who needs it is a model choosing a word.
+
+## enum Declared
+
+Three cases rather than an `Option<Type>`, because the absent case splits
+in two and the two mean opposite things. `Untyped` says the content has
+no type to check. `Typedef` says the content IS a type - the one place
+the slot names what the payload is rather than what a value conforms to.
+Collapsing them would lose exactly the distinction that lets a typedef be
+validated as a type while text is validated as nothing.
+
+## struct Descriptor
+
+### fn parse
+
+THE PAIRING IS PART OF THE VOCABULARY, which is why this is not a split
+followed by two independent parses. `nuon` owes a type, `nu` takes the
+word `type` alone, `string` takes nothing. A format word in the wrong
+pairing is refused here rather than surviving to fail somewhere with a
+less legible message.
+
+Splitting on the first whitespace rather than tokenising is deliberate: a
+type can contain spaces (`record<a: int, b: int>`), so only the FIRST
+boundary is a delimiter and everything after it is the type's own text.
+
+### fn render
+
+The inverse of parse for every legal descriptor, which the round-trip
+lock asserts. Untyped renders the format alone rather than a format and
+an empty slot, so there is exactly one spelling of a text block and no
+trailing space to strip.

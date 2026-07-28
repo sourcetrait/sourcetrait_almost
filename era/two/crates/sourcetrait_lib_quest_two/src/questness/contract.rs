@@ -181,16 +181,21 @@ pub fn check_agreements(blocks: &[Block], signature: &NuSignature) -> Envelope {
         let (Some(channel), Some(bound)) = (channel, bound) else {
             continue;
         };
-        let declared = &bound.header;
-        if declared.is_empty() {
+        if bound.header.is_empty() {
             continue;
         }
-        let parsed = match nu::parse_typedef(declared) {
-            Ok(parsed) => parsed,
+        let descriptor = match channel::Descriptor::parse(&bound.header) {
+            Ok(descriptor) => descriptor,
             Err(error) => {
-                envelope.error("channel::typedef", Some(binding), &error.to_string());
+                envelope.error("channel::descriptor", Some(binding), &error.to_string());
                 continue;
             }
+        };
+        // Only a conforming payload has a type to agree with the def's
+        // channel. A typedef or a text payload declares none, so there is
+        // nothing to disagree about rather than a disagreement to report.
+        let channel::Declared::Conforms(parsed) = descriptor.declared else {
+            continue;
         };
         if !parsed.is_subtype_of(channel) {
             envelope.error(

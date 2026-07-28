@@ -85,6 +85,134 @@ impl Tag {
     }
 }
 
+/// The word a `nu`-format block's type slot carries.
+const TYPEDEF_SLOT: &str = "type";
+
+/// The notation a data block's content is in; closed to what we read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Nuon,
+    Nu,
+    String,
+}
+
+/// The formats in the order a diagnostic lists them.
+pub const FORMATS: [Format; 3] = [Format::Nuon, Format::Nu, Format::String];
+
+impl Format {
+    pub fn spelling(&self) -> &'static str {
+        match self {
+            Self::Nuon => "nuon",
+            Self::Nu => "nu",
+            Self::String => "string",
+        }
+    }
+
+    /// Read one back; anything outside the vocabulary is refused.
+    pub fn parse(spelling: &str) -> LibQuestResult<Self> {
+        match FORMATS.into_iter().find(|format| format.spelling() == spelling) {
+            Some(format) => Ok(format),
+            None => snafu::whatever!(
+                "`{spelling}` is not a format; a data block carries {}",
+                FORMATS.map(|format| format.spelling()).join(", ")
+            ),
+        }
+    }
+}
+
+/// What a data block's type slot says about its content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Declared {
+    /// A nushell type the content conforms to.
+    Conforms(nu::Type),
+    /// The content IS a typedef, carried as a string for now.
+    Typedef,
+    /// Nothing to check, because the content is text.
+    Untyped,
+}
+
+/// A data block's opener: the format, then what the type slot says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Descriptor {
+    pub format: Format,
+    pub declared: Declared,
+}
+
+impl Descriptor {
+    /// The descriptor a value travels under as NUON.
+    pub fn nuon(declared: nu::Type) -> Self {
+        Self {
+            format: Format::Nuon,
+            declared: Declared::Conforms(declared),
+        }
+    }
+
+    /// The descriptor a typedef travels under.
+    pub fn typedef() -> Self {
+        Self {
+            format: Format::Nu,
+            declared: Declared::Typedef,
+        }
+    }
+
+    /// The descriptor plain text travels under.
+    pub fn text() -> Self {
+        Self {
+            format: Format::String,
+            declared: Declared::Untyped,
+        }
+    }
+
+    /// Read an opener's header; the pairing is part of the vocabulary.
+    pub fn parse(header: &str) -> LibQuestResult<Self> {
+        let header = header.trim();
+        snafu::ensure_whatever!(
+            !header.is_empty(),
+            "a data block declares a format before its type"
+        );
+        let (word, rest) = match header.split_once(char::is_whitespace) {
+            Some((word, rest)) => (word, rest.trim()),
+            None => (header, ""),
+        };
+        let format = Format::parse(word)?;
+        let declared = match format {
+            Format::Nuon => {
+                snafu::ensure_whatever!(
+                    !rest.is_empty(),
+                    "`nuon` declares the type its content conforms to"
+                );
+                Declared::Conforms(nu::parse_typedef(rest)?)
+            }
+            Format::Nu => {
+                snafu::ensure_whatever!(
+                    rest == TYPEDEF_SLOT,
+                    "`nu` carries `{TYPEDEF_SLOT}`; got {rest:?}"
+                );
+                Declared::Typedef
+            }
+            Format::String => {
+                snafu::ensure_whatever!(
+                    rest.is_empty(),
+                    "`string` carries no type; got {rest:?}"
+                );
+                Declared::Untyped
+            }
+        };
+        Ok(Self { format, declared })
+    }
+
+    /// The header this descriptor renders as.
+    pub fn render(&self) -> String {
+        match &self.declared {
+            Declared::Conforms(declared) => {
+                format!("{} {declared}", self.format.spelling())
+            }
+            Declared::Typedef => format!("{} {TYPEDEF_SLOT}", self.format.spelling()),
+            Declared::Untyped => self.format.spelling().to_string(),
+        }
+    }
+}
+
 /// Whether the boundary accepts the trained tool-marker attractor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Aliasing {

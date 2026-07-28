@@ -235,3 +235,50 @@ It discards the envelope that call produces. On the sub-turn path those
 diagnostics are already collected by `check_agreements`, so keeping them
 would double every row; on the answer path see the soft spot under
 `liquid_bindings`.
+
+## const REPL_MODE
+
+Not a form in the bridge's wire enum, and that is the point: a repl never
+leaves the Thinkspace, so putting it on the wire would model a journey it
+cannot take.
+
+## fn interpret
+
+### the thinking parameter
+
+A parameter rather than state because the caller owns the turn and knows
+its role; this layer only knows what an emission says. Passing it in
+keeps the rule enforceable here and the SIGNAL where it is actually
+observable.
+
+Today no caller reads a think role out of an emission, so the bridge
+passes true and the check never fires in production. That is recorded as
+debt rather than hidden: the rule and its locks exist, and what is
+missing is the reader.
+
+## fn sub_turn
+
+`repl` is matched before the parser is asked for anything. It has to be:
+the signature is discovered by diffing the declaration set after a parse,
+and a bare expression declares nothing, so the ordinary path would report
+a missing def rather than a repl.
+
+The deny is returned as a repair envelope rather than an error, for the
+same reason every other conformance failure is - a model reaching for a
+reasoning mode in the wrong turn is the ordinary untrained case, and the
+repair vocabulary is what that is for.
+
+## fn typed_payload
+
+What is checked follows from what the descriptor says, and the three
+cases check three different things. A conforming payload checks the value
+against its type. A typedef checks that the CONTENT parses as a type,
+which is that block's own contract and the only check available - there
+is no value to conform. Text checks nothing, because a string that
+round-trips is already everything the format promised.
+
+The typedef case returns `Type::String` beside the text: nushell has no
+first-class type value, so the carriage is a string until there is
+something better to carry it in. The descriptor is not lying about the
+payload; it names what the text MEANS while the type names how it is
+held.

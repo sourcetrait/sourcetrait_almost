@@ -67,3 +67,20 @@ The model would otherwise have to distinguish a result from a report of a
 non-result, in a grammar where `<output>` means a value, and the envelope
 already exists for exactly this. The `Err` channel stays reserved for the
 harness itself breaking rather than for a mode that did not run.
+
+## fn repl
+
+Nothing binds and nothing is checked, and both absences are the mode
+rather than an omission. A repl declares no contract, so there is no
+signature to agree with and no `<pass>` to pair; what it offers is an
+exact answer where the model would otherwise infer one.
+
+The rendering is NUON text rather than nushell's own table renderer,
+which is a real limitation and worth knowing before trusting it on
+structured output. For the case the mode exists to serve it is exactly
+right - a scalar's NUON text IS what a command line shows - and a box
+renderer is not in this library to reach for.
+
+A failure becomes a repair envelope for the same reason a think's does:
+in this grammar a returned block means a RESULT, and the model should not
+have to tell a result from a report of a non-result.

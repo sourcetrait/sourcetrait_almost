@@ -54,9 +54,22 @@ impl Questness {
     }
 
     /// Read one emission and take the turn to its next state.
-    pub fn step(&mut self, emission: &str, insufficient: bool) -> LibQuestResult<Step> {
+    ///
+    /// `thinking` says whether this emission may reach a reasoning mode.
+    pub fn step(
+        &mut self,
+        emission: &str,
+        insufficient: bool,
+        thinking: bool,
+    ) -> LibQuestResult<Step> {
         self.record("emission", emission);
-        let outcome = turn::interpret(&self.evaluator, emission, self.aliasing, insufficient)?;
+        let outcome = turn::interpret(
+            &self.evaluator,
+            emission,
+            self.aliasing,
+            insufficient,
+            thinking,
+        )?;
         let step = match outcome {
             turn::Outcome::Answered(answer) => Step::Answered(answer),
             turn::Outcome::Insufficient => Step::Insufficient,
@@ -66,6 +79,7 @@ impl Questness {
                 signature,
                 bindings,
             } => self.think(&form, &signature, &bindings)?,
+            turn::Outcome::Repl { source } => self.repl(&source)?,
             turn::Outcome::Ask { form, bindings } => Step::Ask { form, bindings },
         };
         match &step {
@@ -130,12 +144,40 @@ impl Questness {
             }
         }
     }
+
+    /// Run a repl expression and render its result back as a thought.
+    fn repl(&mut self, source: &str) -> LibQuestResult<Step> {
+        match self.evaluator.evaluate(source, None) {
+            Ok(value) => {
+                let rendered = nu::to_nuon_text(&value)?;
+                Ok(Step::Continue(turn::thought_turn(&repl_block(&rendered))))
+            }
+            Err(error) => {
+                let mut envelope = Envelope::default();
+                envelope.error(
+                    "questness::repl",
+                    Some(Tag::Nu.name()),
+                    &error.to_string(),
+                );
+                Ok(Step::Repair(envelope))
+            }
+        }
+    }
 }
 
 /// A value as the `<output>` block the model reads it from, escaped so
 /// no string's newline can forge a closer.
 fn output_block(value: &nu::Value) -> LibQuestResult<Block> {
-    let declared = value.get_type().to_string();
+    let declared = channel::Descriptor::nuon(value.get_type()).render();
     let payload = channel::escape_content(&nu::to_nuon_text(value)?);
     Ok(Block::new(Tag::Output, &declared, &payload))
+}
+
+/// A repl result as the `<input>` block the model reads it from.
+fn repl_block(rendered: &str) -> Block {
+    Block::new(
+        Tag::Input,
+        &channel::Descriptor::text().render(),
+        &channel::escape_content(rendered),
+    )
 }
