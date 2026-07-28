@@ -1,4 +1,4 @@
-//! `quest prompt`: the one verb, with capability composed onto it.
+//! `quest`: the one verb, with capability composed onto it.
 use crate::*;
 
 /// The flag naming a file to read the prompt from.
@@ -26,7 +26,7 @@ impl nu_plugin::SimplePluginCommand for Prompt {
     type Plugin = QuestPlugin;
 
     fn name(&self) -> &str {
-        "quest prompt"
+        "quest"
     }
 
     fn description(&self) -> &str {
