@@ -1,6 +1,9 @@
-//! Checkpoint-pinned constants for the era-two hybrid pair.
+//! Pinned constants: the era-two hybrid pair, and the training scheme.
 #[allow(unused_imports)]
 use crate::*;
+
+/// The training scheme's version, pinned in the manifest metadata.
+pub const TRAINING_VERSION: &str = env!("QUEST_TRAINING_VERSION");
 
 /// The deployed artifact (the era's sole checkpoint).
 pub const DPO_MODEL_NAME: &str = "Olmo-Hybrid-Instruct-DPO-7B";

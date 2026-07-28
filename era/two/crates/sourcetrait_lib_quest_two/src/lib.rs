@@ -214,6 +214,7 @@ mod tests {
     mod chat;
     mod checkpoint;
     mod config;
+    mod consts;
     mod evict;
     #[cfg(feature = "cuda")]
     mod fused;
