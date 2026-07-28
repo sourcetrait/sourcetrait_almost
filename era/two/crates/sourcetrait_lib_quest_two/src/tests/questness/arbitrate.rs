@@ -1,68 +1,40 @@
-//! Arbitration locks: the whole turn loop, against a stub harness.
+//! Arbitration locks: the whole turn loop, with no harness anywhere.
 use crate::channel::Aliasing;
-use crate::harness::{
-    ClientHarness,
-    HarnessRequest,
-    HarnessResponse,
-};
-use crate::nu;
-use crate::LibQuestResult;
 use crate::questness::arbitrate::{
     Questness,
     Step,
 };
 
-fn value(nuon: &str) -> nu::Value {
-    nu::from_nuon_text(nuon).expect("fixture parses")
-}
-
 /// QUESTNESS IS A BLOCKING API ALL THE WAY DOWN, and this is the lock
-/// that says the daemon can still use it.
-///
-/// Making only `ClientHarness::serve` async would buy nothing, which is
-/// what closes that open decision: the evaluator half spawns a sized
-/// thread and joins it, so an `evaluate` sub-turn blocks its caller
-/// whether or not the trait is async. The whole of `step` is blocking by
-/// construction, so the one correct way to drive it from an async daemon
-/// is `spawn_blocking` - and that needs the value to be `Send`.
+/// that says the daemon can still use it. The evaluator spawns a sized
+/// thread and joins it, so `step` blocks whatever else is true, and the
+/// one correct way to drive it from an async daemon is `spawn_blocking`
+/// - which needs the value to be `Send`.
 #[test]
 fn questness_can_cross_to_a_blocking_task() {
     fn assert_send<T: Send>() {}
-    assert_send::<Questness<crate::bubble::BubbleHarness>>();
+    assert_send::<Questness>();
 }
 
-/// A client harness whose world is one record, modifiable between turns.
-///
-/// The fixture is the WORLD rather than the response: the test sets the
-/// state and the answer follows from it, so a changed setup cannot leave
-/// a stale answer behind still looking plausible.
-struct World {
-    state: nu::Value,
-    served: Vec<String>,
-}
-
-impl World {
-    fn new(nuon: &str) -> Self {
-        Self {
-            state: value(nuon),
-            served: Vec::new(),
-        }
-    }
-}
-
-impl ClientHarness for World {
-    fn serve(&mut self, request: &HarnessRequest) -> LibQuestResult<HarnessResponse> {
-        self.served.push(request.mode.clone());
-        Ok(HarnessResponse::value(self.state.clone()))
-    }
-}
-
-/// The model asks for something it was not given.
-const ASKS: &str = "\
-<|extra_id_4|> def interact []: nothing -> record<cwd: string> { {cwd: ''} }
+/// The model works something out for itself.
+const THINKS: &str = "\
+<|extra_id_2|> list<string>
+[a, b, c]
+<|extra_id_6|>
+<|extra_id_3|>$in<|extra_id_6|>
+<|extra_id_4|> def evaluate []: list<string> -> int { $in | length }
 <|extra_id_6|>";
 
-/// The model answers, having been told.
+/// The model asks the CALLER to run something against the world.
+const ASKS: &str = "\
+<|extra_id_2|> record<cwd: string>
+{cwd: ''}
+<|extra_id_6|>
+<|extra_id_3|>$in<|extra_id_6|>
+<|extra_id_4|> def --env interact []: record<cwd: string> -> record<cwd: string> { $in }
+<|extra_id_6|>";
+
+/// The model answers.
 const ANSWERS: &str = "\
 <|extra_id_2|> record<cwd: string>
 {cwd: '/tmp/foo'}
@@ -73,133 +45,43 @@ We are currently in the {{ in.cwd }} directory.
 <|extra_id_6|>";
 
 #[test]
-fn a_client_sub_turn_comes_back_as_a_typed_output_block() {
-    let mut questness =
-        Questness::new(World::new("{cwd: '/tmp/foo'}"), Aliasing::Strict).expect("builds");
-
-    let Step::Continue(back) = questness.step(ASKS, false).expect("steps") else {
-        panic!("a client mode should have been served");
+fn a_think_turn_runs_here_and_comes_back_as_a_thought() {
+    let mut questness = Questness::new(Aliasing::Strict).expect("builds");
+    let Step::Continue(back) = questness.step(THINKS, false).expect("steps") else {
+        panic!("evaluate runs on the Thinkspace's own evaluator");
     };
     assert!(
-        back.starts_with("<|extra_id_2|> record<cwd: string>"),
-        "the result returns TYPED, through output: {back}"
+        back.starts_with("<|im_start|>thought"),
+        "the answer rides a thought turn: {back}"
     );
-    assert!(back.contains("{cwd: /tmp/foo}"));
-    assert!(back.trim_end().ends_with("<|extra_id_6|>"));
-}
-
-#[test]
-fn the_worked_example_differs_only_in_the_value_it_was_told() {
-    for (world, expected) in [
-        ("{cwd: '/tmp/foo'}", "We are currently in the /tmp/foo directory."),
-        ("{cwd: '/srv/other'}", "We are currently in the /srv/other directory."),
-    ] {
-        let mut questness = Questness::new(World::new(world), Aliasing::Strict).expect("builds");
-
-        let Step::Continue(back) = questness.step(ASKS, false).expect("steps") else {
-            panic!("expected a sub-turn to be served");
-        };
-        // The model, having been told, finishes the turn. It echoes the
-        // value it was handed, which is what the design's example does.
-        let told = back
-            .lines()
-            .nth(1)
-            .expect("the block carries a payload")
-            .to_string();
-        let finished = ANSWERS.replace("{cwd: '/tmp/foo'}", &told);
-
-        let Step::Answered(answer) = questness.step(&finished, false).expect("steps") else {
-            panic!("expected the turn to finish");
-        };
-        assert_eq!(answer.rendered.trim(), expected);
-    }
-}
-
-#[test]
-fn changing_the_world_changes_the_response() {
-    let mut first = Questness::new(World::new("{cwd: '/a'}"), Aliasing::Strict).expect("builds");
-    let mut second = Questness::new(World::new("{cwd: '/b'}"), Aliasing::Strict).expect("builds");
-
-    let Step::Continue(a) = first.step(ASKS, false).expect("steps") else {
-        panic!("served");
-    };
-    let Step::Continue(b) = second.step(ASKS, false).expect("steps") else {
-        panic!("served");
-    };
-    assert_ne!(a, b, "the same request against two worlds must differ");
-    assert!(a.contains("/a"));
-    assert!(b.contains("/b"));
-}
-
-#[test]
-fn an_inside_mode_never_reaches_the_client() {
-    let inside = "\
-<|extra_id_2|> list<string>
-[a, b, c]
-<|extra_id_6|>
-<|extra_id_3|>$in<|extra_id_6|>
-<|extra_id_4|> def evaluate []: list<string> -> int { $in | length }
-<|extra_id_6|>";
-    let mut questness =
-        Questness::new(World::new("{cwd: '/tmp'}"), Aliasing::Strict).expect("builds");
-
-    let Step::Continue(back) = questness.step(inside, false).expect("steps") else {
-        panic!("expected the inside path to run");
-    };
+    assert!(
+        back.contains("<|extra_id_2|> int"),
+        "and it returns TYPED: {back}"
+    );
     assert!(back.contains('3'), "the evaluator's own answer: {back}");
     assert!(
-        back.starts_with("<|extra_id_2|> int"),
-        "and it returns typed too: {back}"
+        back.trim_end().ends_with("<|im_end|>"),
+        "the turn closes: {back}"
     );
 }
 
+/// Nothing here runs an ask. It rides back with what it consumes and
+/// the turn pauses until the caller sends a result.
 #[test]
-fn a_failing_client_becomes_feedback_rather_than_an_error() {
-    struct Refuses;
-    impl ClientHarness for Refuses {
-        fn serve(&mut self, _request: &HarnessRequest) -> LibQuestResult<HarnessResponse> {
-            Ok(HarnessResponse::failed(
-                "harness::denied",
-                "interact is not built",
-            ))
-        }
-    }
-    let mut questness = Questness::new(Refuses, Aliasing::Strict).expect("builds");
-    let Step::Repair(envelope) = questness.step(ASKS, false).expect("steps") else {
-        panic!("a refusal is feedback, not a step forward");
+fn an_ask_pauses_the_turn_rather_than_being_served() {
+    let mut questness = Questness::new(Aliasing::Strict).expect("builds");
+    let Step::Ask { form, bindings } = questness.step(ASKS, false).expect("steps") else {
+        panic!("an ask is never serviced here");
     };
-    assert_eq!(envelope.errors.len(), 1);
-    assert_eq!(envelope.errors[0].kind, "harness::denied");
+    assert_eq!(form.mode(), "interact");
+    assert!(!form.is_think());
+    assert_eq!(bindings.len(), 1, "the ask carries what it consumes");
+    assert_eq!(bindings[0].pass, "$in");
 }
 
 #[test]
-fn a_session_log_records_both_sides_of_the_turn() {
-    let root = std::env::temp_dir().join("quest_arbitrate_log");
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).expect("scratch");
-    let log = crate::session::SessionLog::open(&root, &["space", "session"])
-        .expect("opens");
-
-    let mut questness = Questness::new(World::new("{cwd: '/tmp/foo'}"), Aliasing::Strict)
-        .expect("builds")
-        .logging_to(log.clone());
-
-    questness.step(ASKS, false).expect("steps");
-
-    let text = log.read().expect("reads");
-    assert!(text.contains("== emission =="), "what the model wrote");
-    assert!(text.contains("== continue =="), "what it was told back");
-    assert!(
-        text.contains("/tmp/foo"),
-        "the low-level text carries the value: {text}"
-    );
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
-fn a_plain_answer_never_touches_the_harness() {
-    let mut questness =
-        Questness::new(World::new("{cwd: '/tmp/foo'}"), Aliasing::Strict).expect("builds");
+fn a_plain_answer_touches_no_engine_at_all() {
+    let mut questness = Questness::new(Aliasing::Strict).expect("builds");
     let Step::Answered(answer) = questness.step(ANSWERS, false).expect("steps") else {
         panic!("expected an answer");
     };
@@ -207,4 +89,49 @@ fn a_plain_answer_never_touches_the_harness() {
         answer.rendered.trim(),
         "We are currently in the /tmp/foo directory."
     );
+}
+
+/// A think that does not run is feedback rather than an error, because
+/// in this grammar `<output>` means a value and the model should not
+/// have to tell a result from a report of a non-result.
+#[test]
+fn a_failing_think_becomes_feedback() {
+    let broken = "\
+<|extra_id_4|> def evaluate []: nothing -> int { 1 / 0 }
+<|extra_id_6|>";
+    let mut questness = Questness::new(Aliasing::Strict).expect("builds");
+    match questness.step(broken, false).expect("steps") {
+        Step::Repair(envelope) => {
+            assert!(!envelope.errors.is_empty(), "the failure is reported back");
+        }
+        other => panic!("a failed think is feedback, got {other:?}"),
+    }
+}
+
+#[test]
+fn insufficiency_is_the_callers_verdict() {
+    let mut questness = Questness::new(Aliasing::Strict).expect("builds");
+    assert!(matches!(
+        questness.step("anything at all", true).expect("steps"),
+        Step::Insufficient
+    ));
+}
+
+#[test]
+fn a_session_log_records_both_sides_of_the_turn() {
+    let root = std::env::temp_dir().join("quest_arbitrate_log");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("scratch");
+    let log =
+        crate::session::SessionLog::open(&root, &["space", "session"]).expect("opens");
+
+    let mut questness = Questness::new(Aliasing::Strict)
+        .expect("builds")
+        .logging_to(log.clone());
+    questness.step(THINKS, false).expect("steps");
+
+    let text = log.read().expect("reads");
+    assert!(text.contains("== emission =="), "what the model wrote");
+    assert!(text.contains("== thought =="), "what it was told back");
+    let _ = std::fs::remove_dir_all(&root);
 }

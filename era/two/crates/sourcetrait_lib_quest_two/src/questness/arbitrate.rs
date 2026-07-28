@@ -1,12 +1,20 @@
-//! Questness itself: it owns the turn and arbitrates its sub-turns.
+//! Questness itself: it owns the turn and arbitrates what it asks for.
 use crate::*;
 
 /// What one emission moved the turn to.
 #[derive(Debug, Clone)]
 pub enum Step {
-    /// A sub-turn ran; send this back to the model and read it again.
+    /// A think turn ran here; send this back to the model and read it
+    /// again. The only state that keeps the turn going.
     Continue(String),
     Answered(turn::Answer),
+    /// The model asked the CALLER's own engine to run something. The
+    /// turn pauses: nothing here runs it, and the caller sends the
+    /// result back on the next request.
+    Ask {
+        form: bridge::InferNu,
+        bindings: Vec<turn::Binding>,
+    },
     /// The model said it cannot produce conforming output.
     Insufficient,
     /// The emission did not conform; the envelope is the feedback.
@@ -15,23 +23,18 @@ pub enum Step {
 
 /// The turn's owner: it renders, reads, and arbitrates.
 ///
-/// Generic over the harness rather than boxing it, because one instance
-/// talks to one harness for its life.
-pub struct Questness<H: harness::ClientHarness> {
+/// It holds no harness and calls nothing out. The one thing it runs is a
+/// think turn, on the Thinkspace's own evaluator.
+pub struct Questness {
     evaluator: QuestnessEvaluator,
-    harness: H,
     aliasing: channel::Aliasing,
     log: Option<session::SessionLog>,
 }
 
-impl<H: harness::ClientHarness> Questness<H> {
-    pub fn new(
-        harness: H,
-        aliasing: channel::Aliasing,
-    ) -> LibQuestResult<Self> {
+impl Questness {
+    pub fn new(aliasing: channel::Aliasing) -> LibQuestResult<Self> {
         Ok(Self {
             evaluator: QuestnessEvaluator::new()?,
-            harness,
             aliasing,
             log: None,
         })
@@ -58,11 +61,17 @@ impl<H: harness::ClientHarness> Questness<H> {
             turn::Outcome::Answered(answer) => Step::Answered(answer),
             turn::Outcome::Insufficient => Step::Insufficient,
             turn::Outcome::Repair(envelope) => Step::Repair(envelope),
-            turn::Outcome::SubTurn(sub) => self.serve(&sub)?,
+            turn::Outcome::Think {
+                form,
+                signature,
+                bindings,
+            } => self.think(&form, &signature, &bindings)?,
+            turn::Outcome::Ask { form, bindings } => Step::Ask { form, bindings },
         };
         match &step {
-            Step::Continue(text) => self.record("continue", text),
+            Step::Continue(text) => self.record("thought", text),
             Step::Answered(answer) => self.record("answered", &answer.rendered),
+            Step::Ask { form, .. } => self.record("ask", form.source()),
             Step::Insufficient => self.record("insufficient", ""),
             Step::Repair(envelope) => {
                 let rows: Vec<String> = envelope
@@ -86,45 +95,33 @@ impl<H: harness::ClientHarness> Questness<H> {
         }
     }
 
-    /// Run a sub-turn wherever it belongs, and render its result back.
-    fn serve(&mut self, sub: &turn::SubTurn) -> LibQuestResult<Step> {
-        let response = match sub.destination {
-            turn::Destination::Inside => {
-                match turn::run_inside(&self.evaluator, sub) {
-                    Ok(value) => harness::HarnessResponse::value(value),
-                    Err(error) => {
-                        harness::HarnessResponse::failed("questness::evaluate", &error.to_string())
-                    }
-                }
+    /// Run a think turn and render its answer back as a thought.
+    ///
+    /// A failure becomes a repair envelope rather than a block, because
+    /// in this grammar `<output>` means a VALUE and the model should not
+    /// have to tell a result from a report of a non-result.
+    fn think(
+        &mut self,
+        form: &bridge::InferNu,
+        signature: &NuSignature,
+        bindings: &[turn::Binding],
+    ) -> LibQuestResult<Step> {
+        match turn::run_think(&self.evaluator, form, signature, bindings) {
+            Ok(value) => {
+                let declared = value.get_type().to_string();
+                let payload = channel::escape_content(&nu::to_nuon_text(&value)?);
+                let block = Block::new(Tag::Output, &declared, &payload);
+                Ok(Step::Continue(turn::thought_turn(&block)))
             }
-            turn::Destination::Client => self.harness.serve(&request_for(sub))?,
-        };
-        match response.as_block() {
-            Ok(block) => Ok(Step::Continue(
-                channel::render_block(&block),
-            )),
-            Err(diagnostic) => {
+            Err(error) => {
                 let mut envelope = Envelope::default();
-                envelope.errors.push(diagnostic);
+                envelope.error(
+                    "questness::evaluate",
+                    Some(Tag::Nu.name()),
+                    &error.to_string(),
+                );
                 Ok(Step::Repair(envelope))
             }
         }
-    }
-}
-
-/// A sub-turn as the request that crosses to a client harness.
-pub(crate) fn request_for(sub: &turn::SubTurn) -> harness::HarnessRequest {
-    harness::HarnessRequest {
-        mode: sub.contract.head.clone(),
-        source: sub.source.clone(),
-        output: sub.contract.output.to_string(),
-        bindings: sub
-            .bindings
-            .iter()
-            .map(|binding| harness::RequestBinding {
-                pass: binding.pass.clone(),
-                value: harness::QuestNuValue::new(binding.value.clone()),
-            })
-            .collect(),
     }
 }

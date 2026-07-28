@@ -1,8 +1,15 @@
 //! The turn: assemble what the model sees, and read what it emits.
 use crate::*;
 
-/// The one `<nu>` mode that round-trips inside Questness.
-pub const INSIDE_MODE: &str = "evaluate";
+/// The Thinkspace's own turn, which never crosses the wire. The model
+/// asks with a think, the Thinkspace's evaluator answers with a thought,
+/// and the model finishes inside the same turn.
+/// Routing is off the FORM today, since an evaluate is always a think
+/// turn, so nothing yet reads a think wrapper out of an emission. The
+/// name stands because the pair is the design.
+#[allow(dead_code)]
+pub const THINK_ROLE: &str = "think";
+pub const THOUGHT_ROLE: &str = "thought";
 
 /// A `<pass>` binding and the value travelling on it.
 #[derive(Debug, Clone, PartialEq)]
@@ -52,29 +59,23 @@ pub struct Answer {
     pub config: Option<nu::Value>,
 }
 
-/// Where a `<nu>` mode runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Destination {
-    /// `evaluate`, which round-trips here with no client involved.
-    Inside,
-    /// Every other mode, which leaves for the client harness.
-    Client,
-}
-
-/// A sub-turn the model asked for, ready to dispatch.
-#[derive(Debug, Clone)]
-pub struct SubTurn {
-    pub contract: NuSignature,
-    pub destination: Destination,
-    pub source: String,
-    pub bindings: Vec<Binding>,
-}
-
 /// What the emission asks for next.
 #[derive(Debug, Clone)]
 pub enum Outcome {
     Answered(Answer),
-    SubTurn(SubTurn),
+    /// An `evaluate` form, which is ALWAYS a think turn: the
+    /// Thinkspace's own evaluator answers it and nothing leaves.
+    Think {
+        form: bridge::InferNu,
+        signature: NuSignature,
+        bindings: Vec<Binding>,
+    },
+    /// Every other form. Questness never runs one - it rides back to the
+    /// caller with what it consumes, and the turn pauses there.
+    Ask {
+        form: bridge::InferNu,
+        bindings: Vec<Binding>,
+    },
     /// The model said it cannot produce conforming output.
     Insufficient,
     /// The emission did not conform; the envelope is the feedback.
@@ -151,39 +152,54 @@ pub fn interpret(
 /// A `<nu>` body only DECLARES its def, so the call is appended: the
 /// mode is the def's name, `$args` renders as a NUON literal at the call
 /// site, and `$in` rides the pipeline.
-pub fn run_inside(
+pub fn run_think(
     evaluator: &QuestnessEvaluator,
-    sub: &SubTurn,
+    form: &bridge::InferNu,
+    signature: &NuSignature,
+    bindings: &[Binding],
 ) -> LibQuestResult<nu::Value> {
-    if sub.destination != Destination::Inside {
-        snafu::whatever!(
-            "`{}` leaves for the client rather than running here",
-            sub.contract.head
-        );
-    }
+    snafu::ensure_whatever!(
+        form.is_think(),
+        "`{}` is not a think turn; only evaluate runs here",
+        form.mode()
+    );
     let mut call = String::new();
-    if sub.contract.takes_pipeline() {
+    if signature.takes_pipeline() {
         call.push_str("$in | ");
     }
-    call.push_str(&sub.contract.head);
-    if sub.contract.args.is_some() {
-        let Some(args) = binding(sub, "$args") else {
-            snafu::whatever!("`{}` declares an args positional that nothing bound", sub.contract.head);
+    call.push_str(form.mode());
+    if signature.args.is_some() {
+        let Some(args) = binding_of(bindings, "$args") else {
+            snafu::whatever!(
+                "`{}` declares an args positional that nothing bound",
+                form.mode()
+            );
         };
         call.push(' ');
         call.push_str(&nu::to_nuon_text(args)?);
     }
-    let pipeline = if sub.contract.takes_pipeline() {
-        binding(sub, "$in").cloned()
+    let pipeline = if signature.takes_pipeline() {
+        binding_of(bindings, "$in").cloned()
     } else {
         None
     };
-    evaluator.evaluate(&format!("{}\n{call}", sub.source), pipeline)
+    evaluator.evaluate(&format!("{}\n{call}", form.source()), pipeline)
 }
 
-/// The value a channel carries into this sub-turn, if anything bound it.
-fn binding<'a>(sub: &'a SubTurn, pass: &str) -> Option<&'a nu::Value> {
-    sub.bindings
+/// The thought turn a think's answer comes back on.
+///
+/// Questness-internal by construction: this never crosses the wire, so
+/// nothing outside the conversation with the model ever sees a role.
+pub fn thought_turn(block: &Block) -> String {
+    format!(
+        "<|im_start|>{THOUGHT_ROLE}\n{}\n<|im_end|>\n",
+        channel::render_block(block)
+    )
+}
+
+/// The value a channel carries, if anything bound it.
+fn binding_of<'a>(bindings: &'a [Binding], pass: &str) -> Option<&'a nu::Value> {
+    bindings
         .iter()
         .find(|binding| binding.pass == pass)
         .map(|binding| &binding.value)
@@ -196,30 +212,35 @@ fn sub_turn(
     nu_block: &Block,
 ) -> LibQuestResult<Outcome> {
     let source = nu_source(nu_block);
-    let contract = match evaluator.signature_of(&source) {
-        Ok(contract) => contract,
+    let signature = match evaluator.signature_of(&source) {
+        Ok(signature) => signature,
         Err(error) => {
             let mut envelope = Envelope::default();
             envelope.error("channel::nu_parse", Some(Tag::Nu.name()), &error.to_string());
             return Ok(Outcome::Repair(envelope));
         }
     };
-    let mut envelope = check_agreements(blocks, &contract);
+    let mut envelope = check_agreements(blocks, &signature);
     let bindings = decode_bindings(blocks, &mut envelope);
     if !envelope.is_clean() {
         return Ok(Outcome::Repair(envelope));
     }
-    let destination = if contract.head == INSIDE_MODE {
-        Destination::Inside
-    } else {
-        Destination::Client
+    let form = match questness::contract::form_of(&signature, &source) {
+        Ok(form) => form,
+        Err(error) => {
+            envelope.error("channel::nu_form", Some(Tag::Nu.name()), &error.to_string());
+            return Ok(Outcome::Repair(envelope));
+        }
     };
-    Ok(Outcome::SubTurn(SubTurn {
-        contract,
-        destination,
-        source,
-        bindings,
-    }))
+    Ok(if form.is_think() {
+        Outcome::Think {
+            form,
+            signature,
+            bindings,
+        }
+    } else {
+        Outcome::Ask { form, bindings }
+    })
 }
 
 /// The answer path: the typed value, then the prose that renders it.

@@ -6,14 +6,20 @@ obliges us to do next. Everything here is experimental in the campaign's
 sense - the shape is a first draft expected to move once there is a
 daemon and a plugin exercising it.
 
-## const INSIDE_MODE
+## const THINK_ROLE
 
-The boundary from the design, spelled as one comparison. `evaluate`
-round-trips here with no client involved; every other mode leaves. Making
-it a constant rather than a match arm means the client-bound set is
-open by construction, which is what the design wants - the deferred modes
-(`execute`, `call`, `interact`) need no code here to be routed correctly,
-because anything that is not `evaluate` already leaves.
+## const THOUGHT_ROLE
+
+The Thinkspace's own turn, and the reason it is a chat ROLE rather than a
+tag: the seven-tag map is fully allocated, so a channel of its own would
+have had to displace one, while a role costs nothing at all. A role is
+plain text after `<|im_start|>`, so `think` is a few ordinary tokens
+rather than an added one.
+
+Routing is off the FORM rather than off a parsed wrapper, because an
+evaluate is ALWAYS a think turn. That is why only the thought half is
+read here; the think name stands because the pair is the design rather
+than because anything reads it yet.
 
 ## struct Binding
 
@@ -47,10 +53,23 @@ already owns.
 
 ## enum Outcome
 
-Four arms, and the split is by who acts next rather than by whether
-something went wrong. `Answered` means the caller is done, `SubTurn`
-means someone must run something, `Insufficient` means the model declined,
-and `Repair` means the model must go again with the envelope as feedback.
+Five arms, split by WHO ACTS NEXT rather than by whether something went
+wrong. `Answered` means the caller is done. `Think` means the
+Thinkspace's own evaluator runs it and the model continues inside this
+same turn. `Ask` means the CALLER runs it and the turn pauses there.
+`Insufficient` means the model declined, and `Repair` means the model
+goes again with the envelope as feedback.
+
+`Think` and `Ask` are two arms rather than one arm carrying a
+destination, and that is the correction this module was rewritten for. A
+form does not HAVE a destination that something decides for it: an
+evaluate is a think turn and nothing else ever is. Carrying the two as
+one shape with a flag beside it is what let a client-harness seam grow
+inside Questness, which never belonged here - Questness calls nothing
+out.
+
+`Ask` carries its bindings because an ask with nothing bound to it is a
+function the caller has no arguments to run on.
 
 `Repair` deliberately returns `Ok`. A malformed emission is an ordinary
 outcome of running a model that has not been trained on this grammar -
@@ -93,7 +112,7 @@ The `<nu>` block wins over `<output>` when both are present. A turn that
 proposes a check and an answer is asking for the check to run, and the
 answer it already wrote is what the check is about.
 
-## fn sub_turn
+## fn nu_form
 
 Runs `check_agreements` and the binding decode, then bails on a dirty
 envelope. Note the order: bindings are decoded even when the agreements
@@ -101,6 +120,10 @@ already failed, so one round trip carries every diagnostic the emission
 earned rather than the first class of them. That is the collect-rather-
 than-bail rule from 10_Channels, applied across two checks instead of
 inside one.
+
+The form match runs LAST, after the agreements, for the same reason. A
+body that fails its prototype has still bound channels worth reporting
+on, and matching first would cost a round trip per class of fault.
 
 ## fn answer
 
@@ -154,7 +177,7 @@ mis-attributed. It is filed rather than fixed because the answer path has
 no contract to check a pass against, so reporting one properly needs a
 notion of agreement that does not exist without a def.
 
-## fn run_inside
+## fn run_think
 
 The invocation is APPENDED to the body, and this is the mechanic the
 whole inside path rests on. A `<nu>` block declares a def; it does not
@@ -172,6 +195,18 @@ explicit form is the documented rule - in first position inside a block,
 `$in` is the block input - and it does not depend on how a bare `def`
 statement interacts with pipeline input, which is the kind of thing that
 would work until it did not.
+
+## fn thought_turn
+
+The answer comes back on a turn of its own rather than as bare text,
+which is what makes the think and thought pair a REQUEST AND RESPONSE at
+the chat-role layer - the same discipline the wire already follows with a
+pair per operation.
+
+It wraps an `<output>` block rather than replacing one. The ruling that a
+result from `<nu>` comes back TYPED still holds; the thought turn is what
+replaces the environment turn it used to ride on, not what replaces the
+block.
 
 ## fn nuon_payload
 

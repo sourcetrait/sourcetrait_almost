@@ -4,12 +4,11 @@ use crate::nu;
 use crate::questness::evaluate::QuestnessEvaluator;
 use crate::questness::turn::{
     Binding,
-    Destination,
     Outcome,
     Request,
     assemble,
     interpret,
-    run_inside,
+    run_think,
 };
 
 fn evaluator() -> QuestnessEvaluator {
@@ -75,7 +74,7 @@ fn a_value_that_misses_its_declared_type_asks_for_repair() {
 }
 
 #[test]
-fn the_evaluate_mode_stays_inside_and_others_leave() {
+fn evaluate_is_a_think_turn_and_every_other_form_is_an_ask() {
     let inside = "\
 <|extra_id_2|> list<string>
 [a, b]
@@ -84,24 +83,28 @@ fn the_evaluate_mode_stays_inside_and_others_leave() {
 <|extra_id_4|> def evaluate []: list<string> -> int { $in | length }
 <|extra_id_6|>";
     let outcome = interpret(&evaluator(), inside, Aliasing::Strict, false).expect("interprets");
-    let Outcome::SubTurn(sub) = outcome else {
-        panic!("expected a sub-turn, got {outcome:?}");
+    let Outcome::Think { form, bindings, .. } = outcome else {
+        panic!("evaluate is ALWAYS a think turn, got {outcome:?}");
     };
-    assert_eq!(sub.destination, Destination::Inside);
-    assert_eq!(sub.contract.head, "evaluate");
-    assert_eq!(sub.bindings.len(), 1);
-    assert_eq!(sub.bindings[0].pass, "$in");
+    assert_eq!(form.mode(), "evaluate");
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].pass, "$in");
 
-    let leaves = inside.replace("def evaluate ", "def interact ");
+    let leaves = inside.replace("def evaluate ", "def --env interact ");
     let outcome = interpret(&evaluator(), &leaves, Aliasing::Strict, false).expect("interprets");
-    let Outcome::SubTurn(sub) = outcome else {
-        panic!("expected a sub-turn, got {outcome:?}");
+    let Outcome::Ask { form, bindings } = outcome else {
+        panic!("every other form is an ask, got {outcome:?}");
     };
-    assert_eq!(sub.destination, Destination::Client);
+    assert_eq!(form.mode(), "interact");
+    assert_eq!(
+        bindings.len(),
+        1,
+        "an ask carries what it consumes, or the caller has nothing to run it on"
+    );
 }
 
 #[test]
-fn a_sub_turns_bound_value_reaches_the_evaluator() {
+fn a_think_turns_bound_value_reaches_the_evaluator() {
     let emission = "\
 <|extra_id_2|> list<string>
 [a, b, c]
@@ -111,10 +114,16 @@ fn a_sub_turns_bound_value_reaches_the_evaluator() {
 <|extra_id_6|>";
     let evaluator = evaluator();
     let outcome = interpret(&evaluator, emission, Aliasing::Strict, false).expect("interprets");
-    let Outcome::SubTurn(sub) = outcome else {
-        panic!("expected a sub-turn, got {outcome:?}");
+    let Outcome::Think {
+        form,
+        signature,
+        bindings,
+    } = outcome
+    else {
+        panic!("expected a think turn, got {outcome:?}");
     };
-    let result = run_inside(&evaluator, &sub).expect("the sub-turn evaluates");
+    let result =
+        run_think(&evaluator, &form, &signature, &bindings).expect("the think turn evaluates");
     assert_eq!(result.as_int().expect("an int"), 3);
 }
 
@@ -129,25 +138,38 @@ fn an_args_positional_reaches_the_def_as_a_literal() {
 <|extra_id_6|>";
     let evaluator = evaluator();
     let outcome = interpret(&evaluator, emission, Aliasing::Strict, false).expect("interprets");
-    let Outcome::SubTurn(sub) = outcome else {
-        panic!("expected a sub-turn, got {outcome:?}");
+    let Outcome::Think {
+        form,
+        signature,
+        bindings,
+    } = outcome
+    else {
+        panic!("expected a think turn, got {outcome:?}");
     };
-    let result = run_inside(&evaluator, &sub).expect("the sub-turn evaluates");
+    let result =
+        run_think(&evaluator, &form, &signature, &bindings).expect("the think turn evaluates");
     assert_eq!(result.as_int().expect("an int"), 4);
 }
 
+/// An ask is never run here, and asking for one by mistake is refused
+/// rather than quietly evaluated against the Thinkspace's engine.
 #[test]
-fn a_client_mode_refuses_to_run_here() {
+fn an_ask_is_never_run_here() {
     let emission = "\
-<|extra_id_4|> def interact []: nothing -> int { 1 }
+<|extra_id_4|> def --env interact []: nothing -> int { 1 }
 <|extra_id_6|>";
     let evaluator = evaluator();
     let outcome = interpret(&evaluator, emission, Aliasing::Strict, false).expect("interprets");
-    let Outcome::SubTurn(sub) = outcome else {
-        panic!("expected a sub-turn, got {outcome:?}");
+    let Outcome::Ask { form, .. } = outcome else {
+        panic!("expected an ask, got {outcome:?}");
     };
-    assert_eq!(sub.destination, Destination::Client);
-    assert!(run_inside(&evaluator, &sub).is_err());
+    assert!(!form.is_think());
+
+    let signature = evaluator.signature_of(form.source()).expect("a signature");
+    assert!(
+        run_think(&evaluator, &form, &signature, &[]).is_err(),
+        "only a think turn runs on the Thinkspace's evaluator"
+    );
 }
 
 #[test]

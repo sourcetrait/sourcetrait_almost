@@ -1,5 +1,4 @@
 pub(crate) mod adapter;
-pub mod bubble;
 pub mod channel;
 pub(crate) mod chat;
 pub(crate) mod checkpoint;
@@ -15,7 +14,6 @@ pub(crate) mod gdn;
 pub(crate) mod generate;
 #[cfg(feature = "cuda")]
 pub(crate) mod graph;
-pub mod harness;
 pub(crate) mod load;
 pub(crate) mod model {
     pub(crate) mod attn_layer;
@@ -207,7 +205,6 @@ pub use crate::tokenizer::{
 #[cfg(test)]
 mod tests {
     mod adapter;
-    mod bubble;
     mod channel;
     mod chat;
     mod checkpoint;
@@ -221,7 +218,6 @@ mod tests {
     mod generate;
     #[cfg(feature = "cuda")]
     mod graph;
-    mod harness;
     mod load;
     mod model;
     mod needle;

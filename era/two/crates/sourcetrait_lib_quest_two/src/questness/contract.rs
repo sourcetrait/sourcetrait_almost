@@ -15,12 +15,14 @@ pub struct NuSignature {
     pub head: String,
     /// The infix input type; `nothing` means no pipeline input.
     pub input: nu::Type,
+    /// Read by whoever runs the form. A think turn is checked by the
+    /// evaluator; an ask is the caller's, and the caller re-reads the
+    /// signature off the source it was handed.
+    #[allow(dead_code)]
     pub output: nu::Type,
     /// The `args` positional's type, when the def declares one.
     pub args: Option<nu::Type>,
-    /// Whether the def carries `--env`. Read by the prototype match,
-    /// which the turn does not reach yet.
-    #[allow(dead_code)]
+    /// Whether the def carries `--env`, which IS interact's contract.
     pub env: bool,
 }
 
@@ -66,32 +68,43 @@ impl questness::evaluate::QuestnessEvaluator {
     ///
     /// Reached by its locks until the turn is collapsed onto it, which
     /// is what retires `Destination` and the client-harness seam.
+    /// The turn holds a signature already and calls `form_of` directly,
+    /// so this is the surface for anyone who does not.
     #[allow(dead_code)]
     pub fn infer_nu(&self, source: &str) -> LibQuestResult<bridge::InferNu> {
         let signature = self.signature_of(source)?;
-        let body = source.to_string();
-        match signature.head.as_str() {
-            "evaluate" => {
-                check_prototype(&signature, false)?;
-                Ok(bridge::InferNu::Evaluate(bridge::InferNuEvaluate(body)))
-            }
-            "execute" => {
-                check_prototype(&signature, false)?;
-                Ok(bridge::InferNu::Execute(bridge::InferNuExecute(body)))
-            }
-            "call" => {
-                check_prototype(&signature, false)?;
-                Ok(bridge::InferNu::Call(bridge::InferNuCall(body)))
-            }
-            "interact" => {
-                check_prototype(&signature, true)?;
-                Ok(bridge::InferNu::Interact(bridge::InferNuInteract(body)))
-            }
-            other => snafu::whatever!(
-                "`{other}` is not a form; a nu block declares evaluate, execute, \
-                 call or interact"
-            ),
+        form_of(&signature, source)
+    }
+}
+
+/// Match a read signature to the form it declares.
+///
+/// Separate from `infer_nu` because the turn already holds a signature
+/// by the time it gets here: the agreements are checked against it
+/// first, and reading it twice would parse the body twice.
+pub fn form_of(signature: &NuSignature, source: &str) -> LibQuestResult<bridge::InferNu> {
+    let body = source.to_string();
+    match signature.head.as_str() {
+        "evaluate" => {
+            check_prototype(signature, false)?;
+            Ok(bridge::InferNu::Evaluate(bridge::InferNuEvaluate(body)))
         }
+        "execute" => {
+            check_prototype(signature, false)?;
+            Ok(bridge::InferNu::Execute(bridge::InferNuExecute(body)))
+        }
+        "call" => {
+            check_prototype(signature, false)?;
+            Ok(bridge::InferNu::Call(bridge::InferNuCall(body)))
+        }
+        "interact" => {
+            check_prototype(signature, true)?;
+            Ok(bridge::InferNu::Interact(bridge::InferNuInteract(body)))
+        }
+        other => snafu::whatever!(
+            "`{other}` is not a form; a nu block declares evaluate, execute, \
+             call or interact"
+        ),
     }
 }
 
@@ -99,7 +112,6 @@ impl questness::evaluate::QuestnessEvaluator {
 /// contract, since env and `cd` changes surviving into the caller is
 /// what interact MEANS. A form that carries it and should not, or does
 /// not and should, is not that form however it is spelled.
-#[allow(dead_code)]
 fn check_prototype(signature: &NuSignature, wants_env: bool) -> LibQuestResult<()> {
     match (wants_env, signature.env) {
         (true, false) => snafu::whatever!(
