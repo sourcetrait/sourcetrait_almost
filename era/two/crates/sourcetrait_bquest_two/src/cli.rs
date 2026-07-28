@@ -46,6 +46,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: TaskgenCommand,
     },
+    /// Training assets as data, laid out by stage and syllabus.
+    Syllabus {
+        #[command(subcommand)]
+        command: SyllabusCommand,
+    },
     /// Sampled, verifier-graded generation - the reinforcement
     /// stage's data source.
     Rollout {
@@ -196,6 +201,22 @@ pub(crate) struct TaskgenAllArgs {
     /// The generation seed - the whole run is deterministic in it.
     #[arg(long, default_value_t = 299_792_458)]
     pub(crate) seed: u64,
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub(crate) enum SyllabusCommand {
+    /// Render every method into a run's railroad, as one committed REV.
+    Emit(SyllabusEmitArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct SyllabusEmitArgs {
+    /// The syllabus tree's root; its stage directories are walked.
+    #[arg(long)]
+    pub(crate) root: PathBuf,
+    /// A railroad to commit into; absent = lay a fresh one.
+    #[arg(long)]
+    pub(crate) railroad: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Subcommand)]

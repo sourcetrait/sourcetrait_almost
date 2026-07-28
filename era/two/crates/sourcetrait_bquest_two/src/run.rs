@@ -25,6 +25,9 @@ pub fn run() {
         Command::Taskgen { command } => match command {
             TaskgenCommand::All(args) => taskgen_all(args),
         },
+        Command::Syllabus { command } => match command {
+            SyllabusCommand::Emit(args) => syllabus_emit(args),
+        },
         Command::Rollout { command } => match command {
             RolloutCommand::Run(args) => rollout_run(&cli, args),
         },

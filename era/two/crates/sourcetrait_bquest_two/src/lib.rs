@@ -20,6 +20,7 @@ pub mod run;
 pub(crate) mod score;
 pub(crate) mod taskgen;
 pub(crate) mod speculate;
+pub(crate) mod syllabus;
 pub(crate) mod tagger;
 #[cfg(feature = "train")]
 pub(crate) mod train;
@@ -120,6 +121,8 @@ pub(crate) use crate::cli::{
     SpeculateRecordArgs,
     SpeculateSimulateArgs,
     SpeculateTokensArgs,
+    SyllabusCommand,
+    SyllabusEmitArgs,
     TrainCommand,
 };
 #[cfg(feature = "train")]
@@ -190,6 +193,7 @@ pub(crate) use crate::speculate::{
     speculate_simulate,
     speculate_tokens,
 };
+pub(crate) use crate::syllabus::syllabus_emit;
 #[allow(unused_imports)]
 pub(crate) use crate::error::{
     BquestError,

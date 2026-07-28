@@ -125,6 +125,25 @@ fn an_ordinary_directory_is_refused_as_a_railroad() {
 }
 
 #[test]
+fn a_failed_git_carries_its_own_words_even_when_they_ride_stdout() {
+    let scratch = Scratch::new("silent");
+    let road = Railroad::lay_in(&scratch.root).expect("lays");
+
+    let Err(error) = road.commit() else {
+        panic!("committing an unchanged railroad is a caller's bug, not a no-op");
+    };
+    let said = error.to_string();
+    let Some((_, tail)) = said.rsplit_once(": ") else {
+        panic!("the failure names no reason at all: {said:?}");
+    };
+    assert!(
+        !tail.trim().is_empty(),
+        "git reports a clean tree on STDOUT, so a stderr-only message would \
+         say nothing at all: {said:?}"
+    );
+}
+
+#[test]
 fn consecutive_railroads_take_distinct_noms() {
     let scratch = Scratch::new("distinct");
     let first = Railroad::lay_in(&scratch.root).expect("lays");

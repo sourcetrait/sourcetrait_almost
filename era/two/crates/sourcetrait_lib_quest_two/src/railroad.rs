@@ -152,19 +152,20 @@ fn identity_ready(root: &Path) -> LibQuestResult<()> {
     Ok(())
 }
 
-/// Run one git command in a railroad, raising with git's own stderr.
+/// Run one git command in a railroad, raising with git's own words.
 fn git(dir: &Path, args: &[&str]) -> LibQuestResult<String> {
     let output = process::Command::new("git")
         .current_dir(dir)
         .args(args)
         .output()?;
     if !output.status.success() {
-        snafu::whatever!(
-            "git {} failed in {}: {}",
-            args.join(" "),
-            dir.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        let complained = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let said = if complained.is_empty() {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        } else {
+            complained
+        };
+        snafu::whatever!("git {} failed in {}: {said}", args.join(" "), dir.display());
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }

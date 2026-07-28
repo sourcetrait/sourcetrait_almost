@@ -134,10 +134,22 @@ own failure earlier, to the point where nothing has been created yet.
 
 ## fn git
 
-Git's stderr is the whole diagnostic. Nothing here interprets a git
+Git's own words are the whole diagnostic. Nothing here interprets a git
 failure or maps it onto a vocabulary of our own, because git's messages
 are better than anything this could paraphrase and a reader who sees one
 knows what to type next.
+
+Which stream carries those words is not fixed, and an earlier reading of
+this took stderr to be the diagnostic. A commit with a clean tree exits
+non-zero and explains itself on stdout, so a stderr-only message produced
+a failure that named its command and its directory and then said nothing
+at all, which is the one shape a diagnostic may never take. The fallback
+reads stdout only when stderr is silent, so a real error message is never
+displaced by whatever progress chatter preceded it.
+
+That path is reachable from a verb rather than only in theory: re-emitting
+an unchanged syllabus tree into a railroad it already occupies is a commit
+with nothing to commit.
 
 ## fn base62
 
