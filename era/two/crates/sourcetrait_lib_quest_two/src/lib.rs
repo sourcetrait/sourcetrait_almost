@@ -63,6 +63,7 @@ pub(crate) use std::{
 
 pub(crate) use candle_nn::Module;
 pub(crate) use nu_protocol::CompareTypes;
+pub(crate) use sourcetrait_quest_bridge as bridge;
 
 pub(crate) use crate::channel::{
     Block,
@@ -77,7 +78,7 @@ pub(crate) use crate::model::mask::{
 };
 pub(crate) use crate::model::mlp::Mlp;
 pub(crate) use crate::questness::contract::{
-    InferNu,
+    NuSignature,
     check_agreements,
 };
 pub(crate) use crate::questness::evaluate::QuestnessEvaluator;

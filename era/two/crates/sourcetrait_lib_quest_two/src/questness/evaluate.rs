@@ -91,7 +91,7 @@ impl QuestnessEvaluator {
         &self,
         source: &str,
         before: &[String],
-    ) -> LibQuestResult<(String, nu_protocol::Signature)> {
+    ) -> LibQuestResult<(String, nu_protocol::Signature, bool)> {
         let mut engine = self.base.clone();
         let mut working_set = r::nu::StateWorkingSet::new(&engine);
         let _block = r::nu::parse(&mut working_set, None, source.as_bytes(), false);
@@ -103,13 +103,20 @@ impl QuestnessEvaluator {
         if let Err(error) = engine.merge_delta(delta) {
             snafu::whatever!("merging the parsed definition failed: {error}");
         }
-        let mut fresh: Vec<(String, nu_protocol::Signature)> = Vec::new();
+        let mut fresh: Vec<(String, nu_protocol::Signature, bool)> = Vec::new();
         for (name, id) in engine.get_decls_sorted(false) {
             let name = String::from_utf8_lossy(&name).to_string();
             if before.contains(&name) {
                 continue;
             }
-            fresh.push((name, engine.get_decl(id).signature()));
+            // `def --env` is a property of the BLOCK rather than a named
+            // flag on the signature, so it is unreachable from `named`.
+            let decl = engine.get_decl(id);
+            let redirects_env = decl
+                .block_id()
+                .map(|block_id| engine.get_block(block_id).redirect_env)
+                .unwrap_or(false);
+            fresh.push((name, decl.signature(), redirects_env));
         }
         match fresh.len() {
             1 => Ok(fresh.remove(0)),

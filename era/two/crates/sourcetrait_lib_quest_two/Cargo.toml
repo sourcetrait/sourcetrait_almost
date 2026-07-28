@@ -33,5 +33,6 @@ safetensors.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
+sourcetrait_quest_bridge.workspace = true
 tokenizers.workspace = true
 toml.workspace = true

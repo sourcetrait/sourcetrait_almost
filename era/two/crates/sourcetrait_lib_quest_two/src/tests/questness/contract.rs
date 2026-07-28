@@ -27,8 +27,8 @@ fn evaluator() -> QuestnessEvaluator {
 
 #[test]
 fn a_defs_channels_come_back_out_of_its_signature() {
-    let contract = evaluator().contract(INTERACT).expect("contract");
-    assert_eq!(contract.mode, "interact");
+    let contract = evaluator().signature_of(INTERACT).expect("contract");
+    assert_eq!(contract.head, "interact");
     assert!(contract.takes_pipeline());
     assert_eq!(contract.input.to_string(), "record<name: string>");
     assert_eq!(contract.output.to_string(), "list<string>");
@@ -41,16 +41,16 @@ fn a_defs_channels_come_back_out_of_its_signature() {
 #[test]
 fn the_mode_is_whatever_the_def_is_named() {
     let contract = evaluator()
-        .contract("def evaluate []: list<string> -> list<string> { $in }")
+        .signature_of("def evaluate []: list<string> -> list<string> { $in }")
         .expect("contract");
-    assert_eq!(contract.mode, "evaluate");
+    assert_eq!(contract.head, "evaluate");
     assert!(contract.args.is_none());
 }
 
 #[test]
 fn a_def_with_no_pipeline_input_says_so() {
     let contract = evaluator()
-        .contract("def execute []: nothing -> int { 1 }")
+        .signature_of("def execute []: nothing -> int { 1 }")
         .expect("contract");
     assert!(!contract.takes_pipeline());
 }
@@ -58,14 +58,57 @@ fn a_def_with_no_pipeline_input_says_so() {
 #[test]
 fn a_body_declaring_nothing_or_several_things_is_rejected() {
     let engine = evaluator();
-    assert!(engine.contract("1 + 1").is_err());
-    assert!(engine.contract("def a []: nothing -> int { 1 }; def b [] { 2 }").is_err());
+    assert!(engine.signature_of("1 + 1").is_err());
+    assert!(engine.signature_of("def a []: nothing -> int { 1 }; def b [] { 2 }").is_err());
+}
+
+#[test]
+fn a_body_matches_the_form_its_signature_declares() {
+    let evaluator = evaluator();
+
+    let evaluate = evaluator
+        .infer_nu("def evaluate []: list<string> -> int { $in | length }")
+        .expect("matches a form");
+    assert!(evaluate.is_think(), "evaluate is the one think turn");
+    assert_eq!(evaluate.mode(), "evaluate");
+
+    let interact = evaluator.infer_nu(INTERACT).expect("matches a form");
+    assert!(!interact.is_think(), "interact leaves for the caller");
+    assert_eq!(interact.mode(), "interact");
+}
+
+/// `--env` carries real semantics rather than being a label, so a form
+/// that does not declare what it means is not that form.
+#[test]
+fn the_env_flag_is_interacts_contract() {
+    let evaluator = evaluator();
+    assert!(
+        evaluator
+            .infer_nu("def interact []: nothing -> int { 1 }")
+            .is_err(),
+        "interact without --env is not interact"
+    );
+    assert!(
+        evaluator
+            .infer_nu("def --env evaluate []: nothing -> int { 1 }")
+            .is_err(),
+        "nothing else declares --env"
+    );
+}
+
+#[test]
+fn a_head_that_names_no_form_is_refused() {
+    assert!(
+        evaluator()
+            .infer_nu("def rummage []: nothing -> int { 1 }")
+            .is_err()
+    );
 }
 
 #[test]
 fn the_worked_example_agrees_with_its_def() {
     let blocks = parse_blocks(WORKED, Aliasing::Strict).expect("parses");
-    let contract = evaluator().contract(INTERACT).expect("contract");
+    let contract = evaluator().signature_of(INTERACT).expect("contract");
     let envelope = check_agreements(&blocks, &contract);
     assert!(envelope.is_clean(), "{:?}", envelope.errors);
 }
@@ -74,7 +117,7 @@ fn the_worked_example_agrees_with_its_def() {
 fn a_missing_in_binding_is_reported() {
     let text = "<|extra_id_2|> list<string>\n[a]\n<|extra_id_6|>\n<|extra_id_3|>$args<|extra_id_6|>";
     let blocks = parse_blocks(text, Aliasing::Strict).expect("parses");
-    let contract = evaluator().contract(INTERACT).expect("contract");
+    let contract = evaluator().signature_of(INTERACT).expect("contract");
     let envelope = check_agreements(&blocks, &contract);
     assert!(
         envelope
@@ -89,7 +132,7 @@ fn binding_args_against_a_def_without_one_is_reported() {
     let text = "<|extra_id_2|> list<string>\n[a]\n<|extra_id_6|>\n<|extra_id_3|>$args<|extra_id_6|>";
     let blocks = parse_blocks(text, Aliasing::Strict).expect("parses");
     let contract = evaluator()
-        .contract("def evaluate []: nothing -> int { 1 }")
+        .signature_of("def evaluate []: nothing -> int { 1 }")
         .expect("contract");
     let envelope = check_agreements(&blocks, &contract);
     assert!(
@@ -107,7 +150,7 @@ fn a_type_disagreement_names_both_sides() {
                 \n<|extra_id_2|> record<name: string>\n{name: foo}\n<|extra_id_6|>\
                 \n<|extra_id_3|>$in<|extra_id_6|>";
     let blocks = parse_blocks(text, Aliasing::Strict).expect("parses");
-    let contract = evaluator().contract(INTERACT).expect("contract");
+    let contract = evaluator().signature_of(INTERACT).expect("contract");
     let envelope = check_agreements(&blocks, &contract);
     let row = envelope
         .errors
@@ -124,7 +167,7 @@ fn the_envelope_collects_rather_than_bailing() {
     // block in front of it. A first-error bail would report one.
     let text = "<|extra_id_3|>$nope<|extra_id_6|>\n<|extra_id_3|>$in<|extra_id_6|>";
     let blocks = parse_blocks(text, Aliasing::Strict).expect("parses");
-    let contract = evaluator().contract(INTERACT).expect("contract");
+    let contract = evaluator().signature_of(INTERACT).expect("contract");
     let envelope = check_agreements(&blocks, &contract);
     assert!(envelope.errors.len() >= 2, "{:?}", envelope.errors);
     let kinds: Vec<&str> = envelope.errors.iter().map(|row| row.kind.as_str()).collect();
@@ -138,7 +181,7 @@ fn a_duplicate_binding_is_reported_once() {
                 <|extra_id_2|> list<string>\n[b]\n<|extra_id_6|>\n\
                 <|extra_id_3|>$args<|extra_id_6|>";
     let blocks = parse_blocks(text, Aliasing::Strict).expect("parses");
-    let contract = evaluator().contract(INTERACT).expect("contract");
+    let contract = evaluator().signature_of(INTERACT).expect("contract");
     let envelope = check_agreements(&blocks, &contract);
     assert_eq!(
         envelope

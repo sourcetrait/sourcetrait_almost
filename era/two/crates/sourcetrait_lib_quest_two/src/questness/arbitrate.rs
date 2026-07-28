@@ -115,7 +115,7 @@ impl<H: harness::ClientHarness> Questness<H> {
 /// A sub-turn as the request that crosses to a client harness.
 pub(crate) fn request_for(sub: &turn::SubTurn) -> harness::HarnessRequest {
     harness::HarnessRequest {
-        mode: sub.contract.mode.clone(),
+        mode: sub.contract.head.clone(),
         source: sub.source.clone(),
         output: sub.contract.output.to_string(),
         bindings: sub

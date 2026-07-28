@@ -64,7 +64,7 @@ pub enum Destination {
 /// A sub-turn the model asked for, ready to dispatch.
 #[derive(Debug, Clone)]
 pub struct SubTurn {
-    pub contract: InferNu,
+    pub contract: NuSignature,
     pub destination: Destination,
     pub source: String,
     pub bindings: Vec<Binding>,
@@ -158,17 +158,17 @@ pub fn run_inside(
     if sub.destination != Destination::Inside {
         snafu::whatever!(
             "`{}` leaves for the client rather than running here",
-            sub.contract.mode
+            sub.contract.head
         );
     }
     let mut call = String::new();
     if sub.contract.takes_pipeline() {
         call.push_str("$in | ");
     }
-    call.push_str(&sub.contract.mode);
+    call.push_str(&sub.contract.head);
     if sub.contract.args.is_some() {
         let Some(args) = binding(sub, "$args") else {
-            snafu::whatever!("`{}` declares an args positional that nothing bound", sub.contract.mode);
+            snafu::whatever!("`{}` declares an args positional that nothing bound", sub.contract.head);
         };
         call.push(' ');
         call.push_str(&nu::to_nuon_text(args)?);
@@ -196,7 +196,7 @@ fn sub_turn(
     nu_block: &Block,
 ) -> LibQuestResult<Outcome> {
     let source = nu_source(nu_block);
-    let contract = match evaluator.contract(&source) {
+    let contract = match evaluator.signature_of(&source) {
         Ok(contract) => contract,
         Err(error) => {
             let mut envelope = Envelope::default();
@@ -209,7 +209,7 @@ fn sub_turn(
     if !envelope.is_clean() {
         return Ok(Outcome::Repair(envelope));
     }
-    let destination = if contract.mode == INSIDE_MODE {
+    let destination = if contract.head == INSIDE_MODE {
         Destination::Inside
     } else {
         Destination::Client

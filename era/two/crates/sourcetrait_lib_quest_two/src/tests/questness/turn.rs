@@ -88,7 +88,7 @@ fn the_evaluate_mode_stays_inside_and_others_leave() {
         panic!("expected a sub-turn, got {outcome:?}");
     };
     assert_eq!(sub.destination, Destination::Inside);
-    assert_eq!(sub.contract.mode, "evaluate");
+    assert_eq!(sub.contract.head, "evaluate");
     assert_eq!(sub.bindings.len(), 1);
     assert_eq!(sub.bindings[0].pass, "$in");
 

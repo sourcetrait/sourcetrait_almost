@@ -7975,6 +7975,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu 0.9.1",
+ "sourcetrait_quest_bridge",
  "tokenizers 0.23.1",
  "toml 0.9.12+spec-1.1.0",
 ]
@@ -7985,6 +7986,8 @@ version = "0.0.0-5"
 dependencies = [
  "bitcode",
  "futures-util",
+ "nu-protocol",
+ "nuon",
  "rustls",
  "rustls-pki-types",
  "serde",

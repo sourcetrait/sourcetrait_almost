@@ -12,7 +12,7 @@ agreements are what can be settled while the turn is still text.
 
 ## const ARGS_POSITIONAL
 
-## struct InferNu
+## struct NuSignature
 
 ## fn takes_pipeline
 
@@ -20,20 +20,41 @@ The distinction is `nothing` against everything else, not presence against
 absence. A def with no infix annotation at all reads as `nothing -> any` here,
 which is the same answer.
 
-## fn contract
+## fn signature_of
 
-THE MODE IS DISCOVERED BY DIFFING THE DECLARATION SET, not by scanning the
-source for `def`. That matters twice. It means the answer comes from the parser
-rather than from a regex, so a def spelled across lines or carrying flags is
-found exactly as a plain one is. And it means the mode is whatever the def is
-NAMED, with no list of known modes anywhere in this file - which is what the
-design asks for, since the modes differ by signature rather than by form and
-new ones arrive by being written.
+THE HEAD IS DISCOVERED BY DIFFING THE DECLARATION SET, not by scanning the
+source for `def`, so the answer comes from the parser rather than from a regex
+and a def spelled across lines or carrying flags is found exactly as a plain
+one is.
 
 Requiring exactly one fresh declaration is the deliberate reading of "a nu block
 carries a definition". Zero and several are both rejected, and several matters:
-a body declaring two defs has no single mode, so there is nothing to bind blocks
+a body declaring two defs has no single form, so there is nothing to bind blocks
 against.
+
+`--env` IS NOT REACHABLE FROM THE SIGNATURE, which is the trap here. `def --env`
+sets `redirect_env` on the BLOCK rather than adding a named flag, so a
+signature's `named` list never carries it and a check written against that list
+reads false for every def and fails silently. It is read off the decl's block
+instead.
+
+## fn infer_nu
+
+The form is what a signature MATCHES rather than what the def happens to be
+called. An earlier revision of this file argued the opposite - that the mode is
+whatever the def is NAMED, with no list of known modes anywhere - and that is
+superseded: the forms are an enum, and a prototype per form is what selects a
+variant.
+
+## fn check_prototype
+
+One prototype fact is stated by the design so far and it is enforced rather than
+assumed: `--env` is interact's contract, since env and `cd` changes surviving
+into the caller is what interact MEANS. A body carrying it that is not interact,
+and an interact without it, are both refused however they are spelled.
+
+The other forms' prototypes are owed. Until they land the head is all that
+separates them, and this function is where each one attaches.
 
 ## fn check_agreements
 
