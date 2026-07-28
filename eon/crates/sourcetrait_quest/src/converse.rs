@@ -4,6 +4,14 @@ use crate::*;
 /// How long a polite close waits for the far end to answer it.
 const GOODBYE: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How often a waiting turn looks at the interrupt flag.
+///
+/// A signal handler cannot reach into the task that is awaiting, so the
+/// flag is polled beside the receive rather than awaited. The interval
+/// only bounds how long a Ctrl-C takes to become a `Cancel` on the wire;
+/// the daemon then stops at its next emit.
+const INTERRUPT_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Ask one turn and drive it, asks included, to an answer.
 ///
 /// THE TURN LOOP IS THE DAEMON'S. What runs here is the other half of a
@@ -13,19 +21,21 @@ const GOODBYE: std::time::Duration = std::time::Duration::from_secs(2);
 pub(crate) fn ask(
     plugin: &QuestPlugin,
     request: bridge::InferRequest,
+    interrupted: &std::sync::atomic::AtomicBool,
 ) -> QuestPluginResult<bridge::InferResponse> {
     plugin
         .runtime()
-        .block_on(converse(plugin.harness(), request))
+        .block_on(converse(plugin.harness(), request, interrupted))
 }
 
 /// Connect, open, and turn until the model answers.
 async fn converse(
     harness: harness::QuestHarness,
     request: bridge::InferRequest,
+    interrupted: &std::sync::atomic::AtomicBool,
 ) -> QuestPluginResult<bridge::InferResponse> {
     let mut client = connect().await?;
-    let outcome = drive(&harness, &mut client, request).await;
+    let outcome = drive(&harness, &mut client, request, interrupted).await;
     // Closed on every path, including a failed one: a daemon reading a
     // dropped socket cannot tell a crashed client from a finished one.
     client.close(GOODBYE).await;
@@ -37,11 +47,12 @@ async fn drive(
     harness: &harness::QuestHarness,
     client: &mut bridge::TlsClientHandle,
     request: bridge::InferRequest,
+    interrupted: &std::sync::atomic::AtomicBool,
 ) -> QuestPluginResult<bridge::InferResponse> {
     open(client).await?;
     let mut sending = request;
     loop {
-        let response = turn(client, sending).await?;
+        let response = turn(client, sending, interrupted).await?;
         if response.insufficient {
             return Err(QuestPluginError::Insufficient);
         }
@@ -107,10 +118,30 @@ async fn open(client: &mut bridge::TlsClientHandle) -> QuestPluginResult<()> {
 async fn turn(
     client: &mut bridge::TlsClientHandle,
     request: bridge::InferRequest,
+    interrupted: &std::sync::atomic::AtomicBool,
 ) -> QuestPluginResult<bridge::InferResponse> {
     client.send(bridge::ClientToServer::Turn(request)).await?;
+    // Sent ONCE. A cancel is idempotent at the far end but repeating it
+    // would put a message on the wire per poll for as long as the turn
+    // takes to wind down.
+    let mut cancelled = false;
     loop {
-        let Some(batch) = client.recv().await else {
+        let arrived = tokio::select! {
+            batch = client.recv() => batch,
+            () = tokio::time::sleep(INTERRUPT_POLL), if !cancelled => {
+                if interrupted.load(std::sync::atomic::Ordering::Relaxed) {
+                    client
+                        .send(bridge::ClientToServer::Cancel(bridge::CancelRequest))
+                        .await?;
+                    cancelled = true;
+                }
+                continue;
+            }
+        };
+        // The turn still ANSWERS after a cancel - the daemon stops at its
+        // next emit and reports what it managed - so the loop keeps
+        // reading rather than returning here.
+        let Some(batch) = arrived else {
             snafu::whatever!("the daemon closed mid-turn");
         };
         for message in batch {

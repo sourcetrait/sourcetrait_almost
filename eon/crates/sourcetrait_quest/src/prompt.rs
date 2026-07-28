@@ -71,14 +71,27 @@ impl nu_plugin::SimplePluginCommand for Prompt {
             .category(nu_protocol::Category::Custom(String::from("quest")))
     }
 
+    /// AN INTERRUPT IS ONLY OBSERVABLE BY ASKING FOR IT. Ctrl-C reaches
+    /// the engine rather than this process, so a plugin that never
+    /// consults the interface never learns one happened - and this call
+    /// then sits in a blocking runtime until the daemon answers, with no
+    /// way to abandon a turn from the terminal.
     fn run(
         &self,
         plugin: &QuestPlugin,
-        _engine: &nu_plugin::EngineInterface,
+        engine: &nu_plugin::EngineInterface,
         call: &nu_plugin::EvaluatedCall,
         input: &nu_protocol::Value,
     ) -> Result<nu_protocol::Value, nu_protocol::LabeledError> {
-        Ok(answer(plugin, call, input)?)
+        let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let raised = std::sync::Arc::clone(&interrupted);
+        // The guard is RAII: held for the call, unregistered on return.
+        let _guard = engine.register_signal_handler(Box::new(move |action| {
+            if matches!(action, nu_protocol::SignalAction::Interrupt) {
+                raised.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }))?;
+        Ok(answer(plugin, call, input, &interrupted)?)
     }
 }
 
@@ -87,6 +100,7 @@ fn answer(
     plugin: &QuestPlugin,
     call: &nu_plugin::EvaluatedCall,
     input: &nu_protocol::Value,
+    interrupted: &std::sync::atomic::AtomicBool,
 ) -> QuestPluginResult<nu_protocol::Value> {
     let config = call
         .get_flag_value(CONFIG_FLAG)
@@ -101,7 +115,11 @@ fn answer(
         text: Some(bridge::InferText(asked.prompt)),
         output: None,
     };
-    shaped(&shape, &converse::ask(plugin, request)?, call.head)
+    shaped(
+        &shape,
+        &converse::ask(plugin, request, interrupted)?,
+        call.head,
+    )
 }
 
 /// The value a caller gets back, decided by the shape it declared.
