@@ -47,7 +47,7 @@ We are currently in the {{ in.cwd }} directory.
 #[test]
 fn a_think_turn_runs_here_and_comes_back_as_a_thought() {
     let mut questness = Questness::new(Aliasing::Strict).expect("builds");
-    let Step::Continue(back) = questness.step(THINKS, false, true).expect("steps") else {
+    let Step::Continue(back) = questness.step(THINKS, false).expect("steps") else {
         panic!("evaluate runs on the Thinkspace's own evaluator");
     };
     assert!(
@@ -70,7 +70,7 @@ fn a_think_turn_runs_here_and_comes_back_as_a_thought() {
 #[test]
 fn an_ask_pauses_the_turn_rather_than_being_served() {
     let mut questness = Questness::new(Aliasing::Strict).expect("builds");
-    let Step::Ask { form, bindings } = questness.step(ASKS, false, true).expect("steps") else {
+    let Step::Ask { form, bindings } = questness.step(ASKS, false).expect("steps") else {
         panic!("an ask is never serviced here");
     };
     assert_eq!(form.mode(), "interact");
@@ -82,7 +82,7 @@ fn an_ask_pauses_the_turn_rather_than_being_served() {
 #[test]
 fn a_plain_answer_touches_no_engine_at_all() {
     let mut questness = Questness::new(Aliasing::Strict).expect("builds");
-    let Step::Answered(answer) = questness.step(ANSWERS, false, true).expect("steps") else {
+    let Step::Answered(answer) = questness.step(ANSWERS, false).expect("steps") else {
         panic!("expected an answer");
     };
     assert_eq!(
@@ -100,7 +100,7 @@ fn a_failing_think_becomes_feedback() {
 <|extra_id_4|> def evaluate []: nothing -> int { 1 / 0 }
 <|extra_id_6|>";
     let mut questness = Questness::new(Aliasing::Strict).expect("builds");
-    match questness.step(broken, false, true).expect("steps") {
+    match questness.step(broken, false).expect("steps") {
         Step::Repair(envelope) => {
             assert!(!envelope.errors.is_empty(), "the failure is reported back");
         }
@@ -112,7 +112,7 @@ fn a_failing_think_becomes_feedback() {
 fn insufficiency_is_the_callers_verdict() {
     let mut questness = Questness::new(Aliasing::Strict).expect("builds");
     assert!(matches!(
-        questness.step("anything at all", true, true).expect("steps"),
+        questness.step("anything at all", true).expect("steps"),
         Step::Insufficient
     ));
 }
@@ -128,7 +128,7 @@ fn a_session_log_records_both_sides_of_the_turn() {
     let mut questness = Questness::new(Aliasing::Strict)
         .expect("builds")
         .logging_to(log.clone());
-    questness.step(THINKS, false, true).expect("steps");
+    questness.step(THINKS, false).expect("steps");
 
     let text = log.read().expect("reads");
     assert!(text.contains("== emission =="), "what the model wrote");
@@ -145,7 +145,7 @@ const OFFLOADS: &str = "\
 #[test]
 fn a_repl_comes_back_as_text_on_a_thought_turn() {
     let mut questness = Questness::new(Aliasing::Strict).expect("builds");
-    let Step::Continue(back) = questness.step(OFFLOADS, false, true).expect("steps") else {
+    let Step::Continue(back) = questness.step(OFFLOADS, false).expect("steps") else {
         panic!("a repl continues the turn");
     };
     assert!(back.contains("<|im_start|>thought"), "got {back}");
@@ -157,19 +157,10 @@ fn a_repl_comes_back_as_text_on_a_thought_turn() {
 }
 
 #[test]
-fn a_repl_outside_a_think_turn_is_refused_rather_than_run() {
-    let mut questness = Questness::new(Aliasing::Strict).expect("builds");
-    let Step::Repair(envelope) = questness.step(OFFLOADS, false, false).expect("steps") else {
-        panic!("a reasoning mode outside a think is refused");
-    };
-    assert_eq!(envelope.errors[0].kind, "channel::not_thinking");
-}
-
-#[test]
 fn a_repl_that_does_not_evaluate_asks_for_repair() {
     let broken = "<|extra_id_4|> repl\nnot_a_command_at_all\n<|extra_id_6|>";
     let mut questness = Questness::new(Aliasing::Strict).expect("builds");
-    let Step::Repair(envelope) = questness.step(broken, false, true).expect("steps") else {
+    let Step::Repair(envelope) = questness.step(broken, false).expect("steps") else {
         panic!("a failed repl is feedback rather than a block");
     };
     assert_eq!(envelope.errors[0].kind, "questness::repl");

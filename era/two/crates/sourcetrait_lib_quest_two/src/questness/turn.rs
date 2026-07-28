@@ -1,12 +1,10 @@
 //! The turn: assemble what the model sees, and read what it emits.
 use crate::*;
 
-/// The Thinkspace's own turn, which never crosses the wire. The model
-/// asks with a think, the Thinkspace's evaluator answers with a thought,
-/// and the model finishes inside the same turn.
-/// Routing is off the FORM today, since an evaluate is always a think
-/// turn, so nothing yet reads a think wrapper out of an emission. The
-/// name stands because the pair is the design.
+/// The Thinkspace's own turn, which never crosses the wire. A reasoning
+/// FORM is the request - `<nu> repl` or a `<nu> def evaluate` - the
+/// Thinkspace answers on a thought, and the model finishes inside the
+/// same turn.
 #[allow(dead_code)]
 pub const THINK_ROLE: &str = "think";
 pub const THOUGHT_ROLE: &str = "thought";
@@ -131,13 +129,11 @@ pub fn assemble(request: &Request) -> LibQuestResult<Assembled> {
 /// `insufficient` comes from the caller because the insufficiency tag is
 /// special and a skip-special decode strips it, so it is detectable by
 /// token id at the engine layer and never by scanning this text.
-/// `thinking` says whether this emission may reach a reasoning mode.
 pub fn interpret(
     evaluator: &QuestnessEvaluator,
     text: &str,
     aliasing: channel::Aliasing,
     insufficient: bool,
-    thinking: bool,
 ) -> LibQuestResult<Outcome> {
     if insufficient {
         return Ok(Outcome::Insufficient);
@@ -151,20 +147,9 @@ pub fn interpret(
         }
     };
     match blocks.iter().find(|block| block.tag == Tag::Nu) {
-        Some(nu_block) => sub_turn(evaluator, &blocks, nu_block, thinking),
+        Some(nu_block) => sub_turn(evaluator, &blocks, nu_block),
         None => answer(&blocks),
     }
-}
-
-/// A reasoning mode emitted where reasoning is not permitted.
-fn denied(mode: &str) -> Outcome {
-    let mut envelope = Envelope::default();
-    envelope.error(
-        "channel::not_thinking",
-        Some(Tag::Nu.name()),
-        &format!("`{mode}` is a reasoning mode and runs only in a think turn"),
-    );
-    Outcome::Repair(envelope)
 }
 
 /// Run an `evaluate` sub-turn here and hand its value back.
@@ -230,18 +215,13 @@ fn sub_turn(
     evaluator: &QuestnessEvaluator,
     blocks: &[Block],
     nu_block: &Block,
-    thinking: bool,
 ) -> LibQuestResult<Outcome> {
     // `repl` is read before the parser sees anything, because it carries
     // a bare expression rather than a def and there is no signature to
     // diff out of the declaration set.
     if nu_block.header.trim() == REPL_MODE {
-        return Ok(if thinking {
-            Outcome::Repl {
-                source: nu_block.content.clone(),
-            }
-        } else {
-            denied(REPL_MODE)
+        return Ok(Outcome::Repl {
+            source: nu_block.content.clone(),
         });
     }
     let source = nu_source(nu_block);
@@ -265,9 +245,6 @@ fn sub_turn(
             return Ok(Outcome::Repair(envelope));
         }
     };
-    if form.is_think() && !thinking {
-        return Ok(denied(form.mode()));
-    }
     Ok(if form.is_think() {
         Outcome::Think {
             form,

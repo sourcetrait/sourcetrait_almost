@@ -244,17 +244,9 @@ cannot take.
 
 ## fn interpret
 
-### the thinking parameter
-
-A parameter rather than state because the caller owns the turn and knows
-its role; this layer only knows what an emission says. Passing it in
-keeps the rule enforceable here and the SIGNAL where it is actually
-observable.
-
-Today no caller reads a think role out of an emission, so the bridge
-passes true and the check never fires in production. That is recorded as
-debt rather than hidden: the rule and its locks exist, and what is
-missing is the reader.
+The emission is the whole input, and that is enough, because the FORM is
+the think request. Nothing here needs to know a turn's role: a reasoning
+mode names itself, and naming it IS the ask.
 
 ## fn sub_turn
 
@@ -263,10 +255,9 @@ the signature is discovered by diffing the declaration set after a parse,
 and a bare expression declares nothing, so the ordinary path would report
 a missing def rather than a repl.
 
-The deny is returned as a repair envelope rather than an error, for the
-same reason every other conformance failure is - a model reaching for a
-reasoning mode in the wrong turn is the ordinary untrained case, and the
-repair vocabulary is what that is for.
+There is no refusal path beside it. Both reasoning modes route to the
+Thinkspace and nothing routes either to the caller, so the confinement is
+a missing edge rather than a check that could be forgotten.
 
 ## fn typed_payload
 

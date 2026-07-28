@@ -54,22 +54,10 @@ impl Questness {
     }
 
     /// Read one emission and take the turn to its next state.
-    ///
-    /// `thinking` says whether this emission may reach a reasoning mode.
-    pub fn step(
-        &mut self,
-        emission: &str,
-        insufficient: bool,
-        thinking: bool,
-    ) -> LibQuestResult<Step> {
+    pub fn step(&mut self, emission: &str, insufficient: bool) -> LibQuestResult<Step> {
         self.record("emission", emission);
-        let outcome = turn::interpret(
-            &self.evaluator,
-            emission,
-            self.aliasing,
-            insufficient,
-            thinking,
-        )?;
+        let outcome =
+            turn::interpret(&self.evaluator, emission, self.aliasing, insufficient)?;
         let step = match outcome {
             turn::Outcome::Answered(answer) => Step::Answered(answer),
             turn::Outcome::Insufficient => Step::Insufficient,

@@ -31,7 +31,7 @@ Hello, {{ in.their_name }}. My name is {{ in.my_name }}.
 
 #[test]
 fn an_answer_comes_back_as_a_value_and_a_rendering() {
-    let outcome = interpret(&evaluator(), ANSWERED, Aliasing::Strict, false, true).expect("interprets");
+    let outcome = interpret(&evaluator(), ANSWERED, Aliasing::Strict, false).expect("interprets");
     let Outcome::Answered(answer) = outcome else {
         panic!("expected an answer, got {outcome:?}");
     };
@@ -60,7 +60,7 @@ fn a_value_that_misses_its_declared_type_asks_for_repair() {
 <|extra_id_2|> nuon record<count: int>
 {count: nope}
 <|extra_id_6|>";
-    let outcome = interpret(&evaluator(), emission, Aliasing::Strict, false, true).expect("interprets");
+    let outcome = interpret(&evaluator(), emission, Aliasing::Strict, false).expect("interprets");
     let Outcome::Repair(envelope) = outcome else {
         panic!("expected a repair, got {outcome:?}");
     };
@@ -82,7 +82,7 @@ fn evaluate_is_a_think_turn_and_every_other_form_is_an_ask() {
 <|extra_id_3|>$in<|extra_id_6|>
 <|extra_id_4|> def evaluate []: list<string> -> int { $in | length }
 <|extra_id_6|>";
-    let outcome = interpret(&evaluator(), inside, Aliasing::Strict, false, true).expect("interprets");
+    let outcome = interpret(&evaluator(), inside, Aliasing::Strict, false).expect("interprets");
     let Outcome::Think { form, bindings, .. } = outcome else {
         panic!("evaluate is ALWAYS a think turn, got {outcome:?}");
     };
@@ -91,7 +91,7 @@ fn evaluate_is_a_think_turn_and_every_other_form_is_an_ask() {
     assert_eq!(bindings[0].pass, "$in");
 
     let leaves = inside.replace("def evaluate ", "def --env interact ");
-    let outcome = interpret(&evaluator(), &leaves, Aliasing::Strict, false, true).expect("interprets");
+    let outcome = interpret(&evaluator(), &leaves, Aliasing::Strict, false).expect("interprets");
     let Outcome::Ask { form, bindings } = outcome else {
         panic!("every other form is an ask, got {outcome:?}");
     };
@@ -113,7 +113,7 @@ fn a_think_turns_bound_value_reaches_the_evaluator() {
 <|extra_id_4|> def evaluate []: list<string> -> int { $in | length }
 <|extra_id_6|>";
     let evaluator = evaluator();
-    let outcome = interpret(&evaluator, emission, Aliasing::Strict, false, true).expect("interprets");
+    let outcome = interpret(&evaluator, emission, Aliasing::Strict, false).expect("interprets");
     let Outcome::Think {
         form,
         signature,
@@ -137,7 +137,7 @@ fn an_args_positional_reaches_the_def_as_a_literal() {
 <|extra_id_4|> def evaluate [args: list<string>]: nothing -> int { $args | length }
 <|extra_id_6|>";
     let evaluator = evaluator();
-    let outcome = interpret(&evaluator, emission, Aliasing::Strict, false, true).expect("interprets");
+    let outcome = interpret(&evaluator, emission, Aliasing::Strict, false).expect("interprets");
     let Outcome::Think {
         form,
         signature,
@@ -159,7 +159,7 @@ fn an_ask_is_never_run_here() {
 <|extra_id_4|> def --env interact []: nothing -> int { 1 }
 <|extra_id_6|>";
     let evaluator = evaluator();
-    let outcome = interpret(&evaluator, emission, Aliasing::Strict, false, true).expect("interprets");
+    let outcome = interpret(&evaluator, emission, Aliasing::Strict, false).expect("interprets");
     let Outcome::Ask { form, .. } = outcome else {
         panic!("expected an ask, got {outcome:?}");
     };
@@ -174,7 +174,7 @@ fn an_ask_is_never_run_here() {
 
 #[test]
 fn insufficiency_is_the_callers_verdict_rather_than_a_text_scan() {
-    let outcome = interpret(&evaluator(), "anything at all", Aliasing::Strict, true, true)
+    let outcome = interpret(&evaluator(), "anything at all", Aliasing::Strict, true)
         .expect("interprets");
     assert!(matches!(outcome, Outcome::Insufficient));
 }
@@ -182,7 +182,7 @@ fn insufficiency_is_the_callers_verdict_rather_than_a_text_scan() {
 #[test]
 fn an_unclosed_block_asks_for_repair_rather_than_erroring() {
     let emission = "<|extra_id_2|> nuon list<string>\n[a, b]";
-    let outcome = interpret(&evaluator(), emission, Aliasing::Strict, false, true).expect("interprets");
+    let outcome = interpret(&evaluator(), emission, Aliasing::Strict, false).expect("interprets");
     let Outcome::Repair(envelope) = outcome else {
         panic!("expected a repair, got {outcome:?}");
     };
@@ -269,7 +269,7 @@ const REPLS: &str = "\
 #[test]
 fn a_repl_carries_a_bare_expression_rather_than_a_def() {
     let outcome =
-        interpret(&evaluator(), REPLS, Aliasing::Strict, false, true).expect("interprets");
+        interpret(&evaluator(), REPLS, Aliasing::Strict, false).expect("interprets");
     let Outcome::Repl { source } = outcome else {
         panic!("expected a repl, got {outcome:?}");
     };
@@ -279,8 +279,11 @@ fn a_repl_carries_a_bare_expression_rather_than_a_def() {
     );
 }
 
+/// The FORM is the think request, so neither reasoning mode can ever be
+/// routed to the caller. That is what confines them to thinkspace: there
+/// is no path out, rather than a check that refuses one.
 #[test]
-fn the_reasoning_modes_are_refused_outside_a_think_turn() {
+fn a_reasoning_form_is_never_routed_to_the_caller() {
     let evaluate = "\
 <|extra_id_4|> def evaluate []: nothing -> int {
     5 + 5
@@ -288,12 +291,11 @@ fn the_reasoning_modes_are_refused_outside_a_think_turn() {
 <|extra_id_6|>";
     for emission in [REPLS, evaluate] {
         let outcome =
-            interpret(&evaluator(), emission, Aliasing::Strict, false, false).expect("interprets");
-        let Outcome::Repair(envelope) = outcome else {
-            panic!("expected a refusal, got {outcome:?}");
-        };
-        assert_eq!(envelope.errors.len(), 1);
-        assert_eq!(envelope.errors[0].kind, "channel::not_thinking");
+            interpret(&evaluator(), emission, Aliasing::Strict, false).expect("interprets");
+        assert!(
+            matches!(outcome, Outcome::Repl { .. } | Outcome::Think { .. }),
+            "a reasoning form is served in thinkspace, got {outcome:?}"
+        );
     }
 }
 
@@ -304,7 +306,7 @@ fn a_typedef_answer_arrives_as_a_string_that_parses_as_a_type() {
 record<foo: string>
 <|extra_id_6|>";
     let outcome =
-        interpret(&evaluator(), emission, Aliasing::Strict, false, true).expect("interprets");
+        interpret(&evaluator(), emission, Aliasing::Strict, false).expect("interprets");
     let Outcome::Answered(answer) = outcome else {
         panic!("expected an answer, got {outcome:?}");
     };
@@ -326,7 +328,7 @@ fn a_typedef_answer_that_is_not_a_type_asks_for_repair() {
 not a type at all
 <|extra_id_6|>";
     let outcome =
-        interpret(&evaluator(), emission, Aliasing::Strict, false, true).expect("interprets");
+        interpret(&evaluator(), emission, Aliasing::Strict, false).expect("interprets");
     let Outcome::Repair(envelope) = outcome else {
         panic!("expected a repair, got {outcome:?}");
     };
@@ -340,7 +342,7 @@ fn a_block_naming_a_format_we_cannot_read_asks_for_repair() {
 foo: bar
 <|extra_id_6|>";
     let outcome =
-        interpret(&evaluator(), emission, Aliasing::Strict, false, true).expect("interprets");
+        interpret(&evaluator(), emission, Aliasing::Strict, false).expect("interprets");
     let Outcome::Repair(envelope) = outcome else {
         panic!("expected a repair, got {outcome:?}");
     };
