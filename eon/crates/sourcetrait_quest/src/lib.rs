@@ -1,15 +1,13 @@
 pub(crate) mod converse;
 pub(crate) mod error;
+pub(crate) mod harness;
 pub(crate) mod plugin;
 pub(crate) mod prompt;
 pub mod run;
 
 pub(crate) use std::{
     fs,
-    sync::{
-        Mutex,
-        MutexGuard,
-    },
+    path::PathBuf,
 };
 
 pub(crate) use sourcetrait_lib_quest_two as lib;

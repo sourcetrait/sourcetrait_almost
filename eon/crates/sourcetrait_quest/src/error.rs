@@ -50,22 +50,13 @@ impl From<lib::LibQuestError> for QuestPluginError {
 }
 
 impl QuestPluginError {
-    /// A repair envelope as an error, one row per diagnostic.
+    /// A shortfall against the declared shape, one row per member.
     ///
     /// The rows are kept rather than flattened into the message, because
     /// a caller that got a shape it did not ask for wants to know which
     /// member was missing rather than that something was.
-    pub(crate) fn envelope(envelope: &lib::channel::Envelope) -> Self {
-        Self::Envelope {
-            rows: envelope
-                .errors
-                .iter()
-                .map(|row| match &row.source {
-                    Some(source) => format!("{} at {source}: {}", row.kind, row.message),
-                    None => format!("{}: {}", row.kind, row.message),
-                })
-                .collect(),
-        }
+    pub(crate) fn rows(rows: Vec<String>) -> Self {
+        Self::Envelope { rows }
     }
 }
 

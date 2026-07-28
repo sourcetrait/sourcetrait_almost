@@ -1,18 +1,16 @@
 //! The plugin itself: what it holds across calls, and what it serves.
 use crate::*;
 
-/// The client harness the plugin services client-bound modes through.
-type Harness = lib::bubble::BubbleHarness;
-
 /// The plugin process, and the two things it keeps between calls.
 ///
 /// Stock plugin garbage collection tears the process down after an idle
 /// timeout, so what is held here is held for a burst of calls rather than
-/// forever. Both members are worth that: a tokio runtime and the
-/// evaluator's base engine are each built once and reused.
+/// forever. The runtime is built once; the harness is a world rather than
+/// a session, so it carries nothing between calls and costs nothing to
+/// hold.
 pub(crate) struct QuestPlugin {
     runtime: tokio::runtime::Runtime,
-    questness: Mutex<lib::Questness<Harness>>,
+    harness: harness::QuestHarness,
 }
 
 impl QuestPlugin {
@@ -20,17 +18,9 @@ impl QuestPlugin {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
-        // Tool markers stay aliased because the routing they stand in for
-        // is untrained: the channel probe reads zero of six on the marker
-        // and the no-marker arm catches everything. Training retires this
-        // rather than a code change.
-        let questness = lib::Questness::new(
-            Harness::default(),
-            lib::channel::Aliasing::ToolMarkers,
-        )?;
         Ok(Self {
             runtime,
-            questness: Mutex::new(questness),
+            harness: harness::QuestHarness::default(),
         })
     }
 
@@ -38,17 +28,13 @@ impl QuestPlugin {
         &self.runtime
     }
 
-    /// The turn owner, for the length of one call.
+    /// This side's own nu engine, for what the model asks IT to run.
     ///
-    /// A poisoned lock is recovered rather than propagated. One call
-    /// panicking must not make every later call fail, and there is no
-    /// invariant to protect: what is behind the lock is an engine and a
-    /// world, both of which a fresh turn rebuilds its own state over.
-    pub(crate) fn questness(&self) -> MutexGuard<'_, lib::Questness<Harness>> {
-        match self.questness.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+    /// Questness never reaches it. An ask comes back on a response, this
+    /// runs it under its own confinement, and the value goes back on the
+    /// next request.
+    pub(crate) fn harness(&self) -> harness::QuestHarness {
+        self.harness.clone()
     }
 }
 

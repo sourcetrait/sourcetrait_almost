@@ -4,59 +4,57 @@ use crate::*;
 /// How long a polite close waits for the far end to answer it.
 const GOODBYE: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Ask one turn and drive it, sub-turns included, to an answer.
+/// Ask one turn and drive it, asks included, to an answer.
 ///
-/// The turn loop runs HERE rather than in the daemon, which is where the
-/// design puts it. What the current wire carries is a text turn and a
-/// text answer, so a `TurnRequest` cannot yet carry a config, a prompt
-/// and its bindings - moving the loop across is that wire change rather
-/// than a rewrite of this function.
+/// THE TURN LOOP IS THE DAEMON'S. What runs here is the other half of a
+/// sequence: when the model asks THIS side to run something, QuestHarness
+/// runs it on its own engine and the value goes back as a continuation,
+/// where the Thinkspace's conversation resumes.
 pub(crate) fn ask(
     plugin: &QuestPlugin,
-    request: &lib::Request,
-) -> QuestPluginResult<lib::Answer> {
-    let mut questness = plugin.questness();
-    let assembled = questness.assemble(request)?;
+    request: bridge::InferRequest,
+) -> QuestPluginResult<bridge::InferResponse> {
     plugin
         .runtime()
-        .block_on(converse(&mut questness, assembled.text))
+        .block_on(converse(plugin.harness(), request))
 }
 
-/// Connect, open, and step until the turn ends.
-async fn converse<H: lib::harness::ClientHarness>(
-    questness: &mut lib::Questness<H>,
-    opening: String,
-) -> QuestPluginResult<lib::Answer> {
+/// Connect, open, and turn until the model answers.
+async fn converse(
+    harness: harness::QuestHarness,
+    request: bridge::InferRequest,
+) -> QuestPluginResult<bridge::InferResponse> {
     let mut client = connect().await?;
-    let outcome = drive(questness, &mut client, opening).await;
+    let outcome = drive(&harness, &mut client, request).await;
     // Closed on every path, including a failed one: a daemon reading a
     // dropped socket cannot tell a crashed client from a finished one.
     client.close(GOODBYE).await;
     outcome
 }
 
-/// The step loop, once a session is open.
-async fn drive<H: lib::harness::ClientHarness>(
-    questness: &mut lib::Questness<H>,
+/// The turn loop, once a session is open.
+async fn drive(
+    harness: &harness::QuestHarness,
     client: &mut bridge::TlsClientHandle,
-    opening: String,
-) -> QuestPluginResult<lib::Answer> {
+    request: bridge::InferRequest,
+) -> QuestPluginResult<bridge::InferResponse> {
     open(client).await?;
-    let mut text = opening;
+    let mut sending = request;
     loop {
-        let emission = turn(client, text).await?;
-        // Insufficiency is detected by TOKEN ID, and the wire carries
-        // decoded text, so this side can only ever say no. The engine is
-        // where the ids are and the wire is what would have to carry the
-        // verdict.
-        match questness.step(&emission, false)? {
-            lib::Step::Continue(next) => text = next,
-            lib::Step::Answered(answer) => return Ok(answer),
-            lib::Step::Insufficient => return Err(QuestPluginError::Insufficient),
-            lib::Step::Repair(envelope) => {
-                return Err(QuestPluginError::envelope(&envelope));
-            }
+        let response = turn(client, sending).await?;
+        if response.insufficient {
+            return Err(QuestPluginError::Insufficient);
         }
+        let Some(form) = &response.nu else {
+            return Ok(response);
+        };
+        let value = harness.run(form, &response.inputs)?;
+        sending = bridge::InferRequest {
+            output: Some(bridge::InferOutput::Nuon(bridge::InferNuonOutput(
+                bridge::InferValue(value),
+            ))),
+            ..bridge::InferRequest::default()
+        };
     }
 }
 
@@ -100,29 +98,25 @@ async fn open(client: &mut bridge::TlsClientHandle) -> QuestPluginResult<()> {
     }
 }
 
-/// Send one turn and reassemble its emission from the chunks.
+/// Send one request and wait for the turn to end.
 ///
-/// The chunks are reassembled rather than streamed because a rendering
-/// cannot exist until the whole emission is parsed - the answer is a
-/// value plus a template over it, and neither is knowable a token at a
-/// time. Streaming the raw emission alongside is a product decision
-/// rather than something this owes.
+/// The chunks are the model's RAW emission arriving as it is written, and
+/// they are not the answer: an answer is a value plus a rendering over
+/// it, and neither is knowable a token at a time. They are passed over
+/// here, and stay on the wire for a caller that wants to watch.
 async fn turn(
     client: &mut bridge::TlsClientHandle,
-    text: String,
-) -> QuestPluginResult<String> {
-    client
-        .send(bridge::ClientToServer::Turn(bridge::TurnRequest { text }))
-        .await?;
-    let mut emission = String::new();
+    request: bridge::InferRequest,
+) -> QuestPluginResult<bridge::InferResponse> {
+    client.send(bridge::ClientToServer::Turn(request)).await?;
     loop {
         let Some(batch) = client.recv().await else {
             snafu::whatever!("the daemon closed mid-turn");
         };
         for message in batch {
             match message {
-                bridge::ServerToClient::TurnChunk(chunk) => emission.push_str(&chunk.text),
-                bridge::ServerToClient::Turn(_) => return Ok(emission),
+                bridge::ServerToClient::TurnChunk(_) => {}
+                bridge::ServerToClient::Turn(response) => return Ok(response),
                 bridge::ServerToClient::TurnFailed(failed) => {
                     snafu::whatever!("the turn did not run: {}", failed.message);
                 }

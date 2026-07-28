@@ -43,6 +43,17 @@ fn serve_forever() -> DquestResult<()> {
         _ => return Err(DquestError::Unset { variable: USER_ENV }),
     };
 
+    // The turn owner is cheap and synchronous, unlike the model, so a
+    // failure here is a fault rather than an operational condition and
+    // there is nothing to keep the daemon up for.
+    let questness = match <EraBridge as bridge::all::Era>::questness() {
+        Ok(questness) => questness,
+        Err(message) => {
+            style::fail(&format!("Unable to start: the turn owner did not build: {message}"));
+            std::process::exit(1);
+        }
+    };
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -55,8 +66,11 @@ fn serve_forever() -> DquestResult<()> {
         // before any client can be told why. The factory comes from the
         // API's `Era` trait, so this is the only line that names one.
         let container = ContainerHandle::spawn(<EraBridge as bridge::all::Era>::engine);
-        let manager =
-            manager::SessionManager::for_user(&username, preflight::session_log_root());
+        let manager = manager::SessionManager::for_user(
+            &username,
+            preflight::session_log_root(),
+            questness,
+        );
         serve::serve(listener, config, container, manager).await;
         Ok(())
     })

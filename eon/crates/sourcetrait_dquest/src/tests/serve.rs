@@ -92,7 +92,7 @@ async fn daemon_with(
     let config =
         sourcetrait_quest_bridge::server_config(&material.files).expect("a server configuration");
     let container = ContainerHandle::spawn(move || Ok(engine));
-    let manager = crate::manager::SessionManager::for_user("box", log_root);
+    let manager = crate::manager::SessionManager::for_user("box", log_root, crate::tests::manager::StubQuestness);
     let task = tokio::spawn(serve(listener, config, container, manager.clone()));
     (address, task, manager)
 }
@@ -142,7 +142,7 @@ fn scripted(chunks: &[&str]) -> Scripted {
 
 /// The whole round trip through both halves: open, a turn that streams,
 /// and its accounting.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_turn_streams_its_chunks_then_reports() {
     let material = crate::tests::material::Material::mint("dquest_turn");
     let (address, server, _manager) = daemon(&material, scripted(&["Hel", "lo", " there"])).await;
@@ -164,8 +164,9 @@ async fn a_turn_streams_its_chunks_then_reports() {
 
     handle
         .send(sourcetrait_quest_bridge::ClientToServer::Turn(
-            sourcetrait_quest_bridge::TurnRequest {
-                text: String::from("say hello"),
+            sourcetrait_quest_bridge::InferRequest {
+                text: Some(sourcetrait_quest_bridge::InferText(String::from("say hello"))),
+                ..Default::default()
             },
         ))
         .await
@@ -188,7 +189,7 @@ async fn a_turn_streams_its_chunks_then_reports() {
         panic!("the turn ends with its own response: {turn:?}");
     };
     assert_eq!(
-        response.report.generated_token_count, 3,
+        response.report.as_ref().expect("a finished turn reports").generated_token_count, 3,
         "the accounting follows the chunks"
     );
 
@@ -198,7 +199,7 @@ async fn a_turn_streams_its_chunks_then_reports() {
 
 /// Several clients at once against the one container, and the registry
 /// sees each of them arrive and leave.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn several_sessions_share_one_container() {
     let material = crate::tests::material::Material::mint("dquest_several");
     let (address, server, manager) = daemon(&material, scripted(&["one"])).await;
@@ -241,7 +242,7 @@ async fn several_sessions_share_one_container() {
 
 /// Reset reaches the engine rather than being answered locally, which is
 /// the difference between dropping the context and saying it was dropped.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_reset_reaches_the_engine() {
     let material = crate::tests::material::Material::mint("dquest_reset");
     let engine = scripted(&["x"]);
@@ -277,7 +278,7 @@ async fn a_reset_reaches_the_engine() {
 /// A second turn mid-turn is REFUSED rather than queued. Queueing it
 /// would make the daemon hold work it cannot start for a client that has
 /// not been told.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_second_turn_during_a_turn_is_refused() {
     let material = crate::tests::material::Material::mint("dquest_second");
     let many: Vec<&str> = vec!["tick"; 20_000];
@@ -287,9 +288,10 @@ async fn a_second_turn_during_a_turn_is_refused() {
     for _ in 0..2 {
         handle
             .send(sourcetrait_quest_bridge::ClientToServer::Turn(
-                sourcetrait_quest_bridge::TurnRequest {
-                    text: String::from("go on at length"),
-                },
+                sourcetrait_quest_bridge::InferRequest {
+                text: Some(sourcetrait_quest_bridge::InferText(String::from("go on at length"))),
+                ..Default::default()
+            },
             ))
             .await
             .expect("sends");
@@ -324,7 +326,7 @@ async fn a_second_turn_during_a_turn_is_refused() {
 /// One bad connection is that connection's problem. A peer that fails
 /// the handshake must end its own task and nothing else, or a single
 /// malformed client is a denial of service.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_failed_handshake_does_not_take_the_daemon_down() {
     let material = crate::tests::material::Material::mint("dquest_survives");
     let foreign = crate::tests::material::Material::mint("dquest_foreign");
@@ -372,7 +374,7 @@ async fn a_failed_handshake_does_not_take_the_daemon_down() {
 
 /// A refused open is its own message, so a caller is not left reading a
 /// fault notice to learn its session never started.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_refused_open_answers_the_open() {
     let material = crate::tests::material::Material::mint("dquest_refused");
     let mut engine = scripted(&[]);
@@ -406,7 +408,7 @@ async fn a_refused_open_answers_the_open() {
 
 /// A failed turn answers the TURN rather than arriving as a notice, so a
 /// caller knows which request died.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_failed_turn_answers_the_turn() {
     let material = crate::tests::material::Material::mint("dquest_failed");
     let mut engine = scripted(&[]);
@@ -416,8 +418,9 @@ async fn a_failed_turn_answers_the_turn() {
 
     handle
         .send(sourcetrait_quest_bridge::ClientToServer::Turn(
-            sourcetrait_quest_bridge::TurnRequest {
-                text: String::from("anything"),
+            sourcetrait_quest_bridge::InferRequest {
+                text: Some(sourcetrait_quest_bridge::InferText(String::from("anything"))),
+                ..Default::default()
             },
         ))
         .await
@@ -439,7 +442,7 @@ async fn a_failed_turn_answers_the_turn() {
 /// went out in pieces. Every record is written BEFORE its response is
 /// sent, so a client that has read the turn response has already caused
 /// the log to land - there is nothing to wait for here.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_session_writes_its_turn_to_the_log() {
     let material = crate::tests::material::Material::mint("dquest_logged");
     let scratch = crate::tests::material::Scratch::make("serve_log");
@@ -466,8 +469,9 @@ async fn a_session_writes_its_turn_to_the_log() {
 
     handle
         .send(sourcetrait_quest_bridge::ClientToServer::Turn(
-            sourcetrait_quest_bridge::TurnRequest {
-                text: String::from("say hello"),
+            sourcetrait_quest_bridge::InferRequest {
+                text: Some(sourcetrait_quest_bridge::InferText(String::from("say hello"))),
+                ..Default::default()
             },
         ))
         .await
@@ -501,7 +505,7 @@ async fn a_session_writes_its_turn_to_the_log() {
 
 /// The reason the session reads inbound DURING a turn. A cancel sent as
 /// ordinary work would queue behind the very turn it means to stop.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_cancel_reaches_a_running_turn() {
     let material = crate::tests::material::Material::mint("dquest_cancel");
     let many: Vec<&str> = vec!["tick"; 100_000];
@@ -510,8 +514,9 @@ async fn a_cancel_reaches_a_running_turn() {
 
     handle
         .send(sourcetrait_quest_bridge::ClientToServer::Turn(
-            sourcetrait_quest_bridge::TurnRequest {
-                text: String::from("go on at length"),
+            sourcetrait_quest_bridge::InferRequest {
+                text: Some(sourcetrait_quest_bridge::InferText(String::from("go on at length"))),
+                ..Default::default()
             },
         ))
         .await
@@ -544,7 +549,7 @@ async fn a_cancel_reaches_a_running_turn() {
         panic!("a cancelled turn still reports");
     };
     assert!(
-        response.report.generated_token_count < many.len(),
+        response.report.as_ref().expect("a finished turn reports").generated_token_count < many.len(),
         "the turn stopped early rather than running to its end"
     );
 

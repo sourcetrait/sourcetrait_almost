@@ -4,7 +4,6 @@ use crate::prompt::{
     CONFIG_FLAG,
     FILE_FLAG,
     FILE_PROMPT_FIELD,
-    PIPED_CHANNEL,
     PROMPT_FIELD,
     asked,
 };
@@ -83,10 +82,11 @@ fn a_piped_record_carries_its_prompt_and_binds_the_rest() {
     let asked = asked(&call(), &piped).expect("resolves");
     assert_eq!(asked.prompt, "summarise");
 
-    let binding = asked.bindings.first().expect("the rest binds");
-    assert_eq!(binding.pass, PIPED_CHANNEL);
-    let nu_protocol::Value::Record { val, .. } = &binding.value else {
-        panic!("the remainder is a record, got {:?}", binding.value);
+    let (pass, input) = asked.bindings.first().expect("the rest binds");
+    assert_eq!(*pass, bridge::InferPass::In);
+    let bound = &input.value().0;
+    let nu_protocol::Value::Record { val, .. } = bound else {
+        panic!("the remainder is a record, got {bound:?}");
     };
     assert!(
         val.get(PROMPT_FIELD).is_none(),
@@ -124,9 +124,9 @@ fn a_piped_value_that_is_not_a_record_binds_whole() {
         &record("[a, b, c]"),
     )
     .expect("resolves");
-    let binding = asked.bindings.first().expect("a list binds");
-    assert_eq!(binding.pass, PIPED_CHANNEL);
-    assert!(matches!(binding.value, nu_protocol::Value::List { .. }));
+    let (pass, input) = asked.bindings.first().expect("a list binds");
+    assert_eq!(*pass, bridge::InferPass::In);
+    assert!(matches!(input.value().0, nu_protocol::Value::List { .. }));
 }
 
 #[test]

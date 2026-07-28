@@ -56,6 +56,15 @@ pub(crate) mod r {
 /// container runs whatever satisfies it and never learns which era did.
 pub(crate) use bridge::all::Engine;
 
+/// One Thinkspace's turn owner, shared by every session in that space.
+///
+/// It outlives a session deliberately: a session tears down as soon as
+/// its turn is over, while the conversation belongs to the Thinkspace, so
+/// a caller returning with the result of an ask resumes rather than
+/// starting again.
+pub(crate) type QuestnessHandle =
+    std::sync::Arc<tokio::sync::Mutex<Box<dyn bridge::all::Questness>>>;
+
 pub(crate) use crate::container::ContainerHandle;
 pub(crate) use crate::error::{
     DquestError,

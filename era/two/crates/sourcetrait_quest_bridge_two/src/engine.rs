@@ -11,6 +11,7 @@ pub struct BridgeTwo;
 
 impl bridge::all::Era for BridgeTwo {
     type Engine = TwoEngine;
+    type Questness = TwoQuestness;
 
     /// From constants rather than a load, so a consumer can say what it
     /// is about to open before paying for the model.
@@ -28,6 +29,108 @@ impl bridge::all::Era for BridgeTwo {
     fn engine() -> Result<Self::Engine, String> {
         TwoEngine::load()
     }
+
+    fn questness() -> Result<Self::Questness, String> {
+        TwoQuestness::open()
+    }
+}
+
+/// Era two's Questness behind the API's trait.
+///
+/// It adds nothing the library does not already provide: the whole of it
+/// is the conversion between the `Infer*` forms and what the library's
+/// own turn speaks.
+pub struct TwoQuestness {
+    inner: lib::Questness,
+}
+
+impl TwoQuestness {
+    fn open() -> Result<Self, String> {
+        // The boundary aliases the trained tool-marker attractor until
+        // channel-marker routing is trained, which 10_Channels measures
+        // as dead at zero of six without it.
+        let inner = lib::Questness::new(lib::channel::Aliasing::ToolMarkers).map_err(message_of)?;
+        Ok(Self { inner })
+    }
+}
+
+impl bridge::all::Questness for TwoQuestness {
+    /// A request carrying an `output` is a CONTINUATION: the caller ran
+    /// an ask and this is its result, so the conversation resumes rather
+    /// than starting a fresh turn.
+    fn assemble(&mut self, request: &bridge::InferRequest) -> Result<String, String> {
+        if let Some(output) = &request.output {
+            return self.inner.resume(&output.value().0).map_err(message_of);
+        }
+        let config = match &request.config {
+            Some(config) => config.0.0.clone(),
+            None => lib::nu::Value::record(lib::nu::Record::new(), lib::nu::Span::unknown()),
+        };
+        let bindings = request
+            .inputs
+            .iter()
+            .map(|(pass, input)| lib::Binding::new(pass.spelling(), input.value().0.clone()))
+            .collect();
+        let assembled = self
+            .inner
+            .assemble(&lib::Request {
+                config,
+                prompt: request.text.as_ref().map(|text| text.0.clone()).unwrap_or_default(),
+                bindings,
+            })
+            .map_err(message_of)?;
+        Ok(assembled.text)
+    }
+
+    fn step(
+        &mut self,
+        emission: &str,
+        insufficient: bool,
+    ) -> Result<bridge::all::Step, String> {
+        Ok(match self.inner.step(emission, insufficient).map_err(message_of)? {
+            lib::Step::Continue(text) => bridge::all::Step::Continue(text),
+            lib::Step::Insufficient => bridge::all::Step::Insufficient,
+            lib::Step::Ask { form, bindings } => bridge::all::Step::Ask {
+                form,
+                inputs: bindings
+                    .iter()
+                    .map(bound)
+                    .collect::<Result<Vec<_>, String>>()?,
+            },
+            lib::Step::Answered(answer) => bridge::all::Step::Answered {
+                output: answer.value.map(|value| {
+                    bridge::InferOutput::Nuon(bridge::InferNuonOutput(bridge::InferValue(value)))
+                }),
+                text: match answer.rendered.is_empty() {
+                    true => None,
+                    false => Some(bridge::InferText(answer.rendered)),
+                },
+                config: answer
+                    .config
+                    .map(|value| bridge::InferConfig(bridge::InferValue(value))),
+            },
+            lib::Step::Repair(envelope) => bridge::all::Step::Repair(
+                envelope
+                    .errors
+                    .iter()
+                    .map(|row| bridge::all::InferDiagnostic {
+                        kind: row.kind.clone(),
+                        source: row.source.clone(),
+                        message: row.message.clone(),
+                    })
+                    .collect(),
+            ),
+        })
+    }
+}
+
+/// One of the library's bindings as the pass-tagged input it is.
+fn bound(
+    binding: &lib::Binding,
+) -> Result<(bridge::InferPass, bridge::InferInput), String> {
+    let pass = bridge::InferPass::parse(&binding.pass).map_err(|error| error.to_string())?;
+    let carried = bridge::InferValue(binding.value.clone());
+    Ok((pass, bridge::InferInput::Nuon(bridge::InferNuonInput(carried))))
 }
 
 /// The model, its tokenizer, and the conversation so far.

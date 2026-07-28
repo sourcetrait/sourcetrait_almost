@@ -95,6 +95,17 @@ impl Questness {
         }
     }
 
+    /// Render an ask's result back into the conversation.
+    ///
+    /// The caller ran what the model asked for on its own engine, and
+    /// this is how the answer re-enters: the same thought turn a think's
+    /// own answer takes, so the model sees one shape either way.
+    pub fn resume(&mut self, value: &nu::Value) -> LibQuestResult<String> {
+        let text = turn::thought_turn(&output_block(value)?);
+        self.record("resumed", &text);
+        Ok(text)
+    }
+
     /// Run a think turn and render its answer back as a thought.
     ///
     /// A failure becomes a repair envelope rather than a block, because
@@ -107,12 +118,7 @@ impl Questness {
         bindings: &[turn::Binding],
     ) -> LibQuestResult<Step> {
         match turn::run_think(&self.evaluator, form, signature, bindings) {
-            Ok(value) => {
-                let declared = value.get_type().to_string();
-                let payload = channel::escape_content(&nu::to_nuon_text(&value)?);
-                let block = Block::new(Tag::Output, &declared, &payload);
-                Ok(Step::Continue(turn::thought_turn(&block)))
-            }
+            Ok(value) => Ok(Step::Continue(turn::thought_turn(&output_block(&value)?))),
             Err(error) => {
                 let mut envelope = Envelope::default();
                 envelope.error(
@@ -124,4 +130,12 @@ impl Questness {
             }
         }
     }
+}
+
+/// A value as the `<output>` block the model reads it from, escaped so
+/// no string's newline can forge a closer.
+fn output_block(value: &nu::Value) -> LibQuestResult<Block> {
+    let declared = value.get_type().to_string();
+    let payload = channel::escape_content(&nu::to_nuon_text(value)?);
+    Ok(Block::new(Tag::Output, &declared, &payload))
 }

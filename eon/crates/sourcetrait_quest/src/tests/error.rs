@@ -1,47 +1,37 @@
 //! Error locks: how a repair reaches a caller, and by which channel.
 use crate::*;
 
-fn envelope() -> lib::channel::Envelope {
-    let mut envelope = lib::channel::Envelope::default();
-    envelope.error(
-        "shape::missing",
-        Some("output"),
-        "the response shape declares output, so the answer owes a typed value",
-    );
-    envelope.error("channel::parse", None, "unmarked content outside every block");
-    envelope
+fn rows() -> Vec<String> {
+    vec![
+        String::from("shape::missing at output: the answer owes a typed value"),
+        String::from("shape::missing at config: the answer owes a config record"),
+    ]
 }
 
 #[test]
-fn a_repair_envelope_keeps_one_row_per_diagnostic() {
-    let QuestPluginError::Envelope { rows } = QuestPluginError::envelope(&envelope()) else {
-        panic!("an envelope carries its rows");
+fn a_shortfall_keeps_one_row_per_member() {
+    let QuestPluginError::Envelope { rows: kept } = QuestPluginError::rows(rows()) else {
+        panic!("a shortfall carries its rows");
     };
-    assert_eq!(rows.len(), 2, "collected rather than first-error-only");
+    assert_eq!(kept.len(), 2, "collected rather than first-error-only");
     assert!(
-        rows[0].contains("shape::missing") && rows[0].contains("output"),
-        "the kind and its source both survive: {}",
-        rows[0]
-    );
-    assert!(
-        !rows[1].contains(" at "),
-        "a row with no source does not invent one: {}",
-        rows[1]
+        kept[0].contains("shape::missing") && kept[0].contains("output"),
+        "the kind and the member both survive: {}",
+        kept[0]
     );
 }
 
 #[test]
 fn every_failure_leaves_as_a_labeled_error() {
-    let labelled: nu_protocol::LabeledError =
-        QuestPluginError::envelope(&envelope()).into();
+    let labelled: nu_protocol::LabeledError = QuestPluginError::rows(rows()).into();
     assert!(
         labelled.msg.contains("did not conform"),
         "the headline says what happened: {}",
         labelled.msg
     );
     let help = labelled.help.expect("the rows ride as help");
-    assert!(help.contains("shape::missing"), "got {help}");
-    assert!(help.contains("channel::parse"), "got {help}");
+    assert!(help.contains("output"), "got {help}");
+    assert!(help.contains("config"), "got {help}");
 }
 
 #[test]

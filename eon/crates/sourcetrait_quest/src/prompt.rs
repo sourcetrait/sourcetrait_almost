@@ -13,16 +13,13 @@ pub(crate) const PROMPT_FIELD: &str = "prompt";
 /// The piped record's field naming a file holding one.
 pub(crate) const FILE_PROMPT_FIELD: &str = "fprompt";
 
-/// The channel a piped value binds to.
-pub(crate) const PIPED_CHANNEL: &str = "$in";
-
 pub(crate) struct Prompt;
 
 /// What one call resolved to: the prompt, and what it binds.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Asked {
     pub(crate) prompt: String,
-    pub(crate) bindings: Vec<lib::Binding>,
+    pub(crate) bindings: Vec<(bridge::InferPass, bridge::InferInput)>,
 }
 
 impl nu_plugin::SimplePluginCommand for Prompt {
@@ -98,15 +95,64 @@ fn answer(
     // having spent a generation on it.
     let shape = lib::Shape::of(&config)?;
     let asked = asked(call, input)?;
-    let request = lib::Request {
-        config,
-        prompt: asked.prompt,
-        bindings: asked.bindings,
+    let request = bridge::InferRequest {
+        config: Some(bridge::InferConfig(bridge::InferValue(config))),
+        inputs: asked.bindings,
+        text: Some(bridge::InferText(asked.prompt)),
+        output: None,
     };
-    let answer = converse::ask(plugin, &request)?;
-    shape
-        .value_of(&answer)
-        .map_err(|envelope| QuestPluginError::envelope(&envelope))
+    shaped(&shape, &converse::ask(plugin, request)?, call.head)
+}
+
+/// The value a caller gets back, decided by the shape it declared.
+///
+/// One declared member comes back BARE so a pipeline works; several come
+/// back as a record keyed by member spelling, in declaration order. A
+/// single-key record would force a `get` at every call site.
+fn shaped(
+    shape: &lib::Shape,
+    response: &bridge::InferResponse,
+    span: lib::nu::Span,
+) -> QuestPluginResult<nu_protocol::Value> {
+    let mut carried: Vec<(&'static str, nu_protocol::Value)> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+    for member in &shape.response {
+        let value = match member {
+            lib::ShapeMember::Text => Some(nu_protocol::Value::string(
+                response
+                    .text
+                    .as_ref()
+                    .map(|text| text.0.clone())
+                    .unwrap_or_default(),
+                span,
+            )),
+            lib::ShapeMember::Output => response.output.as_ref().map(|output| output.value().0.clone()),
+            lib::ShapeMember::Config => response.config.as_ref().map(|config| config.0.0.clone()),
+        };
+        match value {
+            Some(value) => carried.push((member.spelling(), value)),
+            // Collected rather than bailed on, so one answer reports
+            // every member it owes rather than the first.
+            None => missing.push(format!(
+                "shape::missing at {member}: the response shape declares {member}, \
+                 so the answer owes one",
+                member = member.spelling()
+            )),
+        }
+    }
+    if !missing.is_empty() {
+        return Err(QuestPluginError::rows(missing));
+    }
+    match carried.len() {
+        1 => Ok(carried.remove(0).1),
+        _ => {
+            let mut record = lib::nu::Record::new();
+            for (member, value) in carried {
+                record.push(member.to_string(), value);
+            }
+            Ok(nu_protocol::Value::record(record, span))
+        }
+    }
 }
 
 /// The prompt this call asks, and the binding that rides with it.
@@ -182,7 +228,7 @@ fn field(record: &lib::nu::Record, key: &str) -> Option<String> {
 fn bindings(
     input: &nu_protocol::Value,
     piped: Option<lib::nu::Record>,
-) -> Vec<lib::Binding> {
+) -> Vec<(bridge::InferPass, bridge::InferInput)> {
     let span = input.span();
     let bound = match piped {
         Some(mut record) => {
@@ -196,5 +242,8 @@ fn bindings(
         None if matches!(input, nu_protocol::Value::Nothing { .. }) => return Vec::new(),
         None => input.clone(),
     };
-    vec![lib::Binding::new(PIPED_CHANNEL, bound)]
+    vec![(
+        bridge::InferPass::In,
+        bridge::InferInput::Nuon(bridge::InferNuonInput(bridge::InferValue(bound))),
+    )]
 }

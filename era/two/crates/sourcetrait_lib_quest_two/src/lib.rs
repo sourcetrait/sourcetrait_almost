@@ -187,6 +187,7 @@ pub use crate::questness::turn::{
     Assembled,
     Binding,
     Request,
+    thought_turn,
 };
 pub use crate::snapshot::{
     RestoredContext,

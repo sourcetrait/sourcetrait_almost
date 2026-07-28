@@ -44,12 +44,80 @@ pub trait Engine {
 /// will own it.
 pub trait Era {
     type Engine: Engine;
+    type Questness: Questness;
 
     /// The era's identity, without loading anything.
     fn info() -> EraInfo;
 
     /// Build the engine. Called on the thread that will own it.
     fn engine() -> Result<Self::Engine, String>;
+
+    /// Build a Questness. One per Thinkspace, carrying that space's
+    /// conversation, so a consumer builds one per space rather than
+    /// sharing one.
+    fn questness() -> Result<Self::Questness, String>;
+}
+
+/// One repair row, addressed by cell-path rather than by span.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct InferDiagnostic {
+    pub kind: String,
+    /// The cell-path into the offending value, where one applies.
+    pub source: Option<String>,
+    pub message: String,
+}
+
+/// What one emission moved a turn to.
+///
+/// The split is by WHO ACTS NEXT. `Continue` is the only state that
+/// keeps the turn going, and it carries the text to feed the model
+/// again; everything else hands control back to the consumer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Step {
+    /// A think turn already ran. Feed this back to the model.
+    Continue(String),
+    Answered {
+        output: Option<InferOutput>,
+        text: Option<InferText>,
+        config: Option<InferConfig>,
+    },
+    /// The model asked the CONSUMER's own engine to run something. The
+    /// turn pauses until a request carries the result back.
+    Ask {
+        form: InferNu,
+        inputs: Vec<(InferPass, InferInput)>,
+    },
+    /// The model said it cannot produce conforming output.
+    Insufficient,
+    /// The emission did not conform; these rows are the feedback.
+    Repair(Vec<InferDiagnostic>),
+}
+
+/// The turn surface a consumer drives, one instance per Thinkspace.
+///
+/// It renders what the model is shown, reads what it emits, and runs the
+/// one form that stays inside. It never holds the model: a consumer
+/// generates against its own engine and hands the emission back here.
+///
+/// `?Send` is deliberately NOT wanted - a consumer drives this from a
+/// blocking task, so the value has to cross a thread boundary.
+pub trait Questness: Send {
+    /// The text one turn shows the model.
+    fn assemble(&mut self, request: &InferRequest) -> Result<String, String>;
+
+    /// Read one emission and take the turn to its next state.
+    ///
+    /// `insufficient` is supplied rather than scanned for: the tag is
+    /// special, so a skip-special decode strips it and only the side
+    /// holding token ids can know.
+    fn step(&mut self, emission: &str, insufficient: bool) -> Result<Step, String>;
 }
 
 #[derive(

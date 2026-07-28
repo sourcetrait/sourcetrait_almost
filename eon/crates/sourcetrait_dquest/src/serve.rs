@@ -46,12 +46,16 @@ pub(crate) async fn serve(
         // ticket drops on that path exactly as on any other.
         let ticket = manager.admit();
         let log = manager.log(&ticket);
+        // Every session in this space shares the one turn owner, so a
+        // caller returning with an ask's result resumes the conversation
+        // it left rather than starting a new one.
+        let questness = manager.questness();
         tokio::spawn(async move {
             let _ticket = ticket;
             let Ok(stream) = acceptor.accept(stream).await else {
                 return;
             };
-            session(stream, container, log).await;
+            session(stream, container, questness, log).await;
         });
     }
 }
@@ -71,6 +75,7 @@ fn record(log: &Option<log::SessionLog>, label: &str, body: &str) {
 pub(crate) async fn session(
     stream: r::tls::ServerStream<tokio::net::TcpStream>,
     container: ContainerHandle,
+    questness: QuestnessHandle,
     log: Option<log::SessionLog>,
 ) {
     let (read, write) = tokio::io::split(stream);
@@ -95,7 +100,7 @@ pub(crate) async fn session(
                 writer.send(answer).await.is_ok()
             }
             bridge::ClientToServer::Turn(request) => {
-                turn(&mut reader, &mut writer, &container, request.text, &log).await
+                turn(&mut reader, &mut writer, &container, &questness, request, &log).await
             }
             // Nothing is generating, or the turn arm would be running.
             bridge::ClientToServer::Cancel(_) => writer
@@ -132,26 +137,123 @@ pub(crate) async fn session(
     let _ = writer.close().await;
 }
 
-/// Drive one turn: stream its chunks, and stay listening while it runs.
+/// Drive one turn to an ending, generating as many times as it takes.
+///
+/// A THINK NEVER LEAVES THIS LOOP. Questness runs it on the Thinkspace's
+/// own evaluator and hands back the text to feed the model again, so one
+/// wire turn can be several generations. Only an answer, an ask, an
+/// insufficiency or a repair ends it.
+///
+/// THIS REQUIRES THE MULTI-THREADED RUNTIME. Questness is blocking all
+/// the way down - its evaluator spawns a sized thread and joins it - so
+/// the turn owner is driven through `block_in_place`, which panics on a
+/// current-thread runtime rather than degrading.
+async fn turn(
+    reader: &mut Reader,
+    writer: &mut Writer,
+    container: &ContainerHandle,
+    questness: &QuestnessHandle,
+    request: bridge::InferRequest,
+    log: &Option<log::SessionLog>,
+) -> bool {
+    // Held for the whole turn: the conversation is the Thinkspace's, so
+    // a second turn interleaving generations would corrupt it.
+    let mut owner = questness.lock().await;
+    let mut feed = match tokio::task::block_in_place(|| owner.assemble(&request)) {
+        Ok(text) => text,
+        Err(message) => return failed(writer, log, message).await,
+    };
+    record(log, "assembled", &feed);
+
+    loop {
+        let (emission, report) = match generate(reader, writer, container, feed, log).await {
+            Generated::Emitted { emission, report } => (emission, report),
+            Generated::Failed(message) => return failed(writer, log, message).await,
+            Generated::Gone => return false,
+        };
+        let step = match tokio::task::block_in_place(|| owner.step(&emission, false)) {
+            Ok(step) => step,
+            Err(message) => return failed(writer, log, message).await,
+        };
+        let answer = match step {
+            bridge::all::Step::Continue(next) => {
+                record(log, "think", &next);
+                feed = next;
+                continue;
+            }
+            bridge::all::Step::Answered {
+                output,
+                text,
+                config,
+            } => bridge::InferResponse {
+                output,
+                text,
+                config,
+                report: Some(report),
+                ..bridge::InferResponse::default()
+            },
+            // The turn PAUSES here. The caller runs it on its own engine
+            // and returns the result on the next request, where this
+            // Questness resumes the same conversation.
+            bridge::all::Step::Ask { form, inputs } => bridge::InferResponse {
+                nu: Some(form),
+                inputs,
+                ..bridge::InferResponse::default()
+            },
+            bridge::all::Step::Insufficient => bridge::InferResponse {
+                insufficient: true,
+                report: Some(report),
+                ..bridge::InferResponse::default()
+            },
+            bridge::all::Step::Repair(rows) => {
+                let message = rows
+                    .iter()
+                    .map(|row| format!("{}: {}", row.kind, row.message))
+                    .collect::<Vec<String>>()
+                    .join("; ");
+                return failed(writer, log, message).await;
+            }
+        };
+        record(log, "answered", &summary(&answer));
+        return writer
+            .send(bridge::ServerToClient::Turn(answer))
+            .await
+            .is_ok();
+    }
+}
+
+/// What one generation produced, or why it produced nothing.
+enum Generated {
+    Emitted {
+        emission: String,
+        report: bridge::all::TurnReport,
+    },
+    Failed(String),
+    /// The peer went away, or the connection broke.
+    Gone,
+}
+
+/// One generation: stream its chunks, and stay listening while it runs.
 ///
 /// THE INBOUND HALF IS READ DURING THE TURN, which is what makes Cancel
 /// reachable at all. The container serialises work, so a Cancel sent as
 /// a unit would queue BEHIND the turn it means to stop and arrive after
 /// it finished.
-async fn turn(
+async fn generate(
     reader: &mut Reader,
     writer: &mut Writer,
     container: &ContainerHandle,
     text: String,
     log: &Option<log::SessionLog>,
-) -> bool {
-    record(log, "turn", &text);
+) -> Generated {
+    record(log, "generate", &text);
     let (chunks, mut arriving) = r::tokio::channel(CHUNK_CAPACITY);
     let running = container.turn(text, chunks);
     tokio::pin!(running);
 
-    // The answer is reassembled here ONLY to log it. The chunks still go
-    // out as they arrive, so the log costs a copy rather than a wait.
+    // The emission is reassembled because Questness must parse the WHOLE
+    // of it. The chunks still go out as they arrive, so a caller watching
+    // raw output pays a copy rather than a wait.
     let mut answer = String::new();
     let mut report = None;
     let mut draining = false;
@@ -210,32 +312,71 @@ async fn turn(
     }
 
     // Logged whatever the ending was, including a peer that vanished
-    // mid-turn: a partial answer is the interesting one to have kept.
-    record(log, "answer", &answer);
+    // mid-turn: a partial emission is the interesting one to have kept.
+    record(log, "emission", &answer);
     if !alive {
-        return false;
+        return Generated::Gone;
     }
-    let outcome = match report {
+    match report {
         Some(Ok(report)) => {
-            record(
-                log,
-                "report",
-                &format!(
-                    "{:?}; prompt {}, generated {}, prefill {:.3}s, decode {:.3}s",
-                    report.finish,
-                    report.prompt_token_count,
-                    report.generated_token_count,
-                    report.prefill_seconds,
-                    report.decode_seconds,
-                ),
-            );
-            bridge::ServerToClient::Turn(bridge::TurnResponse { report })
+            record(log, "report", &accounting(&report));
+            Generated::Emitted {
+                emission: answer,
+                report,
+            }
         }
-        Some(Err(message)) => {
-            record(log, "turn-failed", &message);
-            bridge::ServerToClient::TurnFailed(bridge::TurnFailedResponse { message })
-        }
-        None => return false,
-    };
-    writer.send(outcome).await.is_ok()
+        Some(Err(message)) => Generated::Failed(message),
+        None => Generated::Gone,
+    }
+}
+
+/// Answer a turn that did not run, and say why.
+async fn failed(
+    writer: &mut Writer,
+    log: &Option<log::SessionLog>,
+    message: String,
+) -> bool {
+    record(log, "turn-failed", &message);
+    writer
+        .send(bridge::ServerToClient::TurnFailed(
+            bridge::TurnFailedResponse { message },
+        ))
+        .await
+        .is_ok()
+}
+
+/// One generation's accounting, as the log records it.
+fn accounting(report: &bridge::all::TurnReport) -> String {
+    format!(
+        "{:?}; prompt {}, generated {}, prefill {:.3}s, decode {:.3}s",
+        report.finish,
+        report.prompt_token_count,
+        report.generated_token_count,
+        report.prefill_seconds,
+        report.decode_seconds,
+    )
+}
+
+/// What a response carries, without rendering the values themselves.
+fn summary(answer: &bridge::InferResponse) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if answer.output.is_some() {
+        parts.push("output");
+    }
+    if answer.text.is_some() {
+        parts.push("text");
+    }
+    if answer.config.is_some() {
+        parts.push("config");
+    }
+    if answer.nu.is_some() {
+        parts.push("ask");
+    }
+    if answer.insufficient {
+        parts.push("insufficient");
+    }
+    match parts.is_empty() {
+        true => String::from("nothing"),
+        false => parts.join(", "),
+    }
 }
