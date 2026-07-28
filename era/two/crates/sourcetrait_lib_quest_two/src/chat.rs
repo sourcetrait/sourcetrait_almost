@@ -35,6 +35,10 @@ pub enum ChatRole {
     System,
     User,
     Assistant,
+    /// The model's own reasoning turn, which a reasoning form requests.
+    Think,
+    /// The Thinkspace's answer to a think; supplied, never generated.
+    Thought,
     Environment,
     Tool,
 }
@@ -47,6 +51,8 @@ impl ChatRole {
             Self::System => "system",
             Self::User => "user",
             Self::Assistant => "assistant",
+            Self::Think => turn::THINK_ROLE,
+            Self::Thought => turn::THOUGHT_ROLE,
             Self::Environment | Self::Tool => "environment",
         }
     }
@@ -57,6 +63,8 @@ impl ChatRole {
             "system" => Self::System,
             "user" => Self::User,
             "assistant" => Self::Assistant,
+            turn::THINK_ROLE => Self::Think,
+            turn::THOUGHT_ROLE => Self::Thought,
             "environment" => Self::Environment,
             "tool" => Self::Tool,
             other => snafu::whatever!("unknown chat role {other:?}"),
@@ -185,7 +193,24 @@ pub fn chat_render(messages: &[ChatMessage], add_generation_prompt: bool) -> Cha
                     text.push('\n');
                 }
             }
-            ChatRole::Environment | ChatRole::Tool => {
+            // A think is GENERATED, so it trains like an assistant turn.
+            // Reaching for the tool is the capability being learned, so
+            // leaving it out of the loss would train everything about the
+            // answer except the decision that produced it.
+            ChatRole::Think => {
+                text.push_str("<|im_start|>");
+                text.push_str(role.rendered());
+                text.push('\n');
+                let start = text.len();
+                if let Some(content) = &message.content {
+                    text.push_str(content);
+                }
+                text.push_str("<|im_end|>");
+                assistant_spans.push(AssistantSpan { start, end: text.len() });
+                text.push('\n');
+            }
+            // A thought is SUPPLIED, so it is context and never a span.
+            ChatRole::Thought | ChatRole::Environment | ChatRole::Tool => {
                 text.push_str("<|im_start|>");
                 text.push_str(role.rendered());
                 text.push('\n');

@@ -299,3 +299,60 @@ fn encoded_spans_land_on_token_boundaries_and_decode_back() {
     assert_eq!(*first.last().expect("interior span"), consts::TOKEN_IM_END);
     assert_eq!(*last.last().expect("final span"), consts::TOKEN_ENDOFTEXT);
 }
+
+/// The offload sequence a supervised example carries: the model asks,
+/// the Thinkspace answers, the model finishes. What trains is what the
+/// MODEL produced - the think and the answer - and never the thought.
+#[test]
+fn a_think_trains_and_the_thought_it_answers_does_not() {
+    let messages = vec![
+        ChatMessage {
+            role: Some(ChatRole::User),
+            content: Some(String::from("What is 5 + 5?")),
+            ..Default::default()
+        },
+        ChatMessage {
+            role: Some(ChatRole::Think),
+            content: Some(String::from("ASK")),
+            ..Default::default()
+        },
+        ChatMessage {
+            role: Some(ChatRole::Thought),
+            content: Some(String::from("TOLD")),
+            ..Default::default()
+        },
+        ChatMessage {
+            role: Some(ChatRole::Assistant),
+            content: Some(String::from("10")),
+            ..Default::default()
+        },
+    ];
+    let rendered = chat_render(&messages, false);
+    assert!(rendered.text.contains("<|im_start|>think\nASK"), "{}", rendered.text);
+    assert!(rendered.text.contains("<|im_start|>thought\nTOLD"), "{}", rendered.text);
+
+    let trained: Vec<&str> = rendered
+        .assistant_spans
+        .iter()
+        .map(|span| &rendered.text[span.start..span.end])
+        .collect();
+    assert_eq!(trained.len(), 2, "the think and the answer, not the thought");
+    assert!(trained[0].starts_with("ASK"), "got {trained:?}");
+    assert!(trained[1].starts_with("10"), "got {trained:?}");
+    assert!(
+        !trained.iter().any(|span| span.contains("TOLD")),
+        "a supplied thought is context rather than a target"
+    );
+}
+
+#[test]
+fn the_reasoning_roles_parse_from_the_spellings_the_turn_emits() {
+    assert_eq!(
+        ChatRole::parse(questness::turn::THINK_ROLE).expect("think"),
+        ChatRole::Think
+    );
+    assert_eq!(
+        ChatRole::parse(questness::turn::THOUGHT_ROLE).expect("thought"),
+        ChatRole::Thought
+    );
+}
