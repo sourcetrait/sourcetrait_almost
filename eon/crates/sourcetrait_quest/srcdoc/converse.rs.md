@@ -82,8 +82,45 @@ there were something to stream.
 
 A shutdown notice ends the conversation because reconnecting will not
 help, and a fault does not because the session stays open. Anything else
-is a message this consumer does not service - a cancel response it never
-asked for, a reset it never sent - and is passed over rather than
-promoted to a fault of its own. Treating an unexpected message as an
-error would make every future widening of the server's language a
-breaking change here.
+is a message this consumer does not service - a reset it never sent - and
+is passed over rather than promoted to a fault of its own. Treating an
+unexpected message as an error would make every future widening of the
+server's language a breaking change here.
+
+A cancel response now IS something it asked for, and is still passed over
+on the same terms: the acknowledgement says the cancel arrived, while the
+thing the caller is waiting on is the turn's own answer, which comes
+afterwards either way.
+
+## The interrupt path
+
+AN INTERRUPT IS ONLY OBSERVABLE BY ASKING FOR IT, and not asking was the
+whole defect. Ctrl-C reaches the ENGINE rather than this process, so a
+plugin that never consults the interface never learns one happened - and
+this one then sat in an uninterruptible `block_on` until the daemon
+finished on its own. A turn could not be abandoned from the terminal at
+all, which is worst in exactly the cases where you most want to: a
+generation running away, with minutes left to go.
+
+THE FLAG IS POLLED RATHER THAN AWAITED, and that is forced. A signal
+handler is a callback on another thread and cannot reach into the task
+that is awaiting, so the two meet through an atomic flag beside the
+receive. The interval bounds only how long a Ctrl-C takes to become a
+`Cancel` on the wire; the daemon then stops at its next emit.
+
+THE FAR HALF NEEDED NOTHING. `serve::generate` already reads inbound
+during a turn precisely so a cancel is reachable mid-generation, and a
+lock already drives a hundred thousand scripted chunks cancelled in
+flight. The granularity was spent when the wire was designed and simply
+never claimed here.
+
+The cancel is sent ONCE rather than per poll, and the loop keeps reading
+after it. A cancelled turn still ANSWERS - the daemon stops and reports
+what it managed - so returning at the cancel would abandon a response
+that is already on its way, and repeating the cancel would put a message
+on the wire per poll for as long as the turn takes to wind down.
+
+WHAT IT DOES NOT REACH is the two unbounded paths in debt. A think loop
+never returns to the point where the response is awaited, and a hung
+evaluator blocks the turn owner before any generation starts, so neither
+is listening for a cancel when it matters.
