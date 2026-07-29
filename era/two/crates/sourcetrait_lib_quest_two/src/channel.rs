@@ -61,16 +61,16 @@ impl Tag {
         }
     }
 
-    /// The design's readable name, pending a tokenizer rename.
+    /// The authoring alias for this tag's wire token; human-only, never a token.
     pub fn name(&self) -> &'static str {
         match self {
-            Self::Config => "<config>",
-            Self::Input => "<input>",
-            Self::Output => "<output>",
-            Self::Pass => "<pass>",
-            Self::Nu => "<nu>",
-            Self::Liquid => "<liquid>",
-            Self::Close => "</>",
+            Self::Config => "<|config|>",
+            Self::Input => "<|input|>",
+            Self::Output => "<|output|>",
+            Self::Pass => "<|pass|>",
+            Self::Nu => "<|nu|>",
+            Self::Liquid => "<|liquid|>",
+            Self::Close => "<|/|>",
         }
     }
 
@@ -301,6 +301,15 @@ pub fn render_blocks(blocks: &[Block]) -> String {
         .map(render_block)
         .collect::<Vec<String>>()
         .join("\n")
+}
+
+/// Translate authoring aliases to their wire token spellings.
+pub fn authoring_to_wire(text: &str) -> String {
+    let mut out = text.to_string();
+    for tag in TAGS {
+        out = out.replace(tag.name(), tag.spelling());
+    }
+    out
 }
 
 /// Parse a decoded turn into its blocks, line-anchored.

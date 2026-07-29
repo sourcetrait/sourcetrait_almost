@@ -12,6 +12,7 @@ use crate::channel::{
     Format,
     TAGS,
     Tag,
+    authoring_to_wire,
     escape_content,
     parse_blocks,
     render_block,
@@ -119,7 +120,7 @@ fn an_unclosed_block_is_an_error_naming_its_tag() {
     let error = parse_blocks(text, Aliasing::Strict)
         .expect_err("unclosed rejects")
         .to_string();
-    assert!(error.contains("<output>"), "got {error}");
+    assert!(error.contains("<|output|>"), "got {error}");
 }
 
 #[test]
@@ -212,4 +213,28 @@ fn a_typedef_descriptor_declares_no_value_type() {
         Declared::Typedef,
         "the slot says what the content IS, not what a value conforms to"
     );
+}
+
+#[test]
+fn authoring_aliases_translate_to_their_wire_tokens() {
+    for tag in TAGS {
+        assert_eq!(
+            authoring_to_wire(tag.name()),
+            tag.spelling(),
+            "{} did not translate to its wire token",
+            tag.name()
+        );
+    }
+}
+
+#[test]
+fn a_translated_authoring_block_parses_as_its_tag() {
+    // The training assets carry the `<|nu|>` aliases; translated to wire
+    // they must parse as the same blocks the model emits and dquest reads,
+    // which is what makes training and serving one grammar.
+    let authoring = format!("{} repl\n5 + 5\n{}", Tag::Nu.name(), Tag::Close.name());
+    let wire = authoring_to_wire(&authoring);
+    assert!(!wire.contains(Tag::Nu.name()), "no authoring alias survives translation");
+    let parsed = parse_blocks(&wire, Aliasing::Strict).expect("parses");
+    assert_eq!(parsed, vec![Block::new(Tag::Nu, "repl", "5 + 5")]);
 }

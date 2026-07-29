@@ -39,6 +39,13 @@ could serve two stages would be a row that fits neither well.
 
 ## fn read_messages
 
+Content's authoring aliases (`<|nu|>` ...) are translated to their wire tokens
+(`<|extra_id_4|>` ...) here, through the library's `channel::authoring_to_wire`,
+so the model trains on exactly what the runtime renders and parses rather than on
+the readable form that tokenises as BPE. DPO and RLVR chosen/rejected strings
+will want the same when those stages carry channel markers; today only this SFT
+path does.
+
 An unknown role raises rather than being dropped. A dropped turn changes the
 conversation the model is trained on, silently, and the renderer's role set is
 the checkpoint's own.

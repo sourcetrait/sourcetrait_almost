@@ -12,12 +12,13 @@ strings attached to them are free: ai2 renamed four of these very ids to the
 tool markers at their instruct stage, which is the precedent for the design's
 own readable names.
 
-That is why `spelling` and `name` are separate accessors rather than one. The
-shipped tokenizer maps `<|extra_id_2|>` to 100271 today, so `spelling` is what
-actually frames a turn; `name` is what the design calls the same slot and what a
-diagnostic should say to a human. A tokenizer rename swaps which one frames,
-and because the module is anchored on ids that is a one-line change rather than
-a migration.
+That is why `spelling` and `name` are separate accessors rather than one.
+`spelling` is the `<|extra_id_N|>` token that frames a turn - what the model
+sees, emits and is parsed on. `name` is the readable `<|...|>` alias the training
+assets and diagnostics carry, distinct enough from content that it is not
+injected by accident and never a token itself. `authoring_to_wire` bridges them
+at the training-render boundary; renaming the tokenizer to the aliases was
+declined, since it would touch the frozen added-token map and imply a retrain.
 
 Nothing here can prove the spelling-to-id mapping, because this crate has no
 tokenizer. That lock lives in the era library's `verify_token_map`, which reads
@@ -79,6 +80,18 @@ only raw newlines a compact render can carry are inside double-quoted strings.
 ## fn render_block
 
 ## fn render_blocks
+
+## fn authoring_to_wire
+
+The bridge that makes training and serving one grammar. The training assets carry
+the readable `name()` aliases; the model only ever sees and emits the `spelling()`
+tokens. Without this, a readable `<|nu|>` in an assistant turn tokenises as
+ordinary BPE and the runtime's extra_id parser never sees a marker - the drift
+that let a whole offload emission cross the wire as prose. Applied to message
+content before tokenisation, through the one Tag map, so what the model trains on
+is byte-identical to what the runtime renders and reads. A plain replace is safe
+because the `<|...|>` aliases do not occur in content by accident; the distinct
+form is what keeps that true.
 
 ## fn parse_blocks
 

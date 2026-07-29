@@ -7923,7 +7923,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_bquest_two"
-version = "0.0.0-17"
+version = "0.0.0-18"
 dependencies = [
  "burn",
  "candle-core 0.11.0",
@@ -7956,7 +7956,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_lib_quest_two"
-version = "0.0.0-59"
+version = "0.0.0-60"
 dependencies = [
  "candle-core 0.11.0",
  "candle-flash-attn",

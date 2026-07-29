@@ -38,12 +38,13 @@ pub(crate) struct PackedRow {
     pub(crate) mask: Vec<u8>,
 }
 
-/// Read a message table into chat messages; an unknown role raises.
+/// Read a message table into chat messages, aliases translated to wire.
 fn read_messages(rows: &[&lib::nu::Record]) -> BquestResult<Vec<lib::ChatMessage>> {
     let mut messages = Vec::with_capacity(rows.len());
     for row in rows {
         let role = lib::ChatRole::parse(&field_str(row, "role")?)?;
-        messages.push(lib::ChatMessage::new(role, &field_str(row, "content")?));
+        let content = lib::channel::authoring_to_wire(&field_str(row, "content")?);
+        messages.push(lib::ChatMessage::new(role, &content));
     }
     Ok(messages)
 }
