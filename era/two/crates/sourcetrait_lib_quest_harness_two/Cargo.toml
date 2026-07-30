@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_lib_quest_harness_two"
-version = "0.0.0-2"
+version = "0.0.0-3"
 edition = "2024"
 description = "The era-two harness library: channels, Questness, and the data core"
 authors = ["SourceTrait <development@sourcetrait.com>"]

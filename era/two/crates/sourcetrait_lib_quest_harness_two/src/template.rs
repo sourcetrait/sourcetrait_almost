@@ -1,7 +1,7 @@
 //! Liquid rendering, and the nu value bridge that feeds it.
 use crate::*;
 
-/// The channel name a `<pass>` binding carries into a template.
+/// The channel name a `<|pass|>` binding carries into a template.
 ///
 /// The sigil is nushell's, and Liquid's grammar rejects it, so the
 /// channel keeps its name and loses the `$`.

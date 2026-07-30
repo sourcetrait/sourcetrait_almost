@@ -2,17 +2,17 @@
 use crate::*;
 
 /// The Thinkspace's own turn, which never crosses the wire. A reasoning
-/// FORM is the request - `<nu> repl` or a `<nu> def evaluate` - so the
+/// FORM is the request - `<|nu|> repl` or a `<|nu|> def evaluate` - so the
 /// model emitting one is an ordinary assistant turn; the Thinkspace
 /// answers on a thought, and the model finishes inside the same turn.
 /// The spelling lives with the chat render, which is the one place the
 /// role is written into template text.
 pub use llm::THOUGHT_ROLE;
 
-/// The `<nu>` mode carrying a bare expression rather than a typed def.
+/// The `<|nu|>` mode carrying a bare expression rather than a typed def.
 pub const REPL_MODE: &str = "repl";
 
-/// A `<pass>` binding and the value travelling on it.
+/// A `<|pass|>` binding and the value travelling on it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Binding {
     /// The channel as nushell spells it: `$in` or `$args`.
@@ -154,7 +154,7 @@ pub fn interpret(
 
 /// Run an `evaluate` sub-turn here and hand its value back.
 ///
-/// A `<nu>` body only DECLARES its def, so the call is appended: the
+/// A `<|nu|>` body only DECLARES its def, so the call is appended: the
 /// mode is the def's name, `$args` renders as a NUON literal at the call
 /// site, and `$in` rides the pipeline.
 pub fn run_think(
@@ -313,7 +313,7 @@ fn answer(blocks: &[Block]) -> HarnessQuestResult<Outcome> {
 
 /// The config record the emission carried, if it carried one.
 ///
-/// A `<config>` travels outbound as the caller's curation, so one coming
+/// A `<|config|>` travels outbound as the caller's curation, so one coming
 /// BACK is the model addressing the harness. Reading it here is what
 /// gives the shape something to police; a block left unparsed would be
 /// indistinguishable from one never sent.
@@ -378,7 +378,7 @@ fn decode_bindings(blocks: &[Block], envelope: &mut Envelope) -> Vec<Binding> {
     bindings
 }
 
-/// What a `<liquid>` block addresses: its own binding, or the output.
+/// What a `<|liquid|>` block addresses: its own binding, or the output.
 fn liquid_bindings(blocks: &[Block], value: Option<&nu::Value>) -> Vec<(String, nu::Value)> {
     let mut bindings: Vec<(String, nu::Value)> = Vec::new();
     for (pass, block) in bound_blocks(blocks) {
@@ -398,7 +398,7 @@ fn liquid_bindings(blocks: &[Block], value: Option<&nu::Value>) -> Vec<(String, 
     bindings
 }
 
-/// A `<nu>` block's source: its header carries the def's opening line.
+/// A `<|nu|>` block's source: its header carries the def's opening line.
 fn nu_source(block: &Block) -> String {
     if block.header.is_empty() {
         return block.content.clone();
@@ -422,7 +422,7 @@ fn visible_is_empty(visible: &nu::Value) -> bool {
     }
 }
 
-/// The `<pass>` pairing, without re-reporting what the caller already
+/// The `<|pass|>` pairing, without re-reporting what the caller already
 /// collected.
 ///
 /// The pairing rule lives in `contract`, which is the module that owns

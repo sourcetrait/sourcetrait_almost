@@ -1,8 +1,8 @@
-//! The `<nu>` form: matching a def to a form, and the agreements around
+//! The `<|nu|>` form: matching a def to a form, and the agreements around
 //! it.
 use crate::*;
 
-/// The positional name `<pass>$args</>` binds to.
+/// The positional name `<|pass|>$args<|/|>` binds to.
 pub const ARGS_POSITIONAL: &str = "args";
 
 /// What a def's signature says, before it is matched to a form.
@@ -34,7 +34,7 @@ impl NuSignature {
 }
 
 impl questness::evaluate::QuestnessEvaluator {
-    /// Read a `<nu>` body's signature back out of the parser.
+    /// Read a `<|nu|>` body's signature back out of the parser.
     ///
     /// The head is discovered by diffing the declaration set rather than
     /// by scanning the source, so a def spelled across lines or carrying
@@ -60,7 +60,7 @@ impl questness::evaluate::QuestnessEvaluator {
         })
     }
 
-    /// Parse a `<nu>` body, check it, and match it to a form.
+    /// Parse a `<|nu|>` body, check it, and match it to a form.
     ///
     /// Three questions, each with its own answer: does it parse, is the
     /// form one we accept, and does its signature match that form's
@@ -211,7 +211,7 @@ pub fn check_agreements(blocks: &[Block], signature: &NuSignature) -> Envelope {
     envelope
 }
 
-/// Pair each `<pass>` with the block it binds, in emission order.
+/// Pair each `<|pass|>` with the block it binds, in emission order.
 pub fn pass_bindings<'a>(
     blocks: &'a [Block],
     envelope: &mut Envelope,

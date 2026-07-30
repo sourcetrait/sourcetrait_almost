@@ -92,7 +92,7 @@ fn a_plain_answer_touches_no_engine_at_all() {
 }
 
 /// A think that does not run is feedback rather than an error, because
-/// in this grammar `<output>` means a value and the model should not
+/// in this grammar `<|output|>` means a value and the model should not
 /// have to tell a result from a report of a non-result.
 #[test]
 fn a_failing_think_becomes_feedback() {

@@ -111,7 +111,7 @@ impl Questness {
     /// Run a think turn and render its answer back as a thought.
     ///
     /// A failure becomes a repair envelope rather than a block, because
-    /// in this grammar `<output>` means a VALUE and the model should not
+    /// in this grammar `<|output|>` means a VALUE and the model should not
     /// have to tell a result from a report of a non-result.
     fn think(
         &mut self,
@@ -153,7 +153,7 @@ impl Questness {
     }
 }
 
-/// A value as the `<output>` block the model reads it from, escaped so
+/// A value as the `<|output|>` block the model reads it from, escaped so
 /// no string's newline can forge a closer.
 fn output_block(value: &nu::Value) -> HarnessQuestResult<Block> {
     let declared = channel::Descriptor::nuon(value.get_type()).render();
@@ -161,7 +161,7 @@ fn output_block(value: &nu::Value) -> HarnessQuestResult<Block> {
     Ok(Block::new(Tag::Output, &declared, &payload))
 }
 
-/// A repl result as the `<input>` block the model reads it from.
+/// A repl result as the `<|input|>` block the model reads it from.
 fn repl_block(rendered: &str) -> Block {
     Block::new(
         Tag::Input,

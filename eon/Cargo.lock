@@ -5637,7 +5637,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_lib_quest_harness_two"
-version = "0.0.0-1"
+version = "0.0.0-3"
 dependencies = [
  "liquid",
  "nu-cmd-lang",
@@ -5673,7 +5673,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_quest"
-version = "0.0.0-1"
+version = "0.0.0-2"
 dependencies = [
  "nu-plugin",
  "nu-protocol",
@@ -5685,7 +5685,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_quest_bridge"
-version = "0.0.0-5"
+version = "0.0.0-6"
 dependencies = [
  "bitcode",
  "futures-util",

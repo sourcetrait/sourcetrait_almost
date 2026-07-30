@@ -53,7 +53,7 @@ impl<'de> serde::Deserialize<'de> for InferValue {
     }
 }
 
-/// `<pass>`: which of nushell's two input channels a form binds to.
+/// `<|pass|>`: which of nushell's two input channels a form binds to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum InferPass {
     In,
@@ -88,11 +88,11 @@ impl InferPass {
     }
 }
 
-/// `<input>` carrying NUON: a typed value the caller hands the model.
+/// `<|input|>` carrying NUON: a typed value the caller hands the model.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InferNuonInput(pub InferValue);
 
-/// `<input>`, over the formats we speak.
+/// `<|input|>`, over the formats we speak.
 ///
 /// Open by design: one variant is the model and another format is an
 /// extension rather than a case this enum failed to enumerate.
@@ -110,11 +110,11 @@ impl InferInput {
     }
 }
 
-/// `<output>` carrying NUON: a typed value, in either direction.
+/// `<|output|>` carrying NUON: a typed value, in either direction.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InferNuonOutput(pub InferValue);
 
-/// `<output>`, over the formats we speak. Open on the same terms.
+/// `<|output|>`, over the formats we speak. Open on the same terms.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum InferOutput {
     Nuon(InferNuonOutput),
@@ -129,7 +129,7 @@ impl InferOutput {
     }
 }
 
-/// `<config>`: the runtime record a caller composes per turn.
+/// `<|config|>`: the runtime record a caller composes per turn.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InferConfig(pub InferValue);
 
@@ -137,7 +137,7 @@ pub struct InferConfig(pub InferValue);
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InferText(pub String);
 
-/// `<liquid>`: a template, filled from the channel it binds.
+/// `<|liquid|>`: a template, filled from the channel it binds.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InferLiquid(pub String);
 
@@ -157,7 +157,7 @@ pub struct InferNuCall(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InferNuInteract(pub String);
 
-/// `<nu>`: a definition, and which form its signature matched.
+/// `<|nu|>`: a definition, and which form its signature matched.
 ///
 /// The variant is the mode rather than a name recovered from the source.
 /// Only `Evaluate` is a think turn; the rest are asks that ride back to
