@@ -5637,7 +5637,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_lib_quest_harness_two"
-version = "0.0.0-3"
+version = "0.0.0-4"
 dependencies = [
  "liquid",
  "nu-cmd-lang",

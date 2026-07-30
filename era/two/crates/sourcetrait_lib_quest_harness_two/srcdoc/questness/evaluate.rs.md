@@ -147,7 +147,7 @@ corruption rather than an inconvenience.
 ## fn register_commands
 
 REGISTRATION IS AN ALLOWLIST, so the file's security-relevant content is what it
-does NOT name. Every command across the three families is a pure value-to-value
+does NOT name. Every command across the families is a pure value-to-value
 transform; nothing that reaches the filesystem, the network or the host appears,
 because nothing that could was added.
 
@@ -164,6 +164,22 @@ Arithmetic on scalars already worked without any of this, because operators are
 language-level rather than commands. What was missing was arithmetic over a
 COLLECTION, which is what a checking mode needs before it can say anything
 quantitative about the value it was handed.
+
+## fn add_strings
+
+Measured in by failure rather than curated in advance. The evaluate mode
+routes the data-transform class here by design, and its flagship case
+splits text - but the original three-family set carried no strings
+family, so the first correct trained reach (`$args | split row " "`)
+parsed as an implicit external and died `run_external_not_found`,
+killing the turn on the live decide exercise. The family is therefore
+load-bearing, not a convenience.
+
+The curation line inside the family follows the conversions' rule: the
+everyday transform set is in, and the niche members beside it - expand,
+distance, stats, the regex escape - stay declined until something asks.
+The upstream struct casing is inconsistent (`StrEndswith` beside
+`StrStartsWith`); both are 0.114.1's own spellings.
 
 ## fn add_conversions
 

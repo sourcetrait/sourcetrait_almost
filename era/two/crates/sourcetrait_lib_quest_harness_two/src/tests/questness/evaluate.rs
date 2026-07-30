@@ -46,6 +46,22 @@ fn the_math_family_is_registered_and_computes() {
     assert!((value.as_float().expect("float") - 3.0).abs() < 1e-9);
 }
 
+/// The data-transform class's flagship case: splitting text, then the
+/// str transforms beside it. The evaluate mode routes transforms here
+/// by design, so this family failing to resolve kills real turns.
+#[test]
+fn the_string_family_is_registered_and_transforms() {
+    let engine = evaluator();
+    let value = engine
+        .evaluate(r#""hello there" | split row " " | length"#, None)
+        .expect("evaluates");
+    assert_eq!(value.as_int().expect("int"), 2);
+    let value = engine
+        .evaluate(r#""abc" | str upcase"#, None)
+        .expect("evaluates");
+    assert_eq!(value.as_str().expect("string"), "ABC");
+}
+
 /// Text interchange in both directions. NUON is the program's own
 /// format and JSON is the foreign seam, so the round trip through both
 /// is what a format-moving mode actually does.

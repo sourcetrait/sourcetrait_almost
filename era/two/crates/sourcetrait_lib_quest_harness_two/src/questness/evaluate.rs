@@ -198,19 +198,19 @@ fn eval_once(
     }
 }
 
-/// Add the three command families on top of the language core, then
-/// merge.
+/// Add the command families on top of the language core, then merge.
 ///
 /// Registration is an ALLOWLIST, so what is absent is what the sandbox
 /// note in the module header is about: nothing here reaches the
 /// filesystem, the network or the host, because nothing that could was
-/// added. Every command in the three families below is a pure
-/// value-to-value transform.
+/// added. Every command in the families below is a pure value-to-value
+/// transform.
 fn register_commands(mut engine: r::nu::EngineState) -> HarnessQuestResult<r::nu::EngineState> {
     let delta = {
         let mut ws = r::nu::StateWorkingSet::new(&engine);
         add_filters(&mut ws);
         add_math(&mut ws);
+        add_strings(&mut ws);
         add_conversions(&mut ws);
         ws.render()
     };
@@ -277,6 +277,41 @@ fn add_math(ws: &mut r::nu::StateWorkingSet) {
     ws.add_decl(Box::new(MathStddev));
     ws.add_decl(Box::new(MathSum));
     ws.add_decl(Box::new(MathVariance));
+}
+
+/// String transforms: the everyday split and str set, all pure.
+///
+/// The data-transform class routes through `evaluate` by design, and
+/// splitting text is its flagship case, so this family is load-bearing
+/// rather than a convenience. The niche members beside these - expand,
+/// distance, stats, the regex escape - are declined until something
+/// asks for them.
+fn add_strings(ws: &mut r::nu::StateWorkingSet) {
+    use nu_command::{
+        Split, SplitChars, SplitColumn, SplitList, SplitRow, SplitWords, Str, StrCapitalize,
+        StrContains, StrDowncase, StrEndswith, StrIndexOf, StrJoin, StrLength, StrReplace,
+        StrReverse, StrStartsWith, StrSubstring, StrTrim, StrUpcase,
+    };
+    ws.add_decl(Box::new(Split));
+    ws.add_decl(Box::new(SplitChars));
+    ws.add_decl(Box::new(SplitColumn));
+    ws.add_decl(Box::new(SplitList));
+    ws.add_decl(Box::new(SplitRow));
+    ws.add_decl(Box::new(SplitWords));
+    ws.add_decl(Box::new(Str));
+    ws.add_decl(Box::new(StrCapitalize));
+    ws.add_decl(Box::new(StrContains));
+    ws.add_decl(Box::new(StrDowncase));
+    ws.add_decl(Box::new(StrEndswith));
+    ws.add_decl(Box::new(StrIndexOf));
+    ws.add_decl(Box::new(StrJoin));
+    ws.add_decl(Box::new(StrLength));
+    ws.add_decl(Box::new(StrReplace));
+    ws.add_decl(Box::new(StrReverse));
+    ws.add_decl(Box::new(StrStartsWith));
+    ws.add_decl(Box::new(StrSubstring));
+    ws.add_decl(Box::new(StrTrim));
+    ws.add_decl(Box::new(StrUpcase));
 }
 
 /// Text interchange in both directions, which is a named capability
