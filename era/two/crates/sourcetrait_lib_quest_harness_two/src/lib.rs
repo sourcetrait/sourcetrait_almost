@@ -72,6 +72,7 @@ pub use crate::questness::arbitrate::{
     Questness,
     Step,
 };
+pub use crate::questness::config::Conversation;
 pub use crate::questness::shape::{
     Shape,
     ShapeMember,

@@ -171,19 +171,40 @@ async fn turn(
     let mut owner = questness.lock().await;
     let mut feed = match tokio::task::block_in_place(|| owner.assemble(&request)) {
         Ok(text) => text,
-        Err(message) => return failed(writer, log, message).await,
+        Err(message) => {
+            teardown(container, log).await;
+            return failed(writer, log, message).await;
+        }
     };
     record(log, log::LogFile::Emission, "assembled", &feed);
+    let keep = owner.keeps_conversation();
+
+    // A bare call is a fresh conversation, always: anything standing - a
+    // kept conversation, a stale pending ask - is torn down before the
+    // model sees this turn. A continuation (`output`) resumes instead,
+    // and a keep call continues what a keep call left.
+    if request.output.is_none() && !keep {
+        teardown(container, log).await;
+    }
 
     loop {
         let (emission, report) = match generate(reader, writer, container, feed, log).await {
             Generated::Emitted { emission, report } => (emission, report),
-            Generated::Failed(message) => return failed(writer, log, message).await,
-            Generated::Gone => return false,
+            Generated::Failed(message) => {
+                teardown(container, log).await;
+                return failed(writer, log, message).await;
+            }
+            Generated::Gone => {
+                teardown(container, log).await;
+                return false;
+            }
         };
         let step = match tokio::task::block_in_place(|| owner.step(&emission, false)) {
             Ok(step) => step,
-            Err(message) => return failed(writer, log, message).await,
+            Err(message) => {
+                teardown(container, log).await;
+                return failed(writer, log, message).await;
+            }
         };
         let answer = match step {
             // A think leaves a MARKER on the turn log and its text on the
@@ -226,14 +247,35 @@ async fn turn(
                     .map(|row| format!("{}: {}", row.kind, row.message))
                     .collect::<Vec<String>>()
                     .join("; ");
+                teardown(container, log).await;
                 return failed(writer, log, message).await;
             }
         };
         record(log, log::LogFile::Turn, "answered", &summary(&answer));
-        return writer
+        // An ask carries `nu` and pauses the conversation, so it is the
+        // one response that never tears down; a terminal answer does
+        // unless this turn's config kept it.
+        let terminal = answer.nu.is_none();
+        let delivered = writer
             .send(bridge::ServerToClient::Turn(answer))
             .await
             .is_ok();
+        if terminal && !keep {
+            teardown(container, log).await;
+        }
+        return delivered;
+    }
+}
+
+/// Tear the engine's conversation down; the default end of every turn.
+///
+/// A reset that fails is a fault on the record rather than a failed
+/// turn: the answer is already decided, and the fresh-start reset ahead
+/// of the next bare call is the second line.
+async fn teardown(container: &ContainerHandle, log: &Option<log::SessionLog>) {
+    match container.reset().await {
+        Ok(()) => record(log, log::LogFile::Turn, "teardown", ""),
+        Err(message) => record(log, log::LogFile::Transport, "fault", &message),
     }
 }
 

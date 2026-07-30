@@ -39,6 +39,18 @@ which settings get loaded without writing into the suite's shared
 default - where the same choice would silently reach every other consumer
 of that default rather than only the one that made it.
 
+## struct TwoQuestness
+
+## impl Questness for TwoQuestness
+
+Every request's own config decides the disposition its turn ends with,
+the continuation path included: a resume carrying no config ends with
+the default teardown, so keeping a conversation across an ask round
+trip means the continuation request says keep again. The alternative -
+inheriting the opening request's disposition - would make the opt-in
+sticky, and sticky is exactly what teardown-by-default exists to
+retire.
+
 ## struct TwoEngine
 
 Holds the trail as well as the model, because the era library's

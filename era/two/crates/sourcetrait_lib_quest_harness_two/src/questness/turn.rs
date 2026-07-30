@@ -45,6 +45,8 @@ pub struct Assembled {
     /// The config as the model sees it, Questness keys removed.
     pub visible: nu::Value,
     pub templated: bool,
+    /// What happens to the conversation when this turn ends.
+    pub conversation: questness::config::Conversation,
 }
 
 /// A finished answer: the value, its prose, and any emitted config.
@@ -121,6 +123,7 @@ pub fn assemble(request: &Request) -> HarnessQuestResult<Assembled> {
         text,
         visible: prepared.visible,
         templated: prepared.templated,
+        conversation: prepared.conversation,
     })
 }
 

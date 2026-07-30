@@ -124,6 +124,14 @@ pub trait Questness: Send {
     /// special, so a skip-special decode strips it and only the side
     /// holding token ids can know.
     fn step(&mut self, emission: &str, insufficient: bool) -> Result<Step, String>;
+
+    /// Whether the last assembled request keeps the conversation.
+    ///
+    /// Teardown is the default: a bare call is a fresh conversation,
+    /// always, so the consumer resets its engine at every terminal turn
+    /// end - and ahead of any fresh start - unless this reads true. The
+    /// opt-in rides the config record and never reaches the model.
+    fn keeps_conversation(&self) -> bool;
 }
 
 #[derive(

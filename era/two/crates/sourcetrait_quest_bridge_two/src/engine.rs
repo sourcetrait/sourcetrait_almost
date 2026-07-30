@@ -42,6 +42,8 @@ impl bridge::all::Era for BridgeTwo {
 /// own turn speaks.
 pub struct TwoQuestness {
     inner: harness::Questness,
+    /// The last assembled request's conversation disposition.
+    keep: bool,
 }
 
 impl TwoQuestness {
@@ -50,22 +52,28 @@ impl TwoQuestness {
         // channel-marker routing is trained, which 10_Channels measures
         // as dead at zero of six without it.
         let inner = harness::Questness::new(harness::channel::Aliasing::ToolMarkers).map_err(message_of)?;
-        Ok(Self { inner })
+        Ok(Self { inner, keep: false })
     }
 }
 
 impl bridge::all::Questness for TwoQuestness {
     /// A request carrying an `output` is a CONTINUATION: the caller ran
     /// an ask and this is its result, so the conversation resumes rather
-    /// than starting a fresh turn.
+    /// than starting a fresh turn. Every request's own config decides
+    /// the disposition its turn ends with; a continuation carrying none
+    /// ends with the default teardown.
     fn assemble(&mut self, request: &bridge::InferRequest) -> Result<String, String> {
-        if let Some(output) = &request.output {
-            return self.inner.resume(&output.value().0).map_err(message_of);
-        }
         let config = match &request.config {
             Some(config) => config.0.0.clone(),
             None => harness::nu::Value::record(harness::nu::Record::new(), harness::nu::Span::unknown()),
         };
+        self.keep = matches!(
+            harness::Conversation::of(&config).map_err(message_of)?,
+            harness::Conversation::Keep
+        );
+        if let Some(output) = &request.output {
+            return self.inner.resume(&output.value().0).map_err(message_of);
+        }
         let bindings = request
             .inputs
             .iter()
@@ -80,6 +88,10 @@ impl bridge::all::Questness for TwoQuestness {
             })
             .map_err(message_of)?;
         Ok(assembled.text)
+    }
+
+    fn keeps_conversation(&self) -> bool {
+        self.keep
     }
 
     fn step(

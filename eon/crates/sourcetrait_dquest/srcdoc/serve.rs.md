@@ -89,3 +89,16 @@ cost of both is one copy.
 It is also the reason the sink writes VERBATIM. Framing each piece as a
 labelled record would make the file complete and useless, because the
 whole point is that a `tail -f` reads as the answer forming.
+
+TEARDOWN IS THE TURN'S DEFAULT END, in two places that guard different
+failures. The terminal teardown after a delivered answer is the ruling
+itself - a conversation ends with its turn unless the turn's config
+kept it. The fresh-start teardown ahead of a bare turn is the second
+line: it clears whatever a kept run left standing, a pending ask a
+caller abandoned, or a trail a failed reset leaked - which is why a
+failed reset only logs a fault rather than failing the turn. An ask
+never tears down (the conversation is paused, not over), and every
+failure path tears down regardless of keep, because a conversation
+whose last turn died mid-step is not one a continuation can trust.
+
+## fn teardown

@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_quest_bridge"
-version = "0.0.0-6"
+version = "0.0.0-7"
 edition = "2024"
 description = "Era-bridge API for the SourceTrait Quest eon components"
 authors = ["SourceTrait <development@sourcetrait.com>"]

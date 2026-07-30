@@ -13,6 +13,24 @@ to us instead of to the model.
 
 ## const LIQUID_KEY
 
+## const CONVERSATION_KEY
+
+## const CONVERSATION_KEEP
+
+## enum Conversation
+
+Teardown-by-default is the_user's ruling stated as a type: a bare call
+is a fresh conversation, always, and nothing has to be sent to get
+that - the inversion of the wire's Reset, which nothing was sending. The
+opt-in is `{conversation: keep}`, and it must be said on every call that
+wants the conversation to survive that call's end, so the first bare
+call after a kept run is fresh again.
+
+An unknown value refuses rather than defaulting in either direction,
+because the caller is code and both silent readings are wrong: reading
+junk as keep leaks a conversation, reading it as teardown silently
+drops one the caller meant to keep.
+
 ## struct PreparedTurn
 
 ## fn split

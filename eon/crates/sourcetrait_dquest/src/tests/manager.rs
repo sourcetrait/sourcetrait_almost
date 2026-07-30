@@ -32,6 +32,10 @@ impl crate::bridge::all::Questness for StubQuestness {
             config: None,
         })
     }
+
+    fn keeps_conversation(&self) -> bool {
+        false
+    }
 }
 
 #[test]
