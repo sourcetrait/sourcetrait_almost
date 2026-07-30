@@ -39,8 +39,9 @@ impl nu_plugin::SimplePluginCommand for Prompt {
          data self-describes: its own derived type is what the model is \
          shown, so there is no type to declare.\n\n\
          What comes back is decided by the config's shape key. Declaring \
-         nothing gets prose, which is the model's own trained shape; \
-         {shape: {response: [output]}} gets the typed value itself, and \
+         nothing leaves the reply's shape to the model - the typed value \
+         bare where it emitted one, prose where not, both as a record; \
+         {shape: {response: [output]}} pins the typed value itself, and \
          several members get a record keyed by member."
     }
 
@@ -126,15 +127,20 @@ fn answer(
 ///
 /// One declared member comes back BARE so a pipeline works; several come
 /// back as a record keyed by member spelling, in declaration order. A
-/// single-key record would force a `get` at every call site.
-fn shaped(
+/// single-key record would force a `get` at every call site. An
+/// undeclared response delivers the model's own choice.
+pub(crate) fn shaped(
     shape: &harness_lib::Shape,
     response: &bridge::InferResponse,
     span: harness_lib::nu::Span,
 ) -> QuestPluginResult<nu_protocol::Value> {
+    let members = match &shape.response {
+        harness_lib::ShapeResponse::Declared(members) => members,
+        harness_lib::ShapeResponse::Decide => return Ok(decided(response, span)),
+    };
     let mut carried: Vec<(&'static str, nu_protocol::Value)> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
-    for member in &shape.response {
+    for member in members {
         let value = match member {
             harness_lib::ShapeMember::Text => Some(nu_protocol::Value::string(
                 response
@@ -170,6 +176,36 @@ fn shaped(
             }
             Ok(nu_protocol::Value::record(record, span))
         }
+    }
+}
+
+/// The model's own choice, delivered: the typed value bare, prose
+/// otherwise, both as a record when the turn carried both.
+fn decided(
+    response: &bridge::InferResponse,
+    span: harness_lib::nu::Span,
+) -> nu_protocol::Value {
+    let value = response.output.as_ref().map(|output| output.value().0.clone());
+    let prose = response
+        .text
+        .as_ref()
+        .map(|text| text.0.clone())
+        .filter(|text| !text.is_empty());
+    match (value, prose) {
+        (Some(value), None) => value,
+        (Some(value), Some(prose)) => {
+            let mut record = harness_lib::nu::Record::new();
+            record.push(
+                harness_lib::ShapeMember::Output.spelling().to_string(),
+                value,
+            );
+            record.push(
+                harness_lib::ShapeMember::Text.spelling().to_string(),
+                nu_protocol::Value::string(prose, span),
+            );
+            nu_protocol::Value::record(record, span)
+        }
+        (None, prose) => nu_protocol::Value::string(prose.unwrap_or_default(), span),
     }
 }
 

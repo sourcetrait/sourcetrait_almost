@@ -6,6 +6,7 @@ use crate::prompt::{
     FILE_PROMPT_FIELD,
     PROMPT_FIELD,
     asked,
+    shaped,
 };
 
 /// A scratch file, removed when the guard drops.
@@ -155,5 +156,66 @@ fn the_config_flag_is_not_a_prompt_source() {
     assert!(
         asked(&call, &nothing()).is_err(),
         "config carries the shape, never the question"
+    );
+}
+
+fn response(
+    output: Option<&str>,
+    text: Option<&str>,
+) -> bridge::InferResponse {
+    bridge::InferResponse {
+        output: output.map(|nuon| {
+            bridge::InferOutput::Nuon(bridge::InferNuonOutput(bridge::InferValue(record(
+                nuon,
+            ))))
+        }),
+        text: text.map(|text| bridge::InferText(text.to_string())),
+        ..bridge::InferResponse::default()
+    }
+}
+
+#[test]
+fn an_undeclared_response_delivers_the_models_own_choice() {
+    let decide = harness_lib::Shape::default();
+
+    let bare = shaped(&decide, &response(Some("{n: 3}"), None), span()).expect("delivers");
+    assert_eq!(
+        bare.get_data_by_key("n").and_then(|v| v.as_int().ok()),
+        Some(3),
+        "a typed value with no prose comes back bare"
+    );
+
+    let prose = shaped(&decide, &response(None, Some("done.")), span()).expect("delivers");
+    assert_eq!(prose.coerce_into_string().expect("a string"), "done.");
+
+    let both =
+        shaped(&decide, &response(Some("{n: 3}"), Some("Three.")), span()).expect("delivers");
+    let nu_protocol::Value::Record { val, .. } = &both else {
+        panic!("value and prose together carry a record, got {both:?}");
+    };
+    assert_eq!(
+        val.columns().map(String::as_str).collect::<Vec<&str>>(),
+        vec!["output", "text"]
+    );
+}
+
+#[test]
+fn a_declared_response_still_pins_the_reply() {
+    let pinned = harness_lib::Shape {
+        request: vec![harness_lib::ShapeMember::Text],
+        response: harness_lib::ShapeResponse::Declared(vec![
+            harness_lib::ShapeMember::Output,
+        ]),
+    };
+    let value =
+        shaped(&pinned, &response(Some("{n: 3}"), Some("Three.")), span()).expect("delivers");
+    assert_eq!(
+        value.get_data_by_key("n").and_then(|v| v.as_int().ok()),
+        Some(3),
+        "the declared member comes back bare, the prose does not ride along"
+    );
+    assert!(
+        shaped(&pinned, &response(None, Some("Three.")), span()).is_err(),
+        "a declared member the answer never carried is owed"
     );
 }

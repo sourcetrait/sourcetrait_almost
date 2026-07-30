@@ -75,6 +75,7 @@ pub use crate::questness::arbitrate::{
 pub use crate::questness::shape::{
     Shape,
     ShapeMember,
+    ShapeResponse,
 };
 pub use crate::questness::turn::{
     Answer,

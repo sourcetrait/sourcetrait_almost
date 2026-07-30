@@ -7973,7 +7973,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_lib_quest_llm_two"
-version = "0.0.0-3"
+version = "0.0.0-4"
 dependencies = [
  "burn",
  "candle-core 0.11.0",

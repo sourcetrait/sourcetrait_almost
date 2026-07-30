@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_quest"
-version = "0.0.0-1"
+version = "0.0.0-2"
 edition = "2024"
 description = "quest: the flagship smart command, served as a nushell plugin"
 authors = ["SourceTrait <development@sourcetrait.com>"]

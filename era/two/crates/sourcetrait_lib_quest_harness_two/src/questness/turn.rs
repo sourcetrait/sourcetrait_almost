@@ -290,7 +290,12 @@ fn answer(blocks: &[Block]) -> HarnessQuestResult<Outcome> {
                 }
             }
         }
-        None => output.map(|block| block.content.clone()).unwrap_or_default(),
+        // An untyped block's content is the prose the unmarked sweep
+        // carried; a typed block's bytes are the value, not prose.
+        None => output
+            .filter(|block| block.header.is_empty())
+            .map(|block| block.content.clone())
+            .unwrap_or_default(),
     };
 
     let config = emitted_config(blocks, &mut envelope);

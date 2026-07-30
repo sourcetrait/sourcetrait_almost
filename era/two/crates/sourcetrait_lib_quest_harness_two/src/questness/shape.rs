@@ -46,19 +46,41 @@ impl ShapeMember {
     }
 }
 
+/// What the response direction declares, or that nothing was declared.
+///
+/// An undeclared response is DISTINCT from `[text]`: the reply's shape
+/// is left to the model, and delivery is whatever it produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShapeResponse {
+    /// The caller pinned the reply's members.
+    Declared(Vec<ShapeMember>),
+    /// Nothing declared: the reply's shape is the model's own choice.
+    Decide,
+}
+
+impl ShapeResponse {
+    /// Whether a declaration names a member; Decide declares none.
+    pub fn declares(&self, member: ShapeMember) -> bool {
+        match self {
+            Self::Declared(members) => members.contains(&member),
+            Self::Decide => false,
+        }
+    }
+}
+
 /// What a turn carries in each direction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shape {
     pub request: Vec<ShapeMember>,
-    pub response: Vec<ShapeMember>,
+    pub response: ShapeResponse,
 }
 
 impl Default for Shape {
-    /// Text in, text out: the base model's own shape.
+    /// Text in; the reply's shape left to the model.
     fn default() -> Self {
         Self {
             request: vec![ShapeMember::Text],
-            response: vec![ShapeMember::Text],
+            response: ShapeResponse::Decide,
         }
     }
 }
@@ -83,13 +105,16 @@ impl Shape {
         };
         Ok(Self {
             request: direction(declared, REQUEST_KEY)?,
-            response: direction(declared, RESPONSE_KEY)?,
+            response: match declared.get(RESPONSE_KEY) {
+                Some(value) => ShapeResponse::Declared(members_of(value, RESPONSE_KEY)?),
+                None => ShapeResponse::Decide,
+            },
         })
     }
 
-    /// Whether a direction names a member.
+    /// Whether the response declares a member; Decide declares none.
     pub fn responds_with(&self, member: ShapeMember) -> bool {
-        self.response.contains(&member)
+        self.response.declares(member)
     }
 
     /// The value a shaped answer returns, or why it does not conform.
@@ -102,26 +127,30 @@ impl Shape {
         let mut envelope = Envelope::default();
         let mut carried: Vec<(ShapeMember, nu::Value)> = Vec::new();
 
-        for member in &self.response {
-            match member {
-                ShapeMember::Text => {
-                    carried.push((*member, nu::Value::string(answer.rendered.clone(), span)));
+        if let ShapeResponse::Declared(members) = &self.response {
+            for member in members {
+                match member {
+                    ShapeMember::Text => {
+                        carried
+                            .push((*member, nu::Value::string(answer.rendered.clone(), span)));
+                    }
+                    ShapeMember::Output => match &answer.value {
+                        Some(value) => carried.push((*member, value.clone())),
+                        None => missing(&mut envelope, *member, "a typed value"),
+                    },
+                    ShapeMember::Config => match &answer.config {
+                        Some(value) => carried.push((*member, value.clone())),
+                        None => missing(&mut envelope, *member, "a config record"),
+                    },
                 }
-                ShapeMember::Output => match &answer.value {
-                    Some(value) => carried.push((*member, value.clone())),
-                    None => missing(&mut envelope, *member, "a typed value"),
-                },
-                ShapeMember::Config => match &answer.config {
-                    Some(value) => carried.push((*member, value.clone())),
-                    None => missing(&mut envelope, *member, "a config record"),
-                },
             }
         }
 
-        // The policing half. A config the caller never asked for is
-        // DENIED rather than passed on: the shape is the contract, and
-        // an undeclared block reaching a caller would make the contract
-        // advisory.
+        // The policing half, and it covers Decide too. A config the
+        // caller never asked for is DENIED rather than passed on: the
+        // shape is the contract, an undeclared block reaching a caller
+        // would make it advisory, and leaving the reply's shape to the
+        // model does not let it widen its own contract.
         if answer.config.is_some() && !self.responds_with(ShapeMember::Config) {
             envelope.error(
                 "shape::undeclared",
@@ -132,6 +161,9 @@ impl Shape {
 
         if !envelope.is_clean() {
             return Err(envelope);
+        }
+        if self.response == ShapeResponse::Decide {
+            return Ok(decide_value(answer));
         }
         match carried.len() {
             1 => Ok(carried.remove(0).1),
@@ -146,11 +178,33 @@ impl Shape {
     }
 }
 
-/// One direction's members, or the trained default where it is absent.
+/// The model's own choice, delivered: the typed value bare, prose
+/// otherwise, both as a record when the emission carried both.
+fn decide_value(answer: &turn::Answer) -> nu::Value {
+    let span = nu::Span::unknown();
+    match (&answer.value, answer.rendered.is_empty()) {
+        (Some(value), true) => value.clone(),
+        (Some(value), false) => nu::Value::record(
+            nu::record! {
+                "output" => value.clone(),
+                "text" => nu::Value::string(answer.rendered.clone(), span),
+            },
+            span,
+        ),
+        (None, _) => nu::Value::string(answer.rendered.clone(), span),
+    }
+}
+
+/// One direction's members, or the request's trained default absent.
 fn direction(declared: &nu::Record, key: &str) -> HarnessQuestResult<Vec<ShapeMember>> {
-    let Some(value) = declared.get(key) else {
-        return Ok(vec![ShapeMember::Text]);
-    };
+    match declared.get(key) {
+        Some(value) => members_of(value, key),
+        None => Ok(vec![ShapeMember::Text]),
+    }
+}
+
+/// A present direction's member list, validated.
+fn members_of(value: &nu::Value, key: &str) -> HarnessQuestResult<Vec<ShapeMember>> {
     let nu::Value::List { vals, .. } = value else {
         snafu::whatever!("{key} is a list of shape members; got {}", value.get_type());
     };

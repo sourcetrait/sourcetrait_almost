@@ -3,6 +3,7 @@ use crate::nu;
 use crate::questness::shape::{
     Shape,
     ShapeMember,
+    ShapeResponse,
 };
 use crate::questness::turn::Answer;
 
@@ -24,12 +25,17 @@ fn answered(rendered: &str, produced: Option<&str>, config: Option<&str>) -> Ans
 }
 
 #[test]
-fn a_config_with_no_shape_is_the_base_models_own() {
+fn a_config_with_no_shape_is_text_in_decide_out() {
     assert_eq!(shape("{env: {PWD: '/tmp'}}"), Shape::default());
     assert_eq!(
         Shape::default().request,
         vec![ShapeMember::Text],
-        "text in, text out is the checkpoint-native protocol"
+        "text in is the checkpoint-native protocol"
+    );
+    assert_eq!(
+        Shape::default().response,
+        ShapeResponse::Decide,
+        "an undeclared response leaves the reply's shape to the model"
     );
 }
 
@@ -37,11 +43,18 @@ fn a_config_with_no_shape_is_the_base_models_own() {
 fn each_direction_falls_back_on_its_own() {
     let only_response = shape("{shape: {response: [output]}}");
     assert_eq!(only_response.request, vec![ShapeMember::Text]);
-    assert_eq!(only_response.response, vec![ShapeMember::Output]);
+    assert_eq!(
+        only_response.response,
+        ShapeResponse::Declared(vec![ShapeMember::Output])
+    );
 
     let only_request = shape("{shape: {request: [config, text]}}");
     assert_eq!(only_request.request, vec![ShapeMember::Config, ShapeMember::Text]);
-    assert_eq!(only_request.response, vec![ShapeMember::Text]);
+    assert_eq!(
+        only_request.response,
+        ShapeResponse::Decide,
+        "naming the request says nothing about the response"
+    );
 
     assert_eq!(shape("{shape: {}}"), Shape::default(), "and both at once");
 }
@@ -53,7 +66,10 @@ fn the_declared_order_is_the_order_it_reads_back() {
         declared.request,
         vec![ShapeMember::Config, ShapeMember::Output, ShapeMember::Text]
     );
-    assert_eq!(declared.response, vec![ShapeMember::Text, ShapeMember::Output]);
+    assert_eq!(
+        declared.response,
+        ShapeResponse::Declared(vec![ShapeMember::Text, ShapeMember::Output])
+    );
 }
 
 #[test]
@@ -132,6 +148,46 @@ fn an_undeclared_config_is_denied_rather_than_passed_on() {
     let envelope = shape("{shape: {response: [text]}}")
         .value_of(&with_config)
         .expect_err("the shape is the contract");
+    assert!(
+        envelope
+            .errors
+            .iter()
+            .any(|row| row.kind == "shape::undeclared"),
+        "got {envelope:?}"
+    );
+}
+
+#[test]
+fn decide_delivers_the_models_own_choice() {
+    let typed = answered("", Some("{n: 3}"), None);
+    let bare = Shape::default().value_of(&typed).expect("delivers");
+    assert_eq!(
+        bare.get_data_by_key("n").and_then(|v| v.as_int().ok()),
+        Some(3),
+        "a typed value with no prose comes back bare"
+    );
+
+    let prose = answered("Hello, Roy.", None, None);
+    let text = Shape::default().value_of(&prose).expect("delivers");
+    assert_eq!(text.coerce_into_string().expect("a string"), "Hello, Roy.");
+
+    let both = answered("Three of them.", Some("{n: 3}"), None);
+    let record = Shape::default().value_of(&both).expect("delivers");
+    let nu::Value::Record { val, .. } = &record else {
+        panic!("value and prose together carry a record, got {record:?}");
+    };
+    assert_eq!(
+        val.columns().map(String::as_str).collect::<Vec<&str>>(),
+        vec!["output", "text"]
+    );
+}
+
+#[test]
+fn decide_still_denies_an_emitted_config() {
+    let with_config = answered("Hello.", None, Some("{tone: terse}"));
+    let envelope = Shape::default()
+        .value_of(&with_config)
+        .expect_err("the model cannot widen its own contract");
     assert!(
         envelope
             .errors
