@@ -7923,19 +7923,18 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_bquest_two"
-version = "0.0.0-18"
+version = "0.0.0-19"
 dependencies = [
- "burn",
  "candle-core 0.11.0",
  "clap",
- "half",
  "regex",
  "safetensors 0.8.0",
  "serde",
  "serde_json",
  "sha2",
  "snafu 0.9.1",
- "sourcetrait_lib_quest_two",
+ "sourcetrait_lib_quest_harness_two",
+ "sourcetrait_lib_quest_llm_two",
  "tokenizers 0.23.1",
  "unicode-normalization",
  "unicode-properties",
@@ -7955,15 +7954,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "sourcetrait_lib_quest_two"
-version = "0.0.0-60"
+name = "sourcetrait_lib_quest_harness_two"
+version = "0.0.0-1"
 dependencies = [
- "candle-core 0.11.0",
- "candle-flash-attn",
- "candle-nn",
- "candle-transformers",
- "cudarc 0.19.8",
- "half",
  "liquid",
  "nu-cmd-lang",
  "nu-command",
@@ -7971,14 +7964,31 @@ dependencies = [
  "nu-parser",
  "nu-protocol",
  "nuon",
+ "snafu 0.9.1",
+ "sourcetrait_lib_quest_llm_two",
+ "sourcetrait_quest_bridge",
+ "toml 0.9.12+spec-1.1.0",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "sourcetrait_lib_quest_llm_two"
+version = "0.0.0-1"
+dependencies = [
+ "burn",
+ "candle-core 0.11.0",
+ "candle-flash-attn",
+ "candle-nn",
+ "candle-transformers",
+ "cudarc 0.19.8",
+ "half",
  "safetensors 0.8.0",
  "serde",
  "serde_json",
  "snafu 0.9.1",
- "sourcetrait_quest_bridge",
+ "sourcetrait_lib_quest_harness_two",
  "tokenizers 0.23.1",
  "toml 0.9.12+spec-1.1.0",
- "xxhash-rust",
 ]
 
 [[package]]
@@ -8001,10 +8011,11 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_quest_bridge_two"
-version = "0.0.0-6"
+version = "0.0.0-7"
 dependencies = [
  "candle-core 0.11.0",
- "sourcetrait_lib_quest_two",
+ "sourcetrait_lib_quest_harness_two",
+ "sourcetrait_lib_quest_llm_two",
  "sourcetrait_quest_bridge",
  "tokenizers 0.23.1",
 ]
@@ -8017,7 +8028,6 @@ dependencies = [
  "safetensors 0.8.0",
  "serde_json",
  "snafu 0.9.1",
- "sourcetrait_lib_quest_two",
 ]
 
 [[package]]

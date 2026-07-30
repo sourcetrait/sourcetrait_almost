@@ -85,7 +85,7 @@ fn generated_answers_verify_under_the_reinforcement_verifier() {
         if prompt.verifier == example::VERIFIER_NUON
             || prompt.verifier == example::VERIFIER_NU_VALUE
         {
-            lib::nu::from_nuon_text(&prompt.reference).expect("reference parses as NUON");
+            harness::nu::from_nuon_text(&prompt.reference).expect("reference parses as NUON");
         }
     }
     assert!(
@@ -118,7 +118,7 @@ fn the_sandbox_confines_what_it_runs() {
     let value = nu_sandbox::pipeline_value("[1 2 3] | where {|x| $x > 1 }")
         .expect("the run completes")
         .expect("a value came back");
-    assert_eq!(value, lib::nu::from_nuon_text("[2, 3]").expect("nuon"));
+    assert_eq!(value, harness::nu::from_nuon_text("[2, 3]").expect("nuon"));
 }
 
 /// The error family's answer must come from nushell's own diagnostic.
@@ -179,7 +179,7 @@ fn rejected_answers_are_actually_wrong() {
             let value = nu_sandbox::pipeline_value(&pair.chosen)
                 .expect("the chosen pipeline runs")
                 .expect("the chosen pipeline produced a value");
-            lib::nu::to_nuon_text(&value).expect("renders")
+            harness::nu::to_nuon_text(&value).expect("renders")
         } else {
             pair.chosen.clone()
         };
@@ -209,7 +209,7 @@ fn the_bench_is_held_out_from_the_same_generation() {
     let bench = example::load_sft(&root.join("sft_bench.nuon")).expect("bench loads");
     assert!(!bench.is_empty(), "the bench is empty");
 
-    let prompt_of = |messages: &Vec<lib::ChatMessage>| {
+    let prompt_of = |messages: &Vec<llm::ChatMessage>| {
         messages[0].content.clone().expect("a user turn")
     };
     let trained: HashSet<String> = train.iter().map(prompt_of).collect();
@@ -231,8 +231,8 @@ fn the_bench_is_held_out_from_the_same_generation() {
 fn the_supervised_mask_covers_exactly_the_answer() {
     let root = temp_root("mask");
     run(&root, 24, 17);
-    let model = lib::model_dir(lib::consts::DPO_MODEL_NAME).expect("model home");
-    let tokenizer = lib::load_tokenizer(&model).expect("tokenizer (checkpoint-backed)");
+    let model = llm::model_dir(llm::consts::DPO_MODEL_NAME).expect("model home");
+    let tokenizer = llm::load_tokenizer(&model).expect("tokenizer (checkpoint-backed)");
     let examples = example::load_sft(&root.join("sft_train.nuon")).expect("sft loads");
     assert!(!examples.is_empty());
 

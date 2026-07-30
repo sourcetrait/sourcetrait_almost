@@ -13,7 +13,7 @@ pub enum QuestPluginError {
 
     #[snafu(transparent)]
     Lib {
-        source: Box<lib::LibQuestError>,
+        source: Box<harness_lib::HarnessQuestError>,
     },
 
     #[snafu(transparent)]
@@ -41,8 +41,8 @@ impl From<bridge::BridgeError> for QuestPluginError {
     }
 }
 
-impl From<lib::LibQuestError> for QuestPluginError {
-    fn from(source: lib::LibQuestError) -> Self {
+impl From<harness_lib::HarnessQuestError> for QuestPluginError {
+    fn from(source: harness_lib::HarnessQuestError) -> Self {
         Self::Lib {
             source: Box::new(source),
         }

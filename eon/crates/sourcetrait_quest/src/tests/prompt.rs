@@ -57,7 +57,7 @@ fn nothing() -> nu_protocol::Value {
 }
 
 fn record(nuon: &str) -> nu_protocol::Value {
-    lib::nu::from_nuon_text(nuon).expect("fixture parses")
+    harness_lib::nu::from_nuon_text(nuon).expect("fixture parses")
 }
 
 #[test]
@@ -99,7 +99,7 @@ fn a_piped_record_carries_its_prompt_and_binds_the_rest() {
 fn a_piped_record_can_name_a_file_instead() {
     let scratch = Scratch::new("fprompt");
     let path = scratch.holding("ask.liquid", "count them");
-    let piped = lib::nu::from_nuon_text(&format!(
+    let piped = harness_lib::nu::from_nuon_text(&format!(
         "{{{FILE_PROMPT_FIELD}: '{path}', rows: [a]}}"
     ))
     .expect("fixture parses");

@@ -122,7 +122,7 @@ impl QuestHarness {
         &self,
         form: &bridge::InferNu,
         inputs: &[(bridge::InferPass, bridge::InferInput)],
-    ) -> QuestPluginResult<lib::nu::Value> {
+    ) -> QuestPluginResult<harness_lib::nu::Value> {
         let script = self.script(form, inputs)?;
         let mut child = std::process::Command::new(&self.world.sandbox)
             .args(self.world.argv())
@@ -170,7 +170,7 @@ impl QuestHarness {
                 trimmed_reason(&stderr, code)
             );
         }
-        match lib::nu::from_nuon_text(stdout.trim()) {
+        match harness_lib::nu::from_nuon_text(stdout.trim()) {
             Ok(value) => Ok(value),
             Err(error) => snafu::whatever!(
                 "`{}` did not answer in NUON: {error}",

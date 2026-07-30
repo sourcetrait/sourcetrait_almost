@@ -209,9 +209,9 @@ fn gate3_rust_scores_match_the_standing_rescore_outputs() {
             )
             .expect("fixture rows");
             let prediction_rows = load_sorted_rows(file).expect("prediction rows");
-            let fixture_records: Vec<&lib::nu::Record> =
+            let fixture_records: Vec<&harness::nu::Record> =
                 fixture_rows.iter().map(|row| row.as_record().expect("record")).collect();
-            let prediction_records: Vec<&lib::nu::Record> = prediction_rows
+            let prediction_records: Vec<&harness::nu::Record> = prediction_rows
                 .iter()
                 .map(|row| row.as_record().expect("record"))
                 .collect();

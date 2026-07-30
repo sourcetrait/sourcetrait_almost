@@ -14,13 +14,8 @@ keywords = ["sourcetrait", "quest", "refquest", "baseline"]
 name = "refquest"
 path = "src/main.rs"
 
-[features]
-cuda = ["sourcetrait_lib_quest_two/cuda"]
-flash-attn = ["cuda", "sourcetrait_lib_quest_two/flash-attn"]
-
 [dependencies]
 clap.workspace = true
 safetensors.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
-sourcetrait_lib_quest_two.workspace = true

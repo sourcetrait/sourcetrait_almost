@@ -104,10 +104,10 @@ fn answer(
 ) -> QuestPluginResult<nu_protocol::Value> {
     let config = call
         .get_flag_value(CONFIG_FLAG)
-        .unwrap_or_else(|| nu_protocol::Value::record(lib::nu::Record::new(), call.head));
+        .unwrap_or_else(|| nu_protocol::Value::record(harness_lib::nu::Record::new(), call.head));
     // Read BEFORE the turn runs, so a malformed shape is refused without
     // having spent a generation on it.
-    let shape = lib::Shape::of(&config)?;
+    let shape = harness_lib::Shape::of(&config)?;
     let asked = asked(call, input)?;
     let request = bridge::InferRequest {
         config: Some(bridge::InferConfig(bridge::InferValue(config))),
@@ -128,15 +128,15 @@ fn answer(
 /// back as a record keyed by member spelling, in declaration order. A
 /// single-key record would force a `get` at every call site.
 fn shaped(
-    shape: &lib::Shape,
+    shape: &harness_lib::Shape,
     response: &bridge::InferResponse,
-    span: lib::nu::Span,
+    span: harness_lib::nu::Span,
 ) -> QuestPluginResult<nu_protocol::Value> {
     let mut carried: Vec<(&'static str, nu_protocol::Value)> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
     for member in &shape.response {
         let value = match member {
-            lib::ShapeMember::Text => Some(nu_protocol::Value::string(
+            harness_lib::ShapeMember::Text => Some(nu_protocol::Value::string(
                 response
                     .text
                     .as_ref()
@@ -144,8 +144,8 @@ fn shaped(
                     .unwrap_or_default(),
                 span,
             )),
-            lib::ShapeMember::Output => response.output.as_ref().map(|output| output.value().0.clone()),
-            lib::ShapeMember::Config => response.config.as_ref().map(|config| config.0.0.clone()),
+            harness_lib::ShapeMember::Output => response.output.as_ref().map(|output| output.value().0.clone()),
+            harness_lib::ShapeMember::Config => response.config.as_ref().map(|config| config.0.0.clone()),
         };
         match value {
             Some(value) => carried.push((member.spelling(), value)),
@@ -164,7 +164,7 @@ fn shaped(
     match carried.len() {
         1 => Ok(carried.remove(0).1),
         _ => {
-            let mut record = lib::nu::Record::new();
+            let mut record = harness_lib::nu::Record::new();
             for (member, value) in carried {
                 record.push(member.to_string(), value);
             }
@@ -222,7 +222,7 @@ pub(crate) fn asked(
 }
 
 /// The piped value as a record, where it is one.
-fn piped_record(input: &nu_protocol::Value) -> Option<lib::nu::Record> {
+fn piped_record(input: &nu_protocol::Value) -> Option<harness_lib::nu::Record> {
     match input {
         nu_protocol::Value::Record { val, .. } => Some(val.as_ref().clone()),
         _ => None,
@@ -230,7 +230,7 @@ fn piped_record(input: &nu_protocol::Value) -> Option<lib::nu::Record> {
 }
 
 /// A record field's text, where it carries one.
-fn field(record: &lib::nu::Record, key: &str) -> Option<String> {
+fn field(record: &harness_lib::nu::Record, key: &str) -> Option<String> {
     match record.get(key)? {
         nu_protocol::Value::String { val, .. } => Some(val.clone()),
         _ => None,
@@ -245,7 +245,7 @@ fn field(record: &lib::nu::Record, key: &str) -> Option<String> {
 /// the data shows the model its own prompt twice.
 fn bindings(
     input: &nu_protocol::Value,
-    piped: Option<lib::nu::Record>,
+    piped: Option<harness_lib::nu::Record>,
 ) -> Vec<(bridge::InferPass, bridge::InferInput)> {
     let span = input.span();
     let bound = match piped {

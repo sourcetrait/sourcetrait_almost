@@ -72,7 +72,7 @@ pub(crate) struct TaskScores {
     pub(crate) rows: Vec<ScoreRow>,
 }
 
-fn field_f64(record: &lib::nu::Record, name: &str) -> BquestResult<f64> {
+fn field_f64(record: &harness::nu::Record, name: &str) -> BquestResult<f64> {
     let value = field(record, name)?;
     if let Ok(float) = value.as_float() {
         return Ok(float);
@@ -83,7 +83,7 @@ fn field_f64(record: &lib::nu::Record, name: &str) -> BquestResult<f64> {
     snafu::whatever!("field {name} is not numeric")
 }
 
-fn output_text(output: &lib::nu::Record) -> BquestResult<String> {
+fn output_text(output: &harness::nu::Record) -> BquestResult<String> {
     field_str(output, "text")
 }
 
@@ -102,8 +102,8 @@ fn first_max(values: &[f64]) -> (usize, f64) {
 
 fn score_mc(
     kind: TaskKind,
-    fixture_rows: &[&lib::nu::Record],
-    prediction_rows: &[&lib::nu::Record],
+    fixture_rows: &[&harness::nu::Record],
+    prediction_rows: &[&harness::nu::Record],
 ) -> BquestResult<TaskScores> {
     let mut rows = Vec::with_capacity(prediction_rows.len());
     let mut correct = 0usize;
@@ -143,8 +143,8 @@ fn score_mc(
 }
 
 fn score_gsm8k(
-    fixture_rows: &[&lib::nu::Record],
-    prediction_rows: &[&lib::nu::Record],
+    fixture_rows: &[&harness::nu::Record],
+    prediction_rows: &[&harness::nu::Record],
 ) -> BquestResult<TaskScores> {
     let mut rows = Vec::with_capacity(prediction_rows.len());
     let mut total = 0f64;
@@ -178,14 +178,14 @@ fn score_gsm8k(
     })
 }
 
-fn kwargs_from_record(record: &lib::nu::Record) -> BquestResult<Kwargs> {
+fn kwargs_from_record(record: &harness::nu::Record) -> BquestResult<Kwargs> {
     let mut kwargs = Kwargs::new();
     for (name, value) in record.iter() {
         let converted = match value {
-            lib::nu::Value::Nothing { .. } => continue,
-            lib::nu::Value::Int { val, .. } => KwargValue::Int(*val),
-            lib::nu::Value::Float { val, .. } => KwargValue::Float(*val),
-            lib::nu::Value::String { val, .. } => KwargValue::Text(val.clone()),
+            harness::nu::Value::Nothing { .. } => continue,
+            harness::nu::Value::Int { val, .. } => KwargValue::Int(*val),
+            harness::nu::Value::Float { val, .. } => KwargValue::Float(*val),
+            harness::nu::Value::String { val, .. } => KwargValue::Text(val.clone()),
             other => snafu::whatever!(
                 "unsupported kwarg type for {name:?}: {}",
                 other.get_type()
@@ -198,8 +198,8 @@ fn kwargs_from_record(record: &lib::nu::Record) -> BquestResult<Kwargs> {
 
 fn score_ifeval_task(
     data: &CheckerData,
-    fixture_rows: &[&lib::nu::Record],
-    prediction_rows: &[&lib::nu::Record],
+    fixture_rows: &[&harness::nu::Record],
+    prediction_rows: &[&harness::nu::Record],
 ) -> BquestResult<TaskScores> {
     let mut rows = Vec::with_capacity(prediction_rows.len());
     let mut strict_lists: Vec<Vec<bool>> = Vec::with_capacity(prediction_rows.len());
@@ -297,8 +297,8 @@ fn score_ifeval_task(
 pub(crate) fn score_task(
     data: Option<&CheckerData>,
     kind: TaskKind,
-    fixture_rows: &[&lib::nu::Record],
-    prediction_rows: &[&lib::nu::Record],
+    fixture_rows: &[&harness::nu::Record],
+    prediction_rows: &[&harness::nu::Record],
 ) -> BquestResult<TaskScores> {
     snafu::ensure_whatever!(
         fixture_rows.len() == prediction_rows.len(),
@@ -331,14 +331,14 @@ pub(crate) fn score_task(
 }
 
 /// A whole-value nuon table's rows, sorted by doc_id.
-pub(crate) fn load_sorted_rows(path: &Path) -> BquestResult<Vec<lib::nu::Value>> {
-    let value = lib::nu::load_value(path)?;
+pub(crate) fn load_sorted_rows(path: &Path) -> BquestResult<Vec<harness::nu::Value>> {
+    let value = harness::nu::load_value(path)?;
     let list = match value.as_list() {
         Ok(list) => list.to_vec(),
         Err(e) => snafu::whatever!("{}: not a table: {e}", path.display()),
     };
     let mut rows = list;
-    let mut keyed: Vec<(i64, lib::nu::Value)> = Vec::with_capacity(rows.len());
+    let mut keyed: Vec<(i64, harness::nu::Value)> = Vec::with_capacity(rows.len());
     for row in rows.drain(..) {
         let record = match row.as_record() {
             Ok(record) => record,
@@ -351,7 +351,7 @@ pub(crate) fn load_sorted_rows(path: &Path) -> BquestResult<Vec<lib::nu::Value>>
     Ok(keyed.into_iter().map(|(_, row)| row).collect())
 }
 
-fn rows_as_records(rows: &[lib::nu::Value]) -> BquestResult<Vec<&lib::nu::Record>> {
+fn rows_as_records(rows: &[harness::nu::Value]) -> BquestResult<Vec<&harness::nu::Record>> {
     rows.iter()
         .map(|row| match row.as_record() {
             Ok(record) => Ok(record),
@@ -381,31 +381,31 @@ pub(crate) fn find_fixture_file(
     }
 }
 
-fn score_row_value(row: &ScoreRow) -> lib::nu::Value {
-    let mut scores = lib::nu::Record::new();
+fn score_row_value(row: &ScoreRow) -> harness::nu::Value {
+    let mut scores = harness::nu::Record::new();
     for (name, value) in &row.scores {
         scores.push(name.clone(), v_float(*value));
     }
-    let extracted: Vec<lib::nu::Value> = row
+    let extracted: Vec<harness::nu::Value> = row
         .extracted
         .iter()
         .map(|entry| match entry {
             Some(text) => v_str(text),
-            None => lib::nu::Value::nothing(span()),
+            None => harness::nu::Value::nothing(span()),
         })
         .collect();
-    let mut record = lib::nu::record! {
+    let mut record = harness::nu::record! {
         "doc_id" => v_int(row.doc_id),
-        "scores" => lib::nu::Value::record(scores, span()),
-        "extracted" => lib::nu::Value::list(extracted, span()),
+        "scores" => harness::nu::Value::record(scores, span()),
+        "extracted" => harness::nu::Value::list(extracted, span()),
     };
     if !row.instructions.is_empty() {
-        let verdicts: Vec<lib::nu::Value> = row
+        let verdicts: Vec<harness::nu::Value> = row
             .instructions
             .iter()
             .map(|verdict| {
-                lib::nu::Value::record(
-                    lib::nu::record! {
+                harness::nu::Value::record(
+                    harness::nu::record! {
                         "id" => v_str(&verdict.id),
                         "strict" => v_bool(verdict.strict),
                         "loose" => v_bool(verdict.loose),
@@ -414,21 +414,21 @@ fn score_row_value(row: &ScoreRow) -> lib::nu::Value {
                 )
             })
             .collect();
-        record.push("instructions", lib::nu::Value::list(verdicts, span()));
+        record.push("instructions", harness::nu::Value::list(verdicts, span()));
     }
-    lib::nu::Value::record(record, span())
+    harness::nu::Value::record(record, span())
 }
 
-fn aggregate_value(scores: &TaskScores) -> lib::nu::Value {
-    let mut metrics = lib::nu::Record::new();
+fn aggregate_value(scores: &TaskScores) -> harness::nu::Value {
+    let mut metrics = harness::nu::Record::new();
     for (metric, scorer, value) in &scores.metrics {
-        let mut inner = lib::nu::Record::new();
+        let mut inner = harness::nu::Record::new();
         inner.push(scorer.clone(), v_float(*value));
-        metrics.push(metric.clone(), lib::nu::Value::record(inner, span()));
+        metrics.push(metric.clone(), harness::nu::Value::record(inner, span()));
     }
-    lib::nu::Value::record(
-        lib::nu::record! {
-            "metrics" => lib::nu::Value::record(metrics, span()),
+    harness::nu::Value::record(
+        harness::nu::record! {
+            "metrics" => harness::nu::Value::record(metrics, span()),
             "num_instances" => v_int(scores.num_instances as i64),
         },
         span(),
@@ -468,7 +468,7 @@ pub(crate) fn capability_score(args: &CapabilityScoreArgs) -> BquestResult<()> {
     );
 
     let mut checker_data: Option<CheckerData> = None;
-    let mut aggregates = lib::nu::Record::new();
+    let mut aggregates = harness::nu::Record::new();
     let mut tasks_scored = 0usize;
     let mut items_scored = 0usize;
     for file in &prediction_files {
@@ -490,9 +490,9 @@ pub(crate) fn capability_score(args: &CapabilityScoreArgs) -> BquestResult<()> {
             &rows_as_records(&fixture_rows)?,
             &rows_as_records(&prediction_rows)?,
         )?;
-        let rows: Vec<lib::nu::Value> = scores.rows.iter().map(score_row_value).collect();
+        let rows: Vec<harness::nu::Value> = scores.rows.iter().map(score_row_value).collect();
         let scores_path = out_root.join("scores").join(format!("{token}-scores.nuon"));
-        lib::nu::save_value(&scores_path, &lib::nu::Value::list(rows, span()))?;
+        harness::nu::save_value(&scores_path, &harness::nu::Value::list(rows, span()))?;
         aggregates.push(token.clone(), aggregate_value(&scores));
         tasks_scored += 1;
         items_scored += scores.num_instances;
@@ -501,10 +501,10 @@ pub(crate) fn capability_score(args: &CapabilityScoreArgs) -> BquestResult<()> {
     snafu::ensure_whatever!(tasks_scored > 0, "no tasks matched");
 
     let aggregates_path = out_root.join("aggregates.nuon");
-    lib::nu::save_value(&aggregates_path, &lib::nu::Value::record(aggregates, span()))?;
+    harness::nu::save_value(&aggregates_path, &harness::nu::Value::record(aggregates, span()))?;
 
-    let summary = lib::nu::Value::record(
-        lib::nu::record! {
+    let summary = harness::nu::Value::record(
+        harness::nu::record! {
             "tasks" => v_int(tasks_scored as i64),
             "items" => v_int(items_scored as i64),
             "seconds" => v_float(started.elapsed().as_secs_f64()),
@@ -512,6 +512,6 @@ pub(crate) fn capability_score(args: &CapabilityScoreArgs) -> BquestResult<()> {
         },
         span(),
     );
-    println!("{}", lib::nu::to_nuon_text(&summary)?);
+    println!("{}", harness::nu::to_nuon_text(&summary)?);
     Ok(())
 }

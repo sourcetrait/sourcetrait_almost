@@ -1,0 +1,36 @@
+[package]
+name = "sourcetrait_lib_quest_harness_two"
+version = "0.0.0-1"
+edition = "2024"
+description = "The era-two harness library: channels, Questness, and the data core"
+authors = ["SourceTrait <development@sourcetrait.com>"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/sourcetrait/sourcetrait_quest"
+homepage = "https://sourcetrait.com"
+categories = []
+keywords = ["sourcetrait", "quest", "harness"]
+
+# The training scheme's own version, cadenced separately from the crate's.
+# It is what decides whether two generated sets are comparable at all, so
+# it moves whenever the scheme changes rather than whenever the crate does.
+[package.metadata.training]
+version = "0.0.0-4"
+
+[dependencies]
+liquid.workspace = true
+nu-cmd-lang.workspace = true
+nu-command.workspace = true
+nu-engine.workspace = true
+nu-parser.workspace = true
+nu-protocol.workspace = true
+nuon.workspace = true
+snafu.workspace = true
+sourcetrait_lib_quest_llm_two.workspace = true
+sourcetrait_quest_bridge.workspace = true
+xxhash-rust.workspace = true
+
+[dev-dependencies]
+toml.workspace = true
+
+[build-dependencies]
+toml.workspace = true

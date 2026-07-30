@@ -13,11 +13,13 @@ pub enum BquestError {
     #[snafu(transparent)]
     Candle { source: candle_core::Error },
     #[snafu(transparent)]
-    Lib { source: lib::LibQuestError },
+    Llm { source: llm::LibQuestError },
+    #[snafu(transparent)]
+    Harness { source: harness::HarnessQuestError },
     #[snafu(transparent)]
     Shell {
-        #[snafu(source(from(lib::nu::ShellError, Box::new)))]
-        source: Box<lib::nu::ShellError>,
+        #[snafu(source(from(harness::nu::ShellError, Box::new)))]
+        source: Box<harness::nu::ShellError>,
     },
     #[snafu(whatever, display("{message}"))]
     Whatever {

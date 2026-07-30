@@ -121,7 +121,7 @@ fn field(rng: &mut SplitMix64) -> String {
 }
 
 /// A JSON-representable scalar, so nothing is lost on the way in.
-fn scalar(rng: &mut SplitMix64) -> lib::nu::Value {
+fn scalar(rng: &mut SplitMix64) -> harness::nu::Value {
     match rng.next_below(4) {
         0 => v_int((rng.next_below(1000)) as i64),
         1 => v_str(&word(rng)),
@@ -134,9 +134,9 @@ fn scalar(rng: &mut SplitMix64) -> lib::nu::Value {
 fn record_of(
     rng: &mut SplitMix64,
     width: usize,
-    mut value: impl FnMut(&mut SplitMix64) -> lib::nu::Value,
-) -> lib::nu::Value {
-    let mut record = lib::nu::Record::new();
+    mut value: impl FnMut(&mut SplitMix64) -> harness::nu::Value,
+) -> harness::nu::Value {
+    let mut record = harness::nu::Record::new();
     let mut used: Vec<String> = Vec::new();
     let mut attempts = 0;
     while used.len() < width && attempts < 64 {
@@ -148,11 +148,11 @@ fn record_of(
         used.push(name.clone());
         record.push(name, value(rng));
     }
-    lib::nu::Value::record(record, span())
+    harness::nu::Value::record(record, span())
 }
 
 /// A uniform table: the same columns in every row.
-fn table_of(rng: &mut SplitMix64, rows: usize, columns: usize) -> lib::nu::Value {
+fn table_of(rng: &mut SplitMix64, rows: usize, columns: usize) -> harness::nu::Value {
     let mut names: Vec<String> = Vec::new();
     let mut attempts = 0;
     while names.len() < columns && attempts < 64 {
@@ -162,26 +162,26 @@ fn table_of(rng: &mut SplitMix64, rows: usize, columns: usize) -> lib::nu::Value
             names.push(name);
         }
     }
-    let values: Vec<lib::nu::Value> = (0..rows)
+    let values: Vec<harness::nu::Value> = (0..rows)
         .map(|_| {
-            let mut record = lib::nu::Record::new();
+            let mut record = harness::nu::Record::new();
             for name in &names {
                 record.push(name.clone(), scalar(rng));
             }
-            lib::nu::Value::record(record, span())
+            harness::nu::Value::record(record, span())
         })
         .collect();
-    lib::nu::Value::list(values, span())
+    harness::nu::Value::list(values, span())
 }
 
-fn synth(rng: &mut SplitMix64, shape: Shape) -> lib::nu::Value {
+fn synth(rng: &mut SplitMix64, shape: Shape) -> harness::nu::Value {
     match shape {
         Shape::FlatRecord => record_of(rng, 3, scalar),
         Shape::NestedRecord => record_of(rng, 2, |rng| record_of(rng, 2, scalar)),
         Shape::ScalarList => {
             let count = 3 + rng.next_below(3);
-            let values: Vec<lib::nu::Value> = (0..count).map(|_| scalar(rng)).collect();
-            lib::nu::Value::list(values, span())
+            let values: Vec<harness::nu::Value> = (0..count).map(|_| scalar(rng)).collect();
+            harness::nu::Value::list(values, span())
         }
         Shape::Table => {
             let rows = 2 + rng.next_below(3);
@@ -190,14 +190,14 @@ fn synth(rng: &mut SplitMix64, shape: Shape) -> lib::nu::Value {
         }
         Shape::NestedTable => {
             let inner = table_of(rng, 2, 2);
-            let mut record = lib::nu::Record::new();
+            let mut record = harness::nu::Record::new();
             record.push(String::from("rows"), inner);
             record.push(String::from("total"), scalar(rng));
-            lib::nu::Value::record(record, span())
+            harness::nu::Value::record(record, span())
         }
         Shape::RecordOfLists => record_of(rng, 2, |rng| {
-            let values: Vec<lib::nu::Value> = (0..3).map(|_| scalar(rng)).collect();
-            lib::nu::Value::list(values, span())
+            let values: Vec<harness::nu::Value> = (0..3).map(|_| scalar(rng)).collect();
+            harness::nu::Value::list(values, span())
         }),
     }
 }
@@ -238,7 +238,7 @@ impl Item {
     }
 }
 
-fn prompt_json(value: &lib::nu::Value) -> BquestResult<String> {
+fn prompt_json(value: &harness::nu::Value) -> BquestResult<String> {
     let json = value_to_json(value)?;
     let rendered = serde_json::to_string_pretty(&json)?;
     Ok(format!("{CONVERT_INSTRUCTION}\n\n{rendered}"))
@@ -266,9 +266,9 @@ fn nuon_families(count: usize, seed: u64) -> BquestResult<Vec<Item>> {
     let mut items = Vec::with_capacity(count);
     for index in 0..count {
         let value = synth(&mut rng, SHAPES[index % SHAPES.len()]);
-        let compact = lib::nu::to_nuon_text(&value)?;
-        let pretty = lib::nu::to_nuon_pretty(&value)?;
-        let condensed = lib::nu::to_nuon_condensed(&value)?;
+        let compact = harness::nu::to_nuon_text(&value)?;
+        let pretty = harness::nu::to_nuon_pretty(&value)?;
+        let condensed = harness::nu::to_nuon_condensed(&value)?;
 
         items.push(
             Item {
@@ -359,7 +359,7 @@ fn nushell_families(count: usize, seed: u64) -> BquestResult<Vec<Item>> {
             skipped += 1;
             continue;
         };
-        let reference = lib::nu::to_nuon_text(&value)?;
+        let reference = harness::nu::to_nuon_text(&value)?;
         let broken = misspell(&gold);
 
         for (family, instruction, ask) in [
@@ -416,10 +416,10 @@ fn nushell_families(count: usize, seed: u64) -> BquestResult<Vec<Item>> {
     Ok(items)
 }
 
-fn messages_value(prompt: &str) -> lib::nu::Value {
-    lib::nu::Value::list(
-        vec![lib::nu::Value::record(
-            lib::nu::record! {
+fn messages_value(prompt: &str) -> harness::nu::Value {
+    harness::nu::Value::list(
+        vec![harness::nu::Value::record(
+            harness::nu::record! {
                 "role" => v_str("user"),
                 "content" => v_str(prompt),
             },
@@ -429,11 +429,11 @@ fn messages_value(prompt: &str) -> lib::nu::Value {
     )
 }
 
-fn write_table(path: &Path, rows: Vec<lib::nu::Value>, typedef: &str) -> BquestResult<usize> {
-    let table = lib::nu::Value::list(rows, span());
-    lib::nu::conform(&table, &lib::nu::parse_typedef(typedef)?)?;
+fn write_table(path: &Path, rows: Vec<harness::nu::Value>, typedef: &str) -> BquestResult<usize> {
+    let table = harness::nu::Value::list(rows, span());
+    harness::nu::conform(&table, &harness::nu::parse_typedef(typedef)?)?;
     let count = table.as_list().map(|rows| rows.len()).unwrap_or(0);
-    lib::nu::save_value(path, &table)?;
+    harness::nu::save_value(path, &table)?;
     Ok(count)
 }
 
@@ -464,19 +464,19 @@ pub(crate) fn taskgen_all(args: &TaskgenAllArgs) -> BquestResult<()> {
             None => per_family.push((item.family.to_string(), 1)),
         }
         let bench = index % args.bench_every == 0;
-        let supervised = lib::nu::Value::record(
-            lib::nu::record! {
-                "messages" => lib::nu::Value::list(
+        let supervised = harness::nu::Value::record(
+            harness::nu::record! {
+                "messages" => harness::nu::Value::list(
                     vec![
-                        lib::nu::Value::record(
-                            lib::nu::record! {
+                        harness::nu::Value::record(
+                            harness::nu::record! {
                                 "role" => v_str("user"),
                                 "content" => v_str(&item.prompt),
                             },
                             span(),
                         ),
-                        lib::nu::Value::record(
-                            lib::nu::record! {
+                        harness::nu::Value::record(
+                            harness::nu::record! {
                                 "role" => v_str("assistant"),
                                 "content" => v_str(&item.gold),
                             },
@@ -488,8 +488,8 @@ pub(crate) fn taskgen_all(args: &TaskgenAllArgs) -> BquestResult<()> {
             },
             span(),
         );
-        let verifiable = lib::nu::Value::record(
-            lib::nu::record! {
+        let verifiable = harness::nu::Value::record(
+            harness::nu::record! {
                 "prompt" => messages_value(&item.prompt),
                 "verifier" => v_str(item.verifier),
                 "reference" => v_str(&item.reference),
@@ -504,8 +504,8 @@ pub(crate) fn taskgen_all(args: &TaskgenAllArgs) -> BquestResult<()> {
         sft_train.push(supervised);
         rlvr_train.push(verifiable);
         match &item.rejected {
-            Some(rejected) => dpo_train.push(lib::nu::Value::record(
-                lib::nu::record! {
+            Some(rejected) => dpo_train.push(harness::nu::Value::record(
+                harness::nu::record! {
                     "prompt" => messages_value(&item.prompt),
                     "chosen" => v_str(&item.gold),
                     "rejected" => v_str(rejected),
@@ -527,12 +527,12 @@ pub(crate) fn taskgen_all(args: &TaskgenAllArgs) -> BquestResult<()> {
     let rlvr_bench_count =
         write_table(&args.out.join("rlvr_bench.nuon"), rlvr_bench, example::RLVR_TYPEDEF)?;
 
-    let families = lib::nu::Value::list(
+    let families = harness::nu::Value::list(
         per_family
             .iter()
             .map(|(name, tally)| {
-                lib::nu::Value::record(
-                    lib::nu::record! {
+                harness::nu::Value::record(
+                    harness::nu::record! {
                         "family" => v_str(name),
                         "items" => v_int(*tally as i64),
                     },
@@ -542,8 +542,8 @@ pub(crate) fn taskgen_all(args: &TaskgenAllArgs) -> BquestResult<()> {
             .collect(),
         span(),
     );
-    let summary = lib::nu::Value::record(
-        lib::nu::record! {
+    let summary = harness::nu::Value::record(
+        harness::nu::record! {
             "families" => families,
             "generated" => v_int(items.len() as i64),
             "sft_train" => v_int(sft_train_count as i64),
@@ -558,6 +558,6 @@ pub(crate) fn taskgen_all(args: &TaskgenAllArgs) -> BquestResult<()> {
         },
         span(),
     );
-    println!("{}", lib::nu::to_nuon_text(&summary)?);
+    println!("{}", harness::nu::to_nuon_text(&summary)?);
     Ok(())
 }

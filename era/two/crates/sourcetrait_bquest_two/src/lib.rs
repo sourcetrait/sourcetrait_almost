@@ -5,12 +5,7 @@ pub(crate) mod convert;
 pub(crate) mod doc;
 pub(crate) mod error;
 pub(crate) mod example;
-#[cfg(feature = "train")]
-pub(crate) mod objective;
-pub(crate) mod hybrid;
-pub(crate) mod hybrid_load;
 pub(crate) mod ifeval;
-pub(crate) mod lora;
 pub(crate) mod mix;
 pub(crate) mod nu_sandbox;
 pub(crate) mod punkt;
@@ -41,33 +36,31 @@ pub(crate) use std::{
     },
 };
 
-pub(crate) use sourcetrait_lib_quest_two as lib;
+pub(crate) use sourcetrait_lib_quest_harness_two as harness;
+pub(crate) use sourcetrait_lib_quest_llm_two as llm;
 
-/// The oracle's reference backend: deterministic host f32.
-#[allow(dead_code)]
-pub(crate) type CpuBack = burn::backend::NdArray<f32>;
-/// The fast-oracle and trainer backend; bf16 default float.
+/// The oracle backends and the seeded rng, from the llm lib.
+#[allow(unused_imports)]
+pub(crate) use llm::{
+    CpuBack,
+    SplitMix64,
+};
 #[cfg(any(feature = "burn-cuda", feature = "train-cuda"))]
-#[allow(dead_code)]
-pub(crate) type CudaBack = burn::backend::Cuda<burn::tensor::bf16>;
+#[allow(unused_imports)]
+pub(crate) use llm::CudaBack;
 
+/// The oracle surface the parity and diag verbs drive.
 #[allow(unused_imports)]
-pub(crate) use crate::hybrid::{
-    AttnBlock,
-    GdnBlock,
-    HybridBlock,
+pub(crate) use llm::{
+    HybridCheckpointConfig,
     HybridModel,
-    causal_mask,
+    HybridWeights,
+    dump_read_f32_matrix,
+    dump_read_u32,
 };
-#[allow(unused_imports)]
-pub(crate) use crate::lora::{
-    AttnAdapters,
-    ConvDelta,
-    GdnAdapters,
-    LayerAdapters,
-    LoraPair,
-    ModelAdapters,
-};
+#[cfg(feature = "train")]
+pub(crate) use llm::ModelAdapters;
+
 #[cfg(feature = "train")]
 pub(crate) use crate::train::{
     train_cpt,
@@ -82,13 +75,6 @@ pub(crate) use crate::rollout::{
     rollout_run,
 };
 pub(crate) use crate::taskgen::taskgen_all;
-#[allow(unused_imports)]
-pub(crate) use crate::hybrid_load::{
-    HybridCheckpointConfig,
-    HybridWeights,
-    dump_read_f32_matrix,
-    dump_read_u32,
-};
 
 pub(crate) use crate::capability::{
     CAPABILITY_HOME_RELATIVE,
@@ -134,7 +120,6 @@ pub(crate) use crate::cli::{
     TrainSftArgs,
 };
 pub(crate) use crate::mix::{
-    SplitMix64,
     mix_pack,
     mix_render,
     mix_rip,
@@ -204,12 +189,8 @@ pub(crate) use crate::error::{
 mod tests {
     mod convert;
     mod doc;
-    mod hybrid;
-    mod lora;
     mod mix;
     mod score;
     mod speculate;
     mod taskgen;
-    #[cfg(feature = "train")]
-    mod train;
 }

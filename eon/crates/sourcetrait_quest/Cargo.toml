@@ -18,6 +18,6 @@ path = "src/main.rs"
 nu-plugin.workspace = true
 nu-protocol.workspace = true
 snafu.workspace = true
-sourcetrait_lib_quest_two.workspace = true
+sourcetrait_lib_quest_harness_two.workspace = true
 sourcetrait_quest_bridge.workspace = true
 tokio.workspace = true

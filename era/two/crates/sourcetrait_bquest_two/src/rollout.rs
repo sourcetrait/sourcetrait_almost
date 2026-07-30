@@ -21,8 +21,8 @@ pub(crate) fn rollout_run(cli: &Cli, args: &RolloutRunArgs) -> BquestResult<()> 
          within a group, so a single sample is always exactly average",
         args.group
     );
-    let config = lib::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
-    let settings = lib::LibSettings::load_from_dir(cli.dir.as_ref(), cli.settings.as_deref())?;
+    let config = llm::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
+    let settings = llm::LibSettings::load_from_dir(cli.dir.as_ref(), cli.settings.as_deref())?;
     let prompts = example::load_rlvr(&args.prompts)?;
 
     #[cfg(feature = "cuda")]
@@ -31,20 +31,20 @@ pub(crate) fn rollout_run(cli: &Cli, args: &RolloutRunArgs) -> BquestResult<()> 
     let (device, dtype) = (candle_core::Device::Cpu, candle_core::DType::F32);
 
     let model_dir = config.model_dir();
-    let checkpoint = lib::load_config(&model_dir)?;
-    let tokenizer = lib::load_tokenizer(&model_dir)?;
-    lib::verify_token_map(&tokenizer)?;
-    let weights = lib::load_weights(&config, dtype, &device)?;
-    let mut model = lib::OlmoHybrid::new(&checkpoint, settings, weights)?;
-    let mut rows: Vec<lib::nu::Value> = Vec::new();
+    let checkpoint = llm::load_config(&model_dir)?;
+    let tokenizer = llm::load_tokenizer(&model_dir)?;
+    llm::verify_token_map(&tokenizer)?;
+    let weights = llm::load_weights(&config, dtype, &device)?;
+    let mut model = llm::OlmoHybrid::new(&checkpoint, settings, weights)?;
+    let mut rows: Vec<harness::nu::Value> = Vec::new();
     let mut passed = 0usize;
     let mut attempted = 0usize;
 
     for (prompt_index, prompt) in prompts.iter().enumerate() {
         let prompt_ids = example::encode_prompt(&tokenizer, &prompt.prompt)?;
-        let rendered = lib::chat_render(&prompt.prompt, true).text;
+        let rendered = llm::chat_render(&prompt.prompt, true).text;
         for member in 0..args.group {
-            let options = lib::GenerateOptions {
+            let options = llm::GenerateOptions {
                 temperature: Some(args.temperature),
                 top_p: None,
                 seed: args
@@ -70,8 +70,8 @@ pub(crate) fn rollout_run(cli: &Cli, args: &RolloutRunArgs) -> BquestResult<()> 
             if reward > 0.0 {
                 passed += 1;
             }
-            rows.push(lib::nu::Value::record(
-                lib::nu::record! {
+            rows.push(harness::nu::Value::record(
+                harness::nu::record! {
                     "prompt_index" => v_int(prompt_index as i64),
                     "prompt_ids" => v_int_list(&prompt_ids),
                     "response_ids" => v_int_list(&response_ids),
@@ -89,12 +89,12 @@ pub(crate) fn rollout_run(cli: &Cli, args: &RolloutRunArgs) -> BquestResult<()> 
         );
     }
 
-    let table = lib::nu::Value::list(rows, span());
-    lib::nu::conform(&table, &lib::nu::parse_typedef(ROLLOUT_TYPEDEF)?)?;
-    lib::nu::save_value(&args.out, &table)?;
+    let table = harness::nu::Value::list(rows, span());
+    harness::nu::conform(&table, &harness::nu::parse_typedef(ROLLOUT_TYPEDEF)?)?;
+    harness::nu::save_value(&args.out, &table)?;
 
-    let summary = lib::nu::Value::record(
-        lib::nu::record! {
+    let summary = harness::nu::Value::record(
+        harness::nu::record! {
             "prompts" => v_int(prompts.len() as i64),
             "group" => v_int(args.group as i64),
             "rollouts" => v_int(attempted as i64),
@@ -105,7 +105,7 @@ pub(crate) fn rollout_run(cli: &Cli, args: &RolloutRunArgs) -> BquestResult<()> 
         },
         span(),
     );
-    println!("{}", lib::nu::to_nuon_text(&summary)?);
+    println!("{}", harness::nu::to_nuon_text(&summary)?);
     Ok(())
 }
 
@@ -116,8 +116,8 @@ const BENCH_TYPEDEF: &str = "table<prompt_index: int, response: string, reward: 
 /// `bquest bench run`: answer every bench prompt greedily, and score.
 pub(crate) fn bench_run(cli: &Cli, args: &BenchRunArgs) -> BquestResult<()> {
     let started = std::time::Instant::now();
-    let config = lib::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
-    let settings = lib::LibSettings::load_from_dir(cli.dir.as_ref(), cli.settings.as_deref())?;
+    let config = llm::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
+    let settings = llm::LibSettings::load_from_dir(cli.dir.as_ref(), cli.settings.as_deref())?;
     let prompts = example::load_rlvr(&args.prompts)?;
 
     #[cfg(feature = "cuda")]
@@ -126,17 +126,17 @@ pub(crate) fn bench_run(cli: &Cli, args: &BenchRunArgs) -> BquestResult<()> {
     let (device, dtype) = (candle_core::Device::Cpu, candle_core::DType::F32);
 
     let model_dir = config.model_dir();
-    let checkpoint = lib::load_config(&model_dir)?;
-    let tokenizer = lib::load_tokenizer(&model_dir)?;
-    lib::verify_token_map(&tokenizer)?;
-    let weights = lib::load_weights(&config, dtype, &device)?;
-    let mut model = lib::OlmoHybrid::new(&checkpoint, settings, weights)?;
+    let checkpoint = llm::load_config(&model_dir)?;
+    let tokenizer = llm::load_tokenizer(&model_dir)?;
+    llm::verify_token_map(&tokenizer)?;
+    let weights = llm::load_weights(&config, dtype, &device)?;
+    let mut model = llm::OlmoHybrid::new(&checkpoint, settings, weights)?;
 
-    let mut rows: Vec<lib::nu::Value> = Vec::new();
+    let mut rows: Vec<harness::nu::Value> = Vec::new();
     let mut passed = 0usize;
     for (prompt_index, prompt) in prompts.iter().enumerate() {
-        let rendered = lib::chat_render(&prompt.prompt, true).text;
-        let options = lib::GenerateOptions {
+        let rendered = llm::chat_render(&prompt.prompt, true).text;
+        let options = llm::GenerateOptions {
             temperature: None,
             top_p: None,
             seed: 0,
@@ -156,8 +156,8 @@ pub(crate) fn bench_run(cli: &Cli, args: &BenchRunArgs) -> BquestResult<()> {
         if reward > 0.0 {
             passed += 1;
         }
-        rows.push(lib::nu::Value::record(
-            lib::nu::record! {
+        rows.push(harness::nu::Value::record(
+            harness::nu::record! {
                 "prompt_index" => v_int(prompt_index as i64),
                 "response" => v_str(&response),
                 "reward" => v_float(reward as f64),
@@ -174,12 +174,12 @@ pub(crate) fn bench_run(cli: &Cli, args: &BenchRunArgs) -> BquestResult<()> {
         }
     }
 
-    let table = lib::nu::Value::list(rows, span());
-    lib::nu::conform(&table, &lib::nu::parse_typedef(BENCH_TYPEDEF)?)?;
-    lib::nu::save_value(&args.out, &table)?;
+    let table = harness::nu::Value::list(rows, span());
+    harness::nu::conform(&table, &harness::nu::parse_typedef(BENCH_TYPEDEF)?)?;
+    harness::nu::save_value(&args.out, &table)?;
 
-    let summary = lib::nu::Value::record(
-        lib::nu::record! {
+    let summary = harness::nu::Value::record(
+        harness::nu::record! {
             "prompts" => v_int(prompts.len() as i64),
             "passed" => v_int(passed as i64),
             "pass_rate" => v_float(passed as f64 / prompts.len().max(1) as f64),
@@ -192,7 +192,7 @@ pub(crate) fn bench_run(cli: &Cli, args: &BenchRunArgs) -> BquestResult<()> {
         },
         span(),
     );
-    println!("{}", lib::nu::to_nuon_text(&summary)?);
+    println!("{}", harness::nu::to_nuon_text(&summary)?);
     Ok(())
 }
 
@@ -203,8 +203,8 @@ pub(crate) fn load_groups(
     width: usize,
     pad_id: u32,
 ) -> BquestResult<(RolloutGroups, usize)> {
-    let value = lib::nu::load_value(path)?;
-    lib::nu::conform(&value, &lib::nu::parse_typedef(ROLLOUT_TYPEDEF)?)?;
+    let value = harness::nu::load_value(path)?;
+    harness::nu::conform(&value, &harness::nu::parse_typedef(ROLLOUT_TYPEDEF)?)?;
     let rows = match value.as_list() {
         Ok(rows) => rows,
         Err(e) => snafu::whatever!("{}: not a rollout table: {e}", path.display()),

@@ -10,7 +10,7 @@ pub(crate) use std::{
     path::PathBuf,
 };
 
-pub(crate) use sourcetrait_lib_quest_two as lib;
+pub(crate) use sourcetrait_lib_quest_harness_two as harness_lib;
 pub(crate) use sourcetrait_quest_bridge as bridge;
 
 pub(crate) use crate::error::{

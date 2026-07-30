@@ -7,8 +7,8 @@ use crate::*;
 fn round_trips(json_text: &str) {
     let json: serde_json::Value = serde_json::from_str(json_text).expect("test JSON parses");
     let value = json_to_value(&json).expect("converts");
-    let rendered = lib::nu::to_nuon_text(&value).expect("renders");
-    let reparsed = lib::nu::from_nuon_text(&rendered).expect("reparses");
+    let rendered = harness::nu::to_nuon_text(&value).expect("renders");
+    let reparsed = harness::nu::from_nuon_text(&rendered).expect("reparses");
     assert_eq!(value, reparsed, "nuon round-trip must be lossless for {json_text}");
 }
 
@@ -81,7 +81,7 @@ fn task_tokens_strip_suffix_and_render_hash() {
 
 #[test]
 fn harvested_typedefs_parse_and_accept_real_shapes() {
-    let loglik = lib::nu::parse_typedef(
+    let loglik = harness::nu::parse_typedef(
         "record<request_type: string, \
          doc: record<query: string, gold_idx: int, choices: list<string>>, \
          request: record<context: string, continuations: list<string>>, \
@@ -96,5 +96,5 @@ fn harvested_typedefs_parse_and_accept_real_shapes() {
         "idx": 0, "task_name": "mmlu_anatomy", "doc_id": 0, "native_id": 28, "label": 2}"#;
     let json: serde_json::Value = serde_json::from_str(row_json).expect("parses");
     let value = json_to_value(&json).expect("converts");
-    lib::nu::conform(&value, &loglik.expect("parsed")).expect("real shape conforms");
+    harness::nu::conform(&value, &loglik.expect("parsed")).expect("real shape conforms");
 }

@@ -21,7 +21,7 @@ struct MixSpecRow {
     kind: String,
 }
 
-fn read_spec(value: &lib::nu::Value) -> BquestResult<Vec<MixSpecRow>> {
+fn read_spec(value: &harness::nu::Value) -> BquestResult<Vec<MixSpecRow>> {
     let rows = match value.as_list() {
         Ok(list) => list,
         Err(e) => snafu::whatever!("the mix spec must be a table: {e}"),
@@ -56,7 +56,7 @@ fn language_token(path: &Path) -> String {
 }
 
 /// Render one corpus tree into document rows, walked sorted.
-fn render_tree(spec: &MixSpecRow, stamp: &str) -> BquestResult<Vec<lib::nu::Value>> {
+fn render_tree(spec: &MixSpecRow, stamp: &str) -> BquestResult<Vec<harness::nu::Value>> {
     snafu::ensure_whatever!(
         spec.corpus_dir.is_dir(),
         "corpus_dir {} is not a directory",
@@ -86,15 +86,15 @@ fn render_tree(spec: &MixSpecRow, stamp: &str) -> BquestResult<Vec<lib::nu::Valu
             Ok(relative) => relative.display().to_string(),
             Err(_) => path.display().to_string(),
         };
-        documents.push(lib::nu::Value::record(
-            lib::nu::record! {
+        documents.push(harness::nu::Value::record(
+            harness::nu::record! {
                 "id" => v_str(&format!("{}/{relative}", spec.repo)),
                 "text" => v_str(&text),
                 "source" => v_str(&spec.repo),
                 "added" => v_str(stamp),
                 "created" => v_str(stamp),
-                "metadata" => lib::nu::Value::record(
-                    lib::nu::record! {
+                "metadata" => harness::nu::Value::record(
+                    harness::nu::record! {
                         "repo" => v_str(&spec.repo),
                         "path" => v_str(&relative),
                         "language" => v_str(&language_token(path)),
@@ -120,37 +120,6 @@ pub(crate) const FIM_SUFFIX: &str = "<|fim_suffix|>";
 /// The lineage FIM rate (per document) and the PSM/SPM split.
 #[allow(dead_code)]
 pub(crate) const FIM_RATE: f64 = 0.5;
-
-/// The crate's deterministic seed-expanding rng.
-#[allow(dead_code)]
-pub(crate) struct SplitMix64 {
-    state: u64,
-}
-
-#[allow(dead_code)]
-impl SplitMix64 {
-    pub(crate) fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    pub(crate) fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9E3779B97F4A7C15);
-        let mut mixed = self.state;
-        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D049BB133111EB);
-        mixed ^ (mixed >> 31)
-    }
-
-    /// Uniform in [0, 1).
-    pub(crate) fn next_unit(&mut self) -> f64 {
-        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
-    }
-
-    /// Uniform in [0, bound) (bound > 0).
-    pub(crate) fn next_below(&mut self, bound: usize) -> usize {
-        (self.next_unit() * bound as f64) as usize % bound
-    }
-}
 
 /// The lineage FIM transform, at FIM_RATE with an even PSM/SPM split.
 #[allow(dead_code)]
@@ -243,20 +212,20 @@ pub(crate) fn chunk_and_shuffle(
 /// `bquest mix pack`: document tables to one packed-chunks artifact.
 pub(crate) fn mix_pack(cli: &Cli, args: &MixPackArgs) -> BquestResult<()> {
     let started = std::time::Instant::now();
-    let config = lib::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
-    let tokenizer = lib::load_tokenizer(&config.model_dir())?;
-    lib::verify_token_map(&tokenizer)?;
-    let document_type = lib::nu::parse_typedef(MIX_DOCUMENT_TYPEDEF)?;
+    let config = llm::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
+    let tokenizer = llm::load_tokenizer(&config.model_dir())?;
+    llm::verify_token_map(&tokenizer)?;
+    let document_type = harness::nu::parse_typedef(MIX_DOCUMENT_TYPEDEF)?;
 
     let mut pack_documents: Vec<PackDocument> = Vec::new();
     for path in &args.documents {
-        let table = lib::nu::load_value(path)?;
+        let table = harness::nu::load_value(path)?;
         let rows = match table.as_list() {
             Ok(rows) => rows,
             Err(e) => snafu::whatever!("{}: not a document table: {e}", path.display()),
         };
         for row in rows {
-            lib::nu::conform(row, &document_type)?;
+            harness::nu::conform(row, &document_type)?;
             let record = match row.as_record() {
                 Ok(record) => record,
                 Err(e) => snafu::whatever!("document row: {e}"),
@@ -315,9 +284,9 @@ pub(crate) fn mix_pack(cli: &Cli, args: &MixPackArgs) -> BquestResult<()> {
     }
 
     let provenance_path = args.out.with_extension("nuon");
-    let provenance = lib::nu::Value::record(
-        lib::nu::record! {
-            "documents" => lib::nu::Value::list(
+    let provenance = harness::nu::Value::record(
+        harness::nu::record! {
+            "documents" => harness::nu::Value::list(
                 args.documents
                     .iter()
                     .map(|p| v_str(&p.display().to_string()))
@@ -335,10 +304,10 @@ pub(crate) fn mix_pack(cli: &Cli, args: &MixPackArgs) -> BquestResult<()> {
         },
         span(),
     );
-    lib::nu::save_value(&provenance_path, &provenance)?;
+    harness::nu::save_value(&provenance_path, &provenance)?;
 
-    let summary = lib::nu::Value::record(
-        lib::nu::record! {
+    let summary = harness::nu::Value::record(
+        harness::nu::record! {
             "chunks" => v_int(chunks.len() as i64),
             "total_tokens" => v_int(stream.len() as i64),
             "dropped_tail" => v_int(dropped_tail as i64),
@@ -347,23 +316,23 @@ pub(crate) fn mix_pack(cli: &Cli, args: &MixPackArgs) -> BquestResult<()> {
         },
         span(),
     );
-    println!("{}", lib::nu::to_nuon_text(&summary)?);
+    println!("{}", harness::nu::to_nuon_text(&summary)?);
     Ok(())
 }
 
 /// `bquest mix sample`: one seeded draw to a text-byte budget.
 pub(crate) fn mix_sample(args: &MixSampleArgs) -> BquestResult<()> {
     let started = std::time::Instant::now();
-    let document_type = lib::nu::parse_typedef(MIX_DOCUMENT_TYPEDEF)?;
-    let mut rows: Vec<lib::nu::Value> = Vec::new();
+    let document_type = harness::nu::parse_typedef(MIX_DOCUMENT_TYPEDEF)?;
+    let mut rows: Vec<harness::nu::Value> = Vec::new();
     for path in &args.documents {
-        let table = lib::nu::load_value(path)?;
+        let table = harness::nu::load_value(path)?;
         let list = match table.as_list() {
             Ok(list) => list,
             Err(e) => snafu::whatever!("{}: not a document table: {e}", path.display()),
         };
         for row in list {
-            lib::nu::conform(row, &document_type)?;
+            harness::nu::conform(row, &document_type)?;
             rows.push(row.clone());
         }
     }
@@ -376,7 +345,7 @@ pub(crate) fn mix_sample(args: &MixSampleArgs) -> BquestResult<()> {
     }
 
     let total_available = rows.len();
-    let mut taken: Vec<lib::nu::Value> = Vec::new();
+    let mut taken: Vec<harness::nu::Value> = Vec::new();
     let mut text_bytes = 0usize;
     for row in rows {
         if text_bytes >= args.budget_bytes {
@@ -393,11 +362,11 @@ pub(crate) fn mix_sample(args: &MixSampleArgs) -> BquestResult<()> {
         taken.push(row);
     }
     let document_count = taken.len();
-    lib::nu::save_value(&args.out, &lib::nu::Value::list(taken, span()))?;
+    harness::nu::save_value(&args.out, &harness::nu::Value::list(taken, span()))?;
 
-    let provenance = lib::nu::Value::record(
-        lib::nu::record! {
-            "documents" => lib::nu::Value::list(
+    let provenance = harness::nu::Value::record(
+        harness::nu::record! {
+            "documents" => harness::nu::Value::list(
                 args.documents
                     .iter()
                     .map(|p| v_str(&p.display().to_string()))
@@ -413,10 +382,10 @@ pub(crate) fn mix_sample(args: &MixSampleArgs) -> BquestResult<()> {
         },
         span(),
     );
-    lib::nu::save_value(&args.out.with_extension("provenance.nuon"), &provenance)?;
+    harness::nu::save_value(&args.out.with_extension("provenance.nuon"), &provenance)?;
 
-    let summary = lib::nu::Value::record(
-        lib::nu::record! {
+    let summary = harness::nu::Value::record(
+        harness::nu::record! {
             "documents_taken" => v_int(document_count as i64),
             "documents_available" => v_int(total_available as i64),
             "text_bytes" => v_int(text_bytes as i64),
@@ -425,24 +394,24 @@ pub(crate) fn mix_sample(args: &MixSampleArgs) -> BquestResult<()> {
         },
         span(),
     );
-    println!("{}", lib::nu::to_nuon_text(&summary)?);
+    println!("{}", harness::nu::to_nuon_text(&summary)?);
     Ok(())
 }
 
 /// `bquest mix render`: corpus trees to one document table per row.
 pub(crate) fn mix_render(args: &MixRenderArgs) -> BquestResult<()> {
     let started = std::time::Instant::now();
-    let spec_value = lib::nu::load_value(&args.spec)?;
-    lib::nu::conform(&spec_value, &lib::nu::parse_typedef(MIX_SPEC_TYPEDEF)?)?;
+    let spec_value = harness::nu::load_value(&args.spec)?;
+    harness::nu::conform(&spec_value, &harness::nu::parse_typedef(MIX_SPEC_TYPEDEF)?)?;
     let spec_rows = read_spec(&spec_value)?;
     let stamp = args.stamp.clone().unwrap_or_default();
-    let document_type = lib::nu::parse_typedef(MIX_DOCUMENT_TYPEDEF)?;
+    let document_type = harness::nu::parse_typedef(MIX_DOCUMENT_TYPEDEF)?;
 
-    let mut summary_rows: Vec<lib::nu::Value> = Vec::new();
+    let mut summary_rows: Vec<harness::nu::Value> = Vec::new();
     for spec_row in &spec_rows {
         let documents = render_tree(spec_row, &stamp)?;
         for document in &documents {
-            lib::nu::conform(document, &document_type)?;
+            harness::nu::conform(document, &document_type)?;
         }
         let text_bytes: usize = documents
             .iter()
@@ -458,14 +427,14 @@ pub(crate) fn mix_render(args: &MixRenderArgs) -> BquestResult<()> {
             .sum();
         let path = args.out.join(format!("documents_{}.nuon", spec_row.name));
         let count = documents.len();
-        lib::nu::save_value(&path, &lib::nu::Value::list(documents, span()))?;
+        harness::nu::save_value(&path, &harness::nu::Value::list(documents, span()))?;
         eprintln!(
             "mix render: {} - {count} documents, {text_bytes} text bytes -> {}",
             spec_row.name,
             path.display()
         );
-        summary_rows.push(lib::nu::Value::record(
-            lib::nu::record! {
+        summary_rows.push(harness::nu::Value::record(
+            harness::nu::record! {
                 "name" => v_str(&spec_row.name),
                 "documents" => v_int(count as i64),
                 "text_bytes" => v_int(text_bytes as i64),
@@ -473,15 +442,15 @@ pub(crate) fn mix_render(args: &MixRenderArgs) -> BquestResult<()> {
             span(),
         ));
     }
-    let summary = lib::nu::Value::record(
-        lib::nu::record! {
-            "rendered" => lib::nu::Value::list(summary_rows, span()),
+    let summary = harness::nu::Value::record(
+        harness::nu::record! {
+            "rendered" => harness::nu::Value::list(summary_rows, span()),
             "out" => v_str(&args.out.display().to_string()),
             "seconds" => v_float(started.elapsed().as_secs_f64()),
         },
         span(),
     );
-    println!("{}", lib::nu::to_nuon_text(&summary)?);
+    println!("{}", harness::nu::to_nuon_text(&summary)?);
     Ok(())
 }
 
@@ -493,7 +462,7 @@ pub(crate) fn mix_rip(args: &MixRipArgs) -> BquestResult<()> {
         Ok(decoder) => decoder,
         Err(e) => snafu::whatever!("{}: zstd decode failed: {e}", args.shard.display()),
     };
-    let document_type = lib::nu::parse_typedef(MIX_DOCUMENT_TYPEDEF)?;
+    let document_type = harness::nu::parse_typedef(MIX_DOCUMENT_TYPEDEF)?;
     let shard_path = match &args.shard_path {
         Some(path) => path.clone(),
         None => args
@@ -505,7 +474,7 @@ pub(crate) fn mix_rip(args: &MixRipArgs) -> BquestResult<()> {
     };
     let stamp = args.stamp.clone().unwrap_or_default();
 
-    let mut documents: Vec<lib::nu::Value> = Vec::new();
+    let mut documents: Vec<harness::nu::Value> = Vec::new();
     let mut text_bytes = 0usize;
     let mut seen = 0usize;
     let mut without_text = 0usize;
@@ -535,15 +504,15 @@ pub(crate) fn mix_rip(args: &MixRipArgs) -> BquestResult<()> {
             Some(id) => id.to_string(),
             None => format!("{}/{shard_path}#{seen}", args.name),
         };
-        let document = lib::nu::Value::record(
-            lib::nu::record! {
+        let document = harness::nu::Value::record(
+            harness::nu::record! {
                 "id" => v_str(&id),
                 "text" => v_str(text),
                 "source" => v_str(&args.name),
                 "added" => v_str(&stamp),
                 "created" => v_str(&stamp),
-                "metadata" => lib::nu::Value::record(
-                    lib::nu::record! {
+                "metadata" => harness::nu::Value::record(
+                    harness::nu::record! {
                         "repo" => v_str(&args.hub),
                         "path" => v_str(&shard_path),
                         "language" => v_str("text"),
@@ -555,7 +524,7 @@ pub(crate) fn mix_rip(args: &MixRipArgs) -> BquestResult<()> {
             },
             span(),
         );
-        lib::nu::conform(&document, &document_type)?;
+        harness::nu::conform(&document, &document_type)?;
         text_bytes += text.len();
         documents.push(document);
     }
@@ -566,10 +535,10 @@ pub(crate) fn mix_rip(args: &MixRipArgs) -> BquestResult<()> {
         "{}: no documents carried text (read {seen} rows)",
         args.shard.display()
     );
-    lib::nu::save_value(&args.out, &lib::nu::Value::list(documents, span()))?;
+    harness::nu::save_value(&args.out, &harness::nu::Value::list(documents, span()))?;
 
-    let provenance = lib::nu::Value::record(
-        lib::nu::record! {
+    let provenance = harness::nu::Value::record(
+        harness::nu::record! {
             "shard" => v_str(&args.shard.display().to_string()),
             "shard_path" => v_str(&shard_path),
             "name" => v_str(&args.name),
@@ -584,10 +553,10 @@ pub(crate) fn mix_rip(args: &MixRipArgs) -> BquestResult<()> {
         },
         span(),
     );
-    lib::nu::save_value(&args.out.with_extension("provenance.nuon"), &provenance)?;
+    harness::nu::save_value(&args.out.with_extension("provenance.nuon"), &provenance)?;
 
-    let summary = lib::nu::Value::record(
-        lib::nu::record! {
+    let summary = harness::nu::Value::record(
+        harness::nu::record! {
             "name" => v_str(&args.name),
             "documents_taken" => v_int(taken as i64),
             "documents_read" => v_int(seen as i64),
@@ -598,6 +567,6 @@ pub(crate) fn mix_rip(args: &MixRipArgs) -> BquestResult<()> {
         },
         span(),
     );
-    println!("{}", lib::nu::to_nuon_text(&summary)?);
+    println!("{}", harness::nu::to_nuon_text(&summary)?);
     Ok(())
 }

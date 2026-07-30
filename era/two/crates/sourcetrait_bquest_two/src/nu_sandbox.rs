@@ -91,11 +91,11 @@ pub(crate) fn run_nu(source: &str, timeout: std::time::Duration) -> BquestResult
 }
 
 /// The VALUE a pipeline produced, or None if it produced no NUON.
-pub(crate) fn pipeline_value(source: &str) -> BquestResult<Option<lib::nu::Value>> {
+pub(crate) fn pipeline_value(source: &str) -> BquestResult<Option<harness::nu::Value>> {
     let wrapped = format!("({source}) | to nuon");
     let outcome = run_nu(&wrapped, DEFAULT_TIMEOUT)?;
     if !outcome.ok {
         return Ok(None);
     }
-    Ok(lib::nu::from_nuon_text(outcome.stdout.trim()).ok())
+    Ok(harness::nu::from_nuon_text(outcome.stdout.trim()).ok())
 }

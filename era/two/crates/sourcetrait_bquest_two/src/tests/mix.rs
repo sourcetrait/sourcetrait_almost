@@ -18,9 +18,9 @@ fn mix_render_documents_are_verbatim_sorted_and_typed() {
     std::fs::write(corpus.join("nested/a_first.md"), markdown_text).expect("md file");
 
     let spec_path = root.join("spec.nuon");
-    let spec = lib::nu::Value::list(
-        vec![lib::nu::Value::record(
-            lib::nu::record! {
+    let spec = harness::nu::Value::list(
+        vec![harness::nu::Value::record(
+            harness::nu::record! {
                 "name" => v_str("probe"),
                 "corpus_dir" => v_str(&corpus.display().to_string()),
                 "repo" => v_str("example/probe"),
@@ -31,7 +31,7 @@ fn mix_render_documents_are_verbatim_sorted_and_typed() {
         )],
         span(),
     );
-    lib::nu::save_value(&spec_path, &spec).expect("spec write");
+    harness::nu::save_value(&spec_path, &spec).expect("spec write");
 
     let out = root.join("out");
     mix_render(&MixRenderArgs {
@@ -41,21 +41,21 @@ fn mix_render_documents_are_verbatim_sorted_and_typed() {
     })
     .expect("render");
 
-    let documents = lib::nu::load_value(&out.join("documents_probe.nuon")).expect("documents");
+    let documents = harness::nu::load_value(&out.join("documents_probe.nuon")).expect("documents");
     let documents_type =
-        lib::nu::parse_typedef(&format!("list<{}>", crate::mix::MIX_DOCUMENT_TYPEDEF))
+        harness::nu::parse_typedef(&format!("list<{}>", crate::mix::MIX_DOCUMENT_TYPEDEF))
             .expect("documents typedef");
-    lib::nu::conform(&documents, &documents_type).expect("documents conform");
+    harness::nu::conform(&documents, &documents_type).expect("documents conform");
     let rows = documents.as_list().expect("rows");
     assert_eq!(rows.len(), 2);
 
     // Sorted walk: nested/a_first.md precedes z_last.rs.
     let first = rows[0].as_record().expect("first row");
     let second = rows[1].as_record().expect("second row");
-    let text_of = |record: &lib::nu::Record| {
+    let text_of = |record: &harness::nu::Record| {
         record.get("text").expect("text").as_str().expect("str").to_string()
     };
-    let meta_of = |record: &lib::nu::Record, field: &str| {
+    let meta_of = |record: &harness::nu::Record, field: &str| {
         record
             .get("metadata")
             .expect("metadata")
@@ -87,7 +87,7 @@ fn mix_render_documents_are_verbatim_sorted_and_typed() {
 
 #[test]
 fn fim_transform_is_seeded_deterministic_and_reassembles() {
-    use crate::mix::{FIM_MIDDLE, FIM_PREFIX, FIM_SUFFIX, SplitMix64, fim_transform};
+    use crate::mix::{FIM_MIDDLE, FIM_PREFIX, FIM_SUFFIX, fim_transform};
 
     let text = "fn main() {\n    let naïve = \"héllo\";\n    println!(\"{naïve}\");\n}\n";
     let render_all = |seed: u64| -> Vec<String> {
@@ -130,7 +130,7 @@ fn fim_transform_is_seeded_deterministic_and_reassembles() {
 
 #[test]
 fn chunk_and_shuffle_is_seeded_lossless_and_tail_dropping() {
-    use crate::mix::{SplitMix64, chunk_and_shuffle};
+    use crate::mix::chunk_and_shuffle;
 
     let stream: Vec<u32> = (0..107).collect();
     let seq_len = 9usize;
@@ -157,10 +157,10 @@ fn chunk_and_shuffle_is_seeded_lossless_and_tail_dropping() {
 
 #[test]
 fn tokenize_documents_joins_with_eos_and_fims_code_only() {
-    use crate::mix::{PackDocument, SplitMix64, tokenize_documents};
+    use crate::mix::{PackDocument, tokenize_documents};
 
-    let model_dir = lib::model_dir(lib::consts::DPO_MODEL_NAME).expect("model home");
-    let tokenizer = lib::load_tokenizer(&model_dir).expect("tokenizer (checkpoint-backed)");
+    let model_dir = llm::model_dir(llm::consts::DPO_MODEL_NAME).expect("model home");
+    let tokenizer = llm::load_tokenizer(&model_dir).expect("tokenizer (checkpoint-backed)");
     let eos_id = tokenizer.token_to_id("<|endoftext|>").expect("eos id");
     let fim_prefix_id = tokenizer.token_to_id("<|fim_prefix|>").expect("fim prefix id");
     let fim_middle_id = tokenizer.token_to_id("<|fim_middle|>").expect("fim middle id");
@@ -211,15 +211,15 @@ fn mix_sample_is_deterministic_and_budget_crossing() {
     let dir = std::env::temp_dir().join(format!("bquest_mix_sample_{}", std::process::id()));
     fs::create_dir_all(&dir).expect("temp dir");
     let doc = |id: &str, text: &str| {
-        lib::nu::Value::record(
-            lib::nu::record! {
+        harness::nu::Value::record(
+            harness::nu::record! {
                 "id" => v_str(id),
                 "text" => v_str(text),
                 "source" => v_str("toy/repo"),
                 "added" => v_str(""),
                 "created" => v_str(""),
-                "metadata" => lib::nu::Value::record(
-                    lib::nu::record! {
+                "metadata" => harness::nu::Value::record(
+                    harness::nu::record! {
                         "repo" => v_str("toy/repo"),
                         "path" => v_str(id),
                         "language" => v_str("text"),
@@ -232,7 +232,7 @@ fn mix_sample_is_deterministic_and_budget_crossing() {
             span(),
         )
     };
-    let table = lib::nu::Value::list(
+    let table = harness::nu::Value::list(
         vec![
             doc("a", &"a".repeat(10)),
             doc("b", &"b".repeat(20)),
@@ -242,7 +242,7 @@ fn mix_sample_is_deterministic_and_budget_crossing() {
         span(),
     );
     let table_path = dir.join("documents_toy.nuon");
-    lib::nu::save_value(&table_path, &table).expect("table write");
+    harness::nu::save_value(&table_path, &table).expect("table write");
 
     let out_first = dir.join("sampled_first.nuon");
     let out_second = dir.join("sampled_second.nuon");
@@ -263,7 +263,7 @@ fn mix_sample_is_deterministic_and_budget_crossing() {
         "same seed must sample identically"
     );
 
-    let sampled = lib::nu::load_value(&out_first).expect("sampled parses");
+    let sampled = harness::nu::load_value(&out_first).expect("sampled parses");
     let rows = sampled.as_list().expect("list").to_vec();
     let bytes: usize = rows
         .iter()
@@ -335,10 +335,10 @@ fn mix_rip_decodes_a_shard_into_verbatim_documents() {
     let out = root.join("documents_theirside.nuon");
     rip(&out, 10_000_000);
 
-    let documents = lib::nu::load_value(&out).expect("documents");
-    lib::nu::conform(
+    let documents = harness::nu::load_value(&out).expect("documents");
+    harness::nu::conform(
         &documents,
-        &lib::nu::parse_typedef(&format!("list<{}>", crate::mix::MIX_DOCUMENT_TYPEDEF))
+        &harness::nu::parse_typedef(&format!("list<{}>", crate::mix::MIX_DOCUMENT_TYPEDEF))
             .expect("typedef"),
     )
     .expect("documents conform");
@@ -391,7 +391,7 @@ fn mix_rip_decodes_a_shard_into_verbatim_documents() {
     }
 
     let provenance =
-        lib::nu::load_value(&out.with_extension("provenance.nuon")).expect("provenance");
+        harness::nu::load_value(&out.with_extension("provenance.nuon")).expect("provenance");
     let provenance = provenance.as_record().expect("provenance record");
     let count = |name: &str| provenance.get(name).expect(name).as_int().expect("int");
     assert_eq!(count("documents_read"), 5);
@@ -406,7 +406,7 @@ fn mix_rip_decodes_a_shard_into_verbatim_documents() {
     // first document, which overshoots it.
     let small = root.join("documents_small.nuon");
     rip(&small, 1);
-    let rows = lib::nu::load_value(&small).expect("small");
+    let rows = harness::nu::load_value(&small).expect("small");
     assert_eq!(
         rows.as_list().expect("rows").len(),
         1,

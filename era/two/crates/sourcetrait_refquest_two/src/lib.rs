@@ -12,9 +12,6 @@ pub(crate) mod generate;
 pub(crate) mod pyenv;
 
 #[allow(unused_imports)]
-pub(crate) use sourcetrait_lib_quest_two as lib;
-
-#[allow(unused_imports)]
 pub(crate) use std::{
     env,
     fs,

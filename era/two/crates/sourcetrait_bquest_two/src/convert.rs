@@ -21,48 +21,48 @@ const PREDICTION_TYPEDEF: &str = "record<doc_id: int, \
      is_greedy: bool, num_chars: int>, \
      label: oneof<int, string, nothing>, final_output: string>";
 
-pub(crate) fn span() -> lib::nu::Span {
-    lib::nu::Span::unknown()
+pub(crate) fn span() -> harness::nu::Span {
+    harness::nu::Span::unknown()
 }
 
-pub(crate) fn v_int(value: i64) -> lib::nu::Value {
-    lib::nu::Value::int(value, span())
+pub(crate) fn v_int(value: i64) -> harness::nu::Value {
+    harness::nu::Value::int(value, span())
 }
 
-pub(crate) fn v_float(value: f64) -> lib::nu::Value {
-    lib::nu::Value::float(value, span())
+pub(crate) fn v_float(value: f64) -> harness::nu::Value {
+    harness::nu::Value::float(value, span())
 }
 
-pub(crate) fn v_str(value: &str) -> lib::nu::Value {
-    lib::nu::Value::string(value, span())
+pub(crate) fn v_str(value: &str) -> harness::nu::Value {
+    harness::nu::Value::string(value, span())
 }
 
-pub(crate) fn v_bool(value: bool) -> lib::nu::Value {
-    lib::nu::Value::bool(value, span())
+pub(crate) fn v_bool(value: bool) -> harness::nu::Value {
+    harness::nu::Value::bool(value, span())
 }
 
-pub(crate) fn v_int_list(ids: &[u32]) -> lib::nu::Value {
-    lib::nu::Value::list(ids.iter().map(|id| v_int(*id as i64)).collect(), span())
+pub(crate) fn v_int_list(ids: &[u32]) -> harness::nu::Value {
+    harness::nu::Value::list(ids.iter().map(|id| v_int(*id as i64)).collect(), span())
 }
 
 pub(crate) fn field<'a>(
-    record: &'a lib::nu::Record,
+    record: &'a harness::nu::Record,
     name: &str,
-) -> BquestResult<&'a lib::nu::Value> {
+) -> BquestResult<&'a harness::nu::Value> {
     match record.get(name) {
         Some(value) => Ok(value),
         None => snafu::whatever!("missing field {name}"),
     }
 }
 
-pub(crate) fn field_str(record: &lib::nu::Record, name: &str) -> BquestResult<String> {
+pub(crate) fn field_str(record: &harness::nu::Record, name: &str) -> BquestResult<String> {
     match field(record, name)?.as_str() {
         Ok(text) => Ok(text.to_string()),
         Err(e) => snafu::whatever!("field {name}: {e}"),
     }
 }
 
-pub(crate) fn field_int(record: &lib::nu::Record, name: &str) -> BquestResult<i64> {
+pub(crate) fn field_int(record: &harness::nu::Record, name: &str) -> BquestResult<i64> {
     match field(record, name)?.as_int() {
         Ok(value) => Ok(value),
         Err(e) => snafu::whatever!("field {name}: {e}"),
@@ -70,9 +70,9 @@ pub(crate) fn field_int(record: &lib::nu::Record, name: &str) -> BquestResult<i6
 }
 
 pub(crate) fn field_rows<'a>(
-    record: &'a lib::nu::Record,
+    record: &'a harness::nu::Record,
     name: &str,
-) -> BquestResult<Vec<&'a lib::nu::Record>> {
+) -> BquestResult<Vec<&'a harness::nu::Record>> {
     let value = field(record, name)?;
     let list = match value.as_list() {
         Ok(list) => list,
@@ -88,7 +88,7 @@ pub(crate) fn field_rows<'a>(
     Ok(rows)
 }
 
-pub(crate) fn field_ids(record: &lib::nu::Record, name: &str) -> BquestResult<Vec<u32>> {
+pub(crate) fn field_ids(record: &harness::nu::Record, name: &str) -> BquestResult<Vec<u32>> {
     let value = field(record, name)?;
     let list = match value.as_list() {
         Ok(list) => list,
@@ -105,7 +105,7 @@ pub(crate) fn field_ids(record: &lib::nu::Record, name: &str) -> BquestResult<Ve
 }
 
 pub(crate) fn field_strings(
-    record: &lib::nu::Record,
+    record: &harness::nu::Record,
     name: &str,
 ) -> BquestResult<Vec<String>> {
     let value = field(record, name)?;
@@ -124,24 +124,24 @@ pub(crate) fn field_strings(
 }
 
 /// nu Value to JSON, the exact inverse of json_to_value.
-pub(crate) fn value_to_json(value: &lib::nu::Value) -> BquestResult<serde_json::Value> {
+pub(crate) fn value_to_json(value: &harness::nu::Value) -> BquestResult<serde_json::Value> {
     Ok(match value {
-        lib::nu::Value::Nothing { .. } => serde_json::Value::Null,
-        lib::nu::Value::Bool { val, .. } => serde_json::Value::Bool(*val),
-        lib::nu::Value::Int { val, .. } => serde_json::Value::Number((*val).into()),
-        lib::nu::Value::Float { val, .. } => match serde_json::Number::from_f64(*val) {
+        harness::nu::Value::Nothing { .. } => serde_json::Value::Null,
+        harness::nu::Value::Bool { val, .. } => serde_json::Value::Bool(*val),
+        harness::nu::Value::Int { val, .. } => serde_json::Value::Number((*val).into()),
+        harness::nu::Value::Float { val, .. } => match serde_json::Number::from_f64(*val) {
             Some(number) => serde_json::Value::Number(number),
             None => snafu::whatever!("non-finite float cannot render to JSON"),
         },
-        lib::nu::Value::String { val, .. } => serde_json::Value::String(val.clone()),
-        lib::nu::Value::List { vals, .. } => {
+        harness::nu::Value::String { val, .. } => serde_json::Value::String(val.clone()),
+        harness::nu::Value::List { vals, .. } => {
             let mut items = Vec::with_capacity(vals.len());
             for item in vals {
                 items.push(value_to_json(item)?);
             }
             serde_json::Value::Array(items)
         }
-        lib::nu::Value::Record { val, .. } => {
+        harness::nu::Value::Record { val, .. } => {
             let mut map = serde_json::Map::new();
             for (key, item) in val.iter() {
                 map.insert(key.clone(), value_to_json(item)?);
@@ -153,9 +153,9 @@ pub(crate) fn value_to_json(value: &lib::nu::Value) -> BquestResult<serde_json::
 }
 
 /// JSON to nu Value, lossless field for field.
-pub(crate) fn json_to_value(json: &serde_json::Value) -> BquestResult<lib::nu::Value> {
+pub(crate) fn json_to_value(json: &serde_json::Value) -> BquestResult<harness::nu::Value> {
     Ok(match json {
-        serde_json::Value::Null => lib::nu::Value::nothing(span()),
+        serde_json::Value::Null => harness::nu::Value::nothing(span()),
         serde_json::Value::Bool(flag) => v_bool(*flag),
         serde_json::Value::Number(number) => {
             if let Some(int) = number.as_i64() {
@@ -174,14 +174,14 @@ pub(crate) fn json_to_value(json: &serde_json::Value) -> BquestResult<lib::nu::V
             for item in items {
                 values.push(json_to_value(item)?);
             }
-            lib::nu::Value::list(values, span())
+            harness::nu::Value::list(values, span())
         }
         serde_json::Value::Object(map) => {
-            let mut record = lib::nu::Record::new();
+            let mut record = harness::nu::Record::new();
             for (key, value) in map {
                 record.push(key.clone(), json_to_value(value)?);
             }
-            lib::nu::Value::record(record, span())
+            harness::nu::Value::record(record, span())
         }
     })
 }
@@ -251,10 +251,10 @@ pub(crate) fn epoch_seconds() -> i64 {
 }
 
 /// The typedef a request row must conform to, by its request_type.
-fn request_typedef(request_type: &str) -> BquestResult<lib::nu::Type> {
+fn request_typedef(request_type: &str) -> BquestResult<harness::nu::Type> {
     match request_type {
-        "loglikelihood" => Ok(lib::nu::parse_typedef(REQUEST_LOGLIKELIHOOD_TYPEDEF)?),
-        "generate_until" => Ok(lib::nu::parse_typedef(REQUEST_GENERATE_TYPEDEF)?),
+        "loglikelihood" => Ok(harness::nu::parse_typedef(REQUEST_LOGLIKELIHOOD_TYPEDEF)?),
+        "generate_until" => Ok(harness::nu::parse_typedef(REQUEST_GENERATE_TYPEDEF)?),
         other => snafu::whatever!("unsupported request_type {other:?}"),
     }
 }
@@ -273,10 +273,10 @@ fn convert_file(
     run: Option<&str>,
 ) -> BquestResult<usize> {
     let text = fs::read_to_string(source)?;
-    let mut rows: Vec<lib::nu::Value> = Vec::new();
-    let mut request_type_cache: Option<lib::nu::Type> = None;
+    let mut rows: Vec<harness::nu::Value> = Vec::new();
+    let mut request_type_cache: Option<harness::nu::Type> = None;
     let prediction_typedef = match kind {
-        SourceKind::Predictions => Some(lib::nu::parse_typedef(PREDICTION_TYPEDEF)?),
+        SourceKind::Predictions => Some(harness::nu::parse_typedef(PREDICTION_TYPEDEF)?),
         SourceKind::Requests => None,
     };
     for (index, line) in text.lines().enumerate() {
@@ -301,16 +301,16 @@ fn convert_file(
             }
             SourceKind::Predictions => prediction_typedef.as_ref().expect("built"),
         };
-        if let Err(e) = lib::nu::conform(&value, declared) {
+        if let Err(e) = harness::nu::conform(&value, declared) {
             snafu::whatever!("{}:{}: {e}", source.display(), index + 1);
         }
         rows.push(value);
     }
     snafu::ensure_whatever!(!rows.is_empty(), "{}: no rows", source.display());
 
-    lib::nu::save_value(dest, &lib::nu::Value::list(rows.clone(), span()))?;
+    harness::nu::save_value(dest, &harness::nu::Value::list(rows.clone(), span()))?;
 
-    let reloaded = lib::nu::load_value(dest)?;
+    let reloaded = harness::nu::load_value(dest)?;
     let reloaded_rows = match reloaded.as_list() {
         Ok(list) => list,
         Err(e) => snafu::whatever!("{}: reloaded value is not a table: {e}", dest.display()),
@@ -338,20 +338,20 @@ fn convert_file(
         mismatches.iter().take(8).collect::<Vec<_>>()
     );
 
-    let mut provenance = lib::nu::record! {
+    let mut provenance = harness::nu::record! {
         "source" => v_str(&source.display().to_string()),
         "task" => v_str(task),
         "items" => v_int(rows.len() as i64),
         "sha256" => v_str(&sha256_hex(source)?),
         "run" => match run {
             Some(name) => v_str(name),
-            None => lib::nu::Value::nothing(span()),
+            None => harness::nu::Value::nothing(span()),
         },
     };
     provenance.push("bquest_version", v_str(env!("CARGO_PKG_VERSION")));
     provenance.push("converted_at", v_int(epoch_seconds()));
     let provenance_path = dest.with_extension("provenance.nuon");
-    lib::nu::save_value(&provenance_path, &lib::nu::Value::record(provenance, span()))?;
+    harness::nu::save_value(&provenance_path, &harness::nu::Value::record(provenance, span()))?;
 
     Ok(rows.len())
 }
@@ -456,11 +456,11 @@ pub(crate) fn capability_convert(args: &CapabilityConvertArgs) -> BquestResult<(
         }
     }
 
-    let summary = lib::nu::Value::record(
-        lib::nu::record! {
+    let summary = harness::nu::Value::record(
+        harness::nu::record! {
             "fixture_files" => v_int(fixture_files as i64),
             "fixture_items" => v_int(fixture_items as i64),
-            "runs" => lib::nu::Value::list(
+            "runs" => harness::nu::Value::list(
                 run_names.iter().map(|name| v_str(name)).collect(),
                 span(),
             ),
@@ -471,6 +471,6 @@ pub(crate) fn capability_convert(args: &CapabilityConvertArgs) -> BquestResult<(
         },
         span(),
     );
-    println!("{}", lib::nu::to_nuon_text(&summary)?);
+    println!("{}", harness::nu::to_nuon_text(&summary)?);
     Ok(())
 }

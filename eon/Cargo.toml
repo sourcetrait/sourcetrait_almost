@@ -41,7 +41,7 @@ snafu = { version = "0.9" }
 # sourcetrait projects home, so the sibling assumption is the standing
 # checkout layout rather than one machine's.
 sourcetrait_cert_lib = { path = "../../sourcetrait_cert/crates/sourcetrait_cert_lib" }
-sourcetrait_lib_quest_two = { path = "../era/two/crates/sourcetrait_lib_quest_two" }
+sourcetrait_lib_quest_harness_two = { path = "../era/two/crates/sourcetrait_lib_quest_harness_two" }
 sourcetrait_quest_bridge = { path = "crates/sourcetrait_quest_bridge" }
 sourcetrait_quest_bridge_two = { path = "../era/two/crates/sourcetrait_quest_bridge_two" }
 tokenizers = { version = "0.23" }

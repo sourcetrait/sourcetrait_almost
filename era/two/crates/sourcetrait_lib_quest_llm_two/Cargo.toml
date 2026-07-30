@@ -1,0 +1,49 @@
+[package]
+name = "sourcetrait_lib_quest_llm_two"
+version = "0.0.0-1"
+edition = "2024"
+description = "The era-two LLM inference engine and trainer core"
+authors = ["SourceTrait <development@sourcetrait.com>"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/sourcetrait/sourcetrait_quest"
+homepage = "https://sourcetrait.com"
+categories = []
+keywords = ["sourcetrait", "quest", "llm"]
+
+[features]
+attn-profile = []
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "dep:cudarc", "dep:half"]
+flash-attn = ["cuda", "dep:candle-flash-attn"]
+# The burn oracle: the third stack of the parity triangle (no autodiff).
+# half rides along for the shard reader's bf16 decode on every grade.
+oracle = ["dep:burn", "dep:half"]
+# The trainer stages (burn autodiff over the oracle stack).
+train = ["oracle", "burn/autodiff"]
+# Training on cuda WITHOUT autotune - the era-one lesson: autotune's
+# benchmark churn at high residency kills the cubecl allocator;
+# default kernel selection trades speed for a bounded pool.
+train-cuda = ["train", "burn/cuda"]
+# The oracle's fast grade (comparison-grade bf16; autotune per the
+# era-one oracle posture - training builds gate it off).
+burn-cuda = ["oracle", "burn/cuda", "burn/autotune"]
+
+# The cuda-gated needle and profile tests write their ratchet artifacts
+# as NUON through the harness lib's nu module. A dev-dependency cycle is
+# legal and keeps the shipped graph engine-only.
+[dev-dependencies]
+sourcetrait_lib_quest_harness_two.workspace = true
+
+[dependencies]
+burn = { workspace = true, optional = true }
+candle-core.workspace = true
+candle-flash-attn = { workspace = true, optional = true }
+candle-nn.workspace = true
+candle-transformers.workspace = true
+cudarc = { workspace = true, optional = true }
+half = { workspace = true, optional = true }
+safetensors.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+snafu.workspace = true
+tokenizers.workspace = true
+toml.workspace = true

@@ -20,8 +20,8 @@ impl bridge::all::Era for BridgeTwo {
             era: String::from("two"),
             model: format!(
                 "{}/{}",
-                lib::consts::MODEL_AUTHOR,
-                lib::consts::DPO_MODEL_NAME
+                llm::consts::MODEL_AUTHOR,
+                llm::consts::DPO_MODEL_NAME
             ),
         }
     }
@@ -41,7 +41,7 @@ impl bridge::all::Era for BridgeTwo {
 /// is the conversion between the `Infer*` forms and what the library's
 /// own turn speaks.
 pub struct TwoQuestness {
-    inner: lib::Questness,
+    inner: harness::Questness,
 }
 
 impl TwoQuestness {
@@ -49,7 +49,7 @@ impl TwoQuestness {
         // The boundary aliases the trained tool-marker attractor until
         // channel-marker routing is trained, which 10_Channels measures
         // as dead at zero of six without it.
-        let inner = lib::Questness::new(lib::channel::Aliasing::ToolMarkers).map_err(message_of)?;
+        let inner = harness::Questness::new(harness::channel::Aliasing::ToolMarkers).map_err(message_of)?;
         Ok(Self { inner })
     }
 }
@@ -64,16 +64,16 @@ impl bridge::all::Questness for TwoQuestness {
         }
         let config = match &request.config {
             Some(config) => config.0.0.clone(),
-            None => lib::nu::Value::record(lib::nu::Record::new(), lib::nu::Span::unknown()),
+            None => harness::nu::Value::record(harness::nu::Record::new(), harness::nu::Span::unknown()),
         };
         let bindings = request
             .inputs
             .iter()
-            .map(|(pass, input)| lib::Binding::new(pass.spelling(), input.value().0.clone()))
+            .map(|(pass, input)| harness::Binding::new(pass.spelling(), input.value().0.clone()))
             .collect();
         let assembled = self
             .inner
-            .assemble(&lib::Request {
+            .assemble(&harness::Request {
                 config,
                 prompt: request.text.as_ref().map(|text| text.0.clone()).unwrap_or_default(),
                 bindings,
@@ -88,16 +88,16 @@ impl bridge::all::Questness for TwoQuestness {
         insufficient: bool,
     ) -> Result<bridge::all::Step, String> {
         Ok(match self.inner.step(emission, insufficient).map_err(message_of)? {
-            lib::Step::Continue(text) => bridge::all::Step::Continue(text),
-            lib::Step::Insufficient => bridge::all::Step::Insufficient,
-            lib::Step::Ask { form, bindings } => bridge::all::Step::Ask {
+            harness::Step::Continue(text) => bridge::all::Step::Continue(text),
+            harness::Step::Insufficient => bridge::all::Step::Insufficient,
+            harness::Step::Ask { form, bindings } => bridge::all::Step::Ask {
                 form,
                 inputs: bindings
                     .iter()
                     .map(bound)
                     .collect::<Result<Vec<_>, String>>()?,
             },
-            lib::Step::Answered(answer) => bridge::all::Step::Answered {
+            harness::Step::Answered(answer) => bridge::all::Step::Answered {
                 output: answer.value.map(|value| {
                     bridge::InferOutput::Nuon(bridge::InferNuonOutput(bridge::InferValue(value)))
                 }),
@@ -109,7 +109,7 @@ impl bridge::all::Questness for TwoQuestness {
                     .config
                     .map(|value| bridge::InferConfig(bridge::InferValue(value))),
             },
-            lib::Step::Repair(envelope) => bridge::all::Step::Repair(
+            harness::Step::Repair(envelope) => bridge::all::Step::Repair(
                 envelope
                     .errors
                     .iter()
@@ -126,7 +126,7 @@ impl bridge::all::Questness for TwoQuestness {
 
 /// One of the library's bindings as the pass-tagged input it is.
 fn bound(
-    binding: &lib::Binding,
+    binding: &harness::Binding,
 ) -> Result<(bridge::InferPass, bridge::InferInput), String> {
     let pass = bridge::InferPass::parse(&binding.pass).map_err(|error| error.to_string())?;
     let carried = bridge::InferValue(binding.value.clone());
@@ -135,7 +135,7 @@ fn bound(
 
 /// The model, its tokenizer, and the conversation so far.
 pub struct TwoEngine {
-    model: lib::OlmoHybrid,
+    model: llm::OlmoHybrid,
     tokenizer: tokenizers::Tokenizer,
     coordinate: String,
     trail: Vec<u32>,
@@ -152,10 +152,10 @@ impl TwoEngine {
     /// un-tokened run means for every other consumer.
     fn load(options: &bridge::all::ChatOptions) -> Result<Self, String> {
         let config =
-            lib::LibConfig::load_from_dir(options.dir.as_ref(), options.config.as_ref())
+            llm::LibConfig::load_from_dir(options.dir.as_ref(), options.config.as_ref())
                 .map_err(message_of)?;
         let mut settings =
-            lib::LibSettings::load_from_dir(options.dir.as_ref(), options.settings.as_ref())
+            llm::LibSettings::load_from_dir(options.dir.as_ref(), options.settings.as_ref())
                 .map_err(message_of)?;
         // Captured graphs bake buffer addresses, and a daemon restores
         // and clears across turns for the life of the process.
@@ -167,18 +167,18 @@ impl TwoEngine {
         #[cfg(feature = "cuda")]
         let (device, dtype) = (
             candle_core::Device::new_cuda(0)
-                .map_err(|source| message_of(source.into()))?,
+                .map_err(message_of)?,
             candle_core::DType::BF16,
         );
         #[cfg(not(feature = "cuda"))]
         let (device, dtype) = (candle_core::Device::Cpu, candle_core::DType::F32);
 
         let model_dir = config.model_dir();
-        let checkpoint = lib::load_config(&model_dir).map_err(message_of)?;
-        let tokenizer = lib::load_tokenizer(&model_dir).map_err(message_of)?;
-        lib::verify_token_map(&tokenizer).map_err(message_of)?;
-        let weights = lib::load_weights(&config, dtype, &device).map_err(message_of)?;
-        let model = lib::OlmoHybrid::new(&checkpoint, settings, weights).map_err(message_of)?;
+        let checkpoint = llm::load_config(&model_dir).map_err(message_of)?;
+        let tokenizer = llm::load_tokenizer(&model_dir).map_err(message_of)?;
+        llm::verify_token_map(&tokenizer).map_err(message_of)?;
+        let weights = llm::load_weights(&config, dtype, &device).map_err(message_of)?;
+        let model = llm::OlmoHybrid::new(&checkpoint, settings, weights).map_err(message_of)?;
 
         Ok(Self {
             model,
@@ -215,7 +215,7 @@ impl bridge::all::Engine for TwoEngine {
         let started = if self.trail.is_empty() {
             self.model.generate(&self.tokenizer, text, &options)
         } else {
-            let restored = lib::RestoredContext {
+            let restored = llm::RestoredContext {
                 context_len: self.model.context_len(),
                 context_ids: self.trail.clone(),
             };
@@ -246,8 +246,8 @@ impl bridge::all::Engine for TwoEngine {
 
         Ok(bridge::all::TurnReport {
             finish: match report.finish_reason {
-                Some(lib::FinishReason::StopToken) => bridge::all::FinishReason::StopToken,
-                Some(lib::FinishReason::SampleLen) => bridge::all::FinishReason::SampleLen,
+                Some(llm::FinishReason::StopToken) => bridge::all::FinishReason::StopToken,
+                Some(llm::FinishReason::SampleLen) => bridge::all::FinishReason::SampleLen,
                 None => bridge::all::FinishReason::Cancelled,
             },
             prompt_token_count: report.prompt_token_count,
@@ -266,6 +266,6 @@ impl bridge::all::Engine for TwoEngine {
 /// Library errors cross as TEXT, and that is the seam doing its job: an
 /// eon consumer must not have to name an era's error type to report a
 /// failure, or the API would leak the library it exists to hide.
-fn message_of(error: lib::LibQuestError) -> String {
+fn message_of<E: std::fmt::Display>(error: E) -> String {
     error.to_string()
 }

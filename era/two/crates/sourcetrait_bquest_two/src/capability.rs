@@ -118,8 +118,8 @@ fn row_pick(row: &[f32], token: u32) -> (f64, bool) {
 
 pub(crate) fn capability_run(cli: &Cli, args: &CapabilityRunArgs) -> BquestResult<()> {
     let started = std::time::Instant::now();
-    let config = lib::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
-    let settings = lib::LibSettings::load_from_dir(cli.dir.as_ref(), cli.settings.as_deref())?;
+    let config = llm::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
+    let settings = llm::LibSettings::load_from_dir(cli.dir.as_ref(), cli.settings.as_deref())?;
 
     let capability_home = data_home()?.join(CAPABILITY_HOME_RELATIVE);
     let fixtures = match &args.fixtures {
@@ -160,11 +160,11 @@ pub(crate) fn capability_run(cli: &Cli, args: &CapabilityRunArgs) -> BquestResul
     let (device, dtype) = (candle_core::Device::Cpu, candle_core::DType::F32);
 
     let model_dir = config.model_dir();
-    let checkpoint = lib::load_config(&model_dir)?;
-    let tokenizer = lib::load_tokenizer(&model_dir)?;
-    lib::verify_token_map(&tokenizer)?;
-    let weights = lib::load_weights(&config, dtype, &device)?;
-    let mut model = lib::OlmoHybrid::new(&checkpoint, settings, weights)?;
+    let checkpoint = llm::load_config(&model_dir)?;
+    let tokenizer = llm::load_tokenizer(&model_dir)?;
+    llm::verify_token_map(&tokenizer)?;
+    let weights = llm::load_weights(&config, dtype, &device)?;
+    let mut model = llm::OlmoHybrid::new(&checkpoint, settings, weights)?;
     eprintln!(
         "capability run: model {} loaded ({:.1}s)",
         config.model,
@@ -182,7 +182,7 @@ pub(crate) fn capability_run(cli: &Cli, args: &CapabilityRunArgs) -> BquestResul
             {
                 continue;
             }
-            let rows_value = lib::nu::load_value(file)?;
+            let rows_value = harness::nu::load_value(file)?;
             let rows_list = match rows_value.as_list() {
                 Ok(list) => list,
                 Err(e) => snafu::whatever!("{}: not a table: {e}", file.display()),
@@ -217,7 +217,7 @@ pub(crate) fn capability_run(cli: &Cli, args: &CapabilityRunArgs) -> BquestResul
             for row in &predictions {
                 prediction_values.push(json_to_value(&serde_json::to_value(row)?)?);
             }
-            lib::nu::save_value(&dest, &lib::nu::Value::list(prediction_values, span()))?;
+            harness::nu::save_value(&dest, &harness::nu::Value::list(prediction_values, span()))?;
             tasks_run += 1;
             items_run += predictions.len();
             eprintln!(
@@ -227,8 +227,8 @@ pub(crate) fn capability_run(cli: &Cli, args: &CapabilityRunArgs) -> BquestResul
             );
         }
         snafu::ensure_whatever!(tasks_run > 0, "no tasks matched");
-        let provenance = lib::nu::Value::record(
-            lib::nu::record! {
+        let provenance = harness::nu::Value::record(
+            harness::nu::record! {
                 "fixtures" => v_str(&fixtures.display().to_string()),
                 "model" => v_str(&config.model),
                 "settings" => v_str(&settings_token),
@@ -239,9 +239,9 @@ pub(crate) fn capability_run(cli: &Cli, args: &CapabilityRunArgs) -> BquestResul
             },
             span(),
         );
-        lib::nu::save_value(&out_root.join("provenance.nuon"), &provenance)?;
-        let summary = lib::nu::Value::record(
-            lib::nu::record! {
+        harness::nu::save_value(&out_root.join("provenance.nuon"), &provenance)?;
+        let summary = harness::nu::Value::record(
+            harness::nu::record! {
                 "tasks" => v_int(tasks_run as i64),
                 "items" => v_int(items_run as i64),
                 "seconds" => v_float(started.elapsed().as_secs_f64()),
@@ -249,7 +249,7 @@ pub(crate) fn capability_run(cli: &Cli, args: &CapabilityRunArgs) -> BquestResul
             },
             span(),
         );
-        println!("{}", lib::nu::to_nuon_text(&summary)?);
+        println!("{}", harness::nu::to_nuon_text(&summary)?);
         return Ok(());
     }
 
@@ -326,7 +326,7 @@ pub(crate) fn capability_bridge(args: &CapabilityBridgeArgs) -> BquestResult<()>
     );
     let mut items = 0usize;
     for file in &files {
-        let rows_value = lib::nu::load_value(file)?;
+        let rows_value = harness::nu::load_value(file)?;
         let rows = match rows_value.as_list() {
             Ok(list) => list,
             Err(e) => snafu::whatever!("{}: not a table: {e}", file.display()),
@@ -352,8 +352,8 @@ pub(crate) fn capability_bridge(args: &CapabilityBridgeArgs) -> BquestResult<()>
         fs::write(&dest, payload)?;
         items += rows.len();
     }
-    let summary = lib::nu::Value::record(
-        lib::nu::record! {
+    let summary = harness::nu::Value::record(
+        harness::nu::record! {
             "files" => v_int(files.len() as i64),
             "items" => v_int(items as i64),
             "seconds" => v_float(started.elapsed().as_secs_f64()),
@@ -361,7 +361,7 @@ pub(crate) fn capability_bridge(args: &CapabilityBridgeArgs) -> BquestResult<()>
         },
         span(),
     );
-    println!("{}", lib::nu::to_nuon_text(&summary)?);
+    println!("{}", harness::nu::to_nuon_text(&summary)?);
     Ok(())
 }
 
@@ -414,7 +414,7 @@ fn prediction_path(
 
 /// Log-likelihood rows: one shared prefill, then per continuation.
 fn run_loglikelihood_task(
-    model: &mut lib::OlmoHybrid,
+    model: &mut llm::OlmoHybrid,
     tokenizer: &tokenizers::Tokenizer,
     rows: &[RequestRow],
 ) -> BquestResult<Vec<PredictionRow>> {
@@ -519,7 +519,7 @@ fn run_loglikelihood_task(
 
 /// generate_until rows: greedy decode at the row's own cap.
 fn run_generation_task(
-    model: &mut lib::OlmoHybrid,
+    model: &mut llm::OlmoHybrid,
     tokenizer: &tokenizers::Tokenizer,
     rows: &[RequestRow],
 ) -> BquestResult<Vec<PredictionRow>> {
@@ -566,7 +566,7 @@ fn run_generation_task(
                     row.task_name,
                     row.doc_id
                 );
-                lib::chat_wrap(message["content"].as_str().unwrap_or_default())
+                llm::chat_wrap(message["content"].as_str().unwrap_or_default())
             }
             other => snafu::whatever!(
                 "unsupported context shape {other:?} (task {}, doc {})",
@@ -575,14 +575,14 @@ fn run_generation_task(
             ),
         };
 
-        let options = lib::GenerateOptions {
+        let options = llm::GenerateOptions {
             temperature: None,
             top_p: None,
             sample_len: max_gen_toks,
             chat: false,
             ignore_stops: false,
             speculate: false,
-            ..lib::GenerateOptions::default()
+            ..llm::GenerateOptions::default()
         };
         let mut generation = model.generate(tokenizer, &rendered, &options)?;
         let mut text = String::new();

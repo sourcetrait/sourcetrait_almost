@@ -20,14 +20,14 @@ pub(crate) const TENSOR_LOSS_MASK: &str = "loss_mask";
 
 /// One preference pair, messages already parsed.
 pub(crate) struct DpoExample {
-    pub(crate) prompt: Vec<lib::ChatMessage>,
+    pub(crate) prompt: Vec<llm::ChatMessage>,
     pub(crate) chosen: String,
     pub(crate) rejected: String,
 }
 
 /// One verifiable prompt, messages already parsed.
 pub(crate) struct RlvrExample {
-    pub(crate) prompt: Vec<lib::ChatMessage>,
+    pub(crate) prompt: Vec<llm::ChatMessage>,
     pub(crate) verifier: String,
     pub(crate) reference: String,
 }
@@ -39,19 +39,19 @@ pub(crate) struct PackedRow {
 }
 
 /// Read a message table into chat messages, aliases translated to wire.
-fn read_messages(rows: &[&lib::nu::Record]) -> BquestResult<Vec<lib::ChatMessage>> {
+fn read_messages(rows: &[&harness::nu::Record]) -> BquestResult<Vec<llm::ChatMessage>> {
     let mut messages = Vec::with_capacity(rows.len());
     for row in rows {
-        let role = lib::ChatRole::parse(&field_str(row, "role")?)?;
-        let content = lib::channel::authoring_to_wire(&field_str(row, "content")?);
-        messages.push(lib::ChatMessage::new(role, &content));
+        let role = llm::ChatRole::parse(&field_str(row, "role")?)?;
+        let content = harness::channel::authoring_to_wire(&field_str(row, "content")?);
+        messages.push(llm::ChatMessage::new(role, &content));
     }
     Ok(messages)
 }
 
-fn load_table(path: &Path, typedef: &str) -> BquestResult<Vec<lib::nu::Value>> {
-    let value = lib::nu::load_value(path)?;
-    lib::nu::conform(&value, &lib::nu::parse_typedef(typedef)?)?;
+fn load_table(path: &Path, typedef: &str) -> BquestResult<Vec<harness::nu::Value>> {
+    let value = harness::nu::load_value(path)?;
+    harness::nu::conform(&value, &harness::nu::parse_typedef(typedef)?)?;
     let rows = match value.as_list() {
         Ok(rows) => rows.to_vec(),
         Err(e) => snafu::whatever!("{}: not a table: {e}", path.display()),
@@ -60,7 +60,7 @@ fn load_table(path: &Path, typedef: &str) -> BquestResult<Vec<lib::nu::Value>> {
     Ok(rows)
 }
 
-fn as_record(value: &lib::nu::Value) -> BquestResult<&lib::nu::Record> {
+fn as_record(value: &harness::nu::Value) -> BquestResult<&harness::nu::Record> {
     match value.as_record() {
         Ok(record) => Ok(record),
         Err(e) => snafu::whatever!("example row: {e}"),
@@ -68,13 +68,13 @@ fn as_record(value: &lib::nu::Value) -> BquestResult<&lib::nu::Record> {
 }
 
 /// Load supervised examples: one message list per row.
-pub(crate) fn load_sft(path: &Path) -> BquestResult<Vec<Vec<lib::ChatMessage>>> {
+pub(crate) fn load_sft(path: &Path) -> BquestResult<Vec<Vec<llm::ChatMessage>>> {
     let mut examples = Vec::new();
     for row in load_table(path, SFT_TYPEDEF)? {
         let record = as_record(&row)?;
         let messages = read_messages(&field_rows(record, "messages")?)?;
         snafu::ensure_whatever!(
-            messages.iter().any(|m| m.role == Some(lib::ChatRole::Assistant)),
+            messages.iter().any(|m| m.role == Some(llm::ChatRole::Assistant)),
             "a supervised example carries no assistant turn, so it would train nothing"
         );
         examples.push(messages);
@@ -115,10 +115,10 @@ pub(crate) fn load_rlvr(path: &Path) -> BquestResult<Vec<RlvrExample>> {
 /// Render and encode a conversation, masked to its assistant spans.
 pub(crate) fn encode_supervised(
     tokenizer: &tokenizers::Tokenizer,
-    messages: &[lib::ChatMessage],
+    messages: &[llm::ChatMessage],
 ) -> BquestResult<(Vec<u32>, Vec<u8>)> {
-    let render = lib::chat_render(messages, false);
-    let encoded = lib::encode_render(tokenizer, &render)?;
+    let render = llm::chat_render(messages, false);
+    let encoded = llm::encode_render(tokenizer, &render)?;
     let mut mask = vec![0u8; encoded.ids.len()];
     for span in &encoded.assistant_spans {
         for slot in mask[span.start..span.end].iter_mut() {
@@ -131,10 +131,10 @@ pub(crate) fn encode_supervised(
 /// Render a prompt with the assistant opener appended.
 pub(crate) fn encode_prompt(
     tokenizer: &tokenizers::Tokenizer,
-    prompt: &[lib::ChatMessage],
+    prompt: &[llm::ChatMessage],
 ) -> BquestResult<Vec<u32>> {
-    let render = lib::chat_render(prompt, true);
-    Ok(lib::encode_render(tokenizer, &render)?.ids)
+    let render = llm::chat_render(prompt, true);
+    Ok(llm::encode_render(tokenizer, &render)?.ids)
 }
 
 /// Pad one encoded example to `width`, or None if it is too long.
@@ -159,7 +159,7 @@ pub(crate) fn write_pack(
     out: &Path,
     rows: &[PackedRow],
     width: usize,
-    provenance: lib::nu::Record,
+    provenance: harness::nu::Record,
 ) -> BquestResult<()> {
     snafu::ensure_whatever!(!rows.is_empty(), "no rows survived packing");
     let mut id_bytes: Vec<u8> = Vec::with_capacity(rows.len() * width * 4);
@@ -206,9 +206,9 @@ pub(crate) fn write_pack(
         Ok(()) => {}
         Err(e) => snafu::whatever!("pack write failed: {e}"),
     }
-    lib::nu::save_value(
+    harness::nu::save_value(
         &out.with_extension("nuon"),
-        &lib::nu::Value::record(provenance, span()),
+        &harness::nu::Value::record(provenance, span()),
     )?;
     Ok(())
 }
@@ -216,9 +216,9 @@ pub(crate) fn write_pack(
 /// `bquest mix instruct`: supervised examples, one whole per row.
 pub(crate) fn mix_instruct(cli: &Cli, args: &MixInstructArgs) -> BquestResult<()> {
     let started = std::time::Instant::now();
-    let config = lib::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
-    let tokenizer = lib::load_tokenizer(&config.model_dir())?;
-    lib::verify_token_map(&tokenizer)?;
+    let config = llm::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
+    let tokenizer = llm::load_tokenizer(&config.model_dir())?;
+    llm::verify_token_map(&tokenizer)?;
     let examples = load_sft(&args.examples)?;
     let width = args.seq_len + 1;
 
@@ -233,7 +233,7 @@ pub(crate) fn mix_instruct(cli: &Cli, args: &MixInstructArgs) -> BquestResult<()
             "an example rendered with no supervised position - its assistant \
              turn produced no tokens"
         );
-        match pack_row(ids, mask, width, lib::consts::TOKEN_PAD) {
+        match pack_row(ids, mask, width, llm::consts::TOKEN_PAD) {
             Some(row) => {
                 supervised_total += supervised;
                 rows.push(row);
@@ -249,7 +249,7 @@ pub(crate) fn mix_instruct(cli: &Cli, args: &MixInstructArgs) -> BquestResult<()
         );
     }
 
-    let provenance = lib::nu::record! {
+    let provenance = harness::nu::record! {
         "examples" => v_str(&args.examples.display().to_string()),
         "examples_available" => v_int(examples.len() as i64),
         "rows" => v_int(rows.len() as i64),
@@ -260,8 +260,8 @@ pub(crate) fn mix_instruct(cli: &Cli, args: &MixInstructArgs) -> BquestResult<()
     };
     write_pack(&args.out, &rows, width, provenance)?;
 
-    let summary = lib::nu::Value::record(
-        lib::nu::record! {
+    let summary = harness::nu::Value::record(
+        harness::nu::record! {
             "rows" => v_int(rows.len() as i64),
             "dropped_too_long" => v_int(dropped as i64),
             "supervised_tokens" => v_int(supervised_total as i64),
@@ -270,7 +270,7 @@ pub(crate) fn mix_instruct(cli: &Cli, args: &MixInstructArgs) -> BquestResult<()
         },
         span(),
     );
-    println!("{}", lib::nu::to_nuon_text(&summary)?);
+    println!("{}", harness::nu::to_nuon_text(&summary)?);
     Ok(())
 }
 
@@ -300,14 +300,14 @@ pub(crate) fn verify(verifier: &str, response: &str, reference: &str) -> BquestR
     verifier_known(verifier)?;
     Ok(match verifier {
         VERIFIER_NUON => {
-            let expected = lib::nu::from_nuon_text(reference)?;
-            match lib::nu::from_nuon_text(response.trim()) {
+            let expected = harness::nu::from_nuon_text(reference)?;
+            match harness::nu::from_nuon_text(response.trim()) {
                 Ok(actual) if actual == expected => 1.0,
                 _ => 0.0,
             }
         }
         VERIFIER_NU_VALUE => {
-            let expected = lib::nu::from_nuon_text(reference)?;
+            let expected = harness::nu::from_nuon_text(reference)?;
             match nu_sandbox::pipeline_value(response.trim())? {
                 Some(actual) if actual == expected => 1.0,
                 _ => 0.0,

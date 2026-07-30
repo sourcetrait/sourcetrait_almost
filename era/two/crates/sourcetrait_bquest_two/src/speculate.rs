@@ -30,7 +30,7 @@ struct TranscriptPlan {
     budget: usize,
 }
 
-fn read_plans(value: &lib::nu::Value) -> BquestResult<Vec<TranscriptPlan>> {
+fn read_plans(value: &harness::nu::Value) -> BquestResult<Vec<TranscriptPlan>> {
     let rows = match value.as_list() {
         Ok(list) => list,
         Err(e) => snafu::whatever!("the fixture plan must be a table: {e}"),
@@ -53,12 +53,12 @@ fn read_plans(value: &lib::nu::Value) -> BquestResult<Vec<TranscriptPlan>> {
 
 pub(crate) fn speculate_record(cli: &Cli, args: &SpeculateRecordArgs) -> BquestResult<()> {
     let started = std::time::Instant::now();
-    let config = lib::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
-    let settings = lib::LibSettings::load_from_dir(cli.dir.as_ref(), cli.settings.as_deref())?;
+    let config = llm::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
+    let settings = llm::LibSettings::load_from_dir(cli.dir.as_ref(), cli.settings.as_deref())?;
     let settings_token = cli.settings.clone().unwrap_or_else(|| String::from("default"));
 
-    let plan_value = lib::nu::load_value(&args.fixtures)?;
-    lib::nu::conform(&plan_value, &lib::nu::parse_typedef(FIXTURE_TYPEDEF)?)?;
+    let plan_value = harness::nu::load_value(&args.fixtures)?;
+    harness::nu::conform(&plan_value, &harness::nu::parse_typedef(FIXTURE_TYPEDEF)?)?;
     let plans = read_plans(&plan_value)?;
     let only: Option<Vec<String>> = args
         .only
@@ -73,11 +73,11 @@ pub(crate) fn speculate_record(cli: &Cli, args: &SpeculateRecordArgs) -> BquestR
         (candle_core::Device::Cpu, candle_core::DType::F32, "cpu_f32");
 
     let model_dir = config.model_dir();
-    let checkpoint = lib::load_config(&model_dir)?;
-    let tokenizer = lib::load_tokenizer(&model_dir)?;
-    lib::verify_token_map(&tokenizer)?;
-    let weights = lib::load_weights(&config, dtype, &device)?;
-    let mut model = lib::OlmoHybrid::new(&checkpoint, settings, weights)?;
+    let checkpoint = llm::load_config(&model_dir)?;
+    let tokenizer = llm::load_tokenizer(&model_dir)?;
+    llm::verify_token_map(&tokenizer)?;
+    let weights = llm::load_weights(&config, dtype, &device)?;
+    let mut model = llm::OlmoHybrid::new(&checkpoint, settings, weights)?;
     eprintln!(
         "speculate record: model {} loaded ({:.1}s, {device_label})",
         config.model,
@@ -100,49 +100,49 @@ pub(crate) fn speculate_record(cli: &Cli, args: &SpeculateRecordArgs) -> BquestR
             device_label,
         )?;
         let path = args.out.join(format!("spec_transcript_{}.nuon", plan.name));
-        lib::nu::save_value(&path, &transcript)?;
+        harness::nu::save_value(&path, &transcript)?;
         recorded += 1;
         eprintln!("speculate record: {} written", path.display());
     }
-    let summary = lib::nu::Value::record(
-        lib::nu::record! {
+    let summary = harness::nu::Value::record(
+        harness::nu::record! {
             "recorded" => v_int(recorded as i64),
             "seconds" => v_float(started.elapsed().as_secs_f64()),
             "out" => v_str(&args.out.display().to_string()),
         },
         span(),
     );
-    println!("{}", lib::nu::to_nuon_text(&summary)?);
+    println!("{}", harness::nu::to_nuon_text(&summary)?);
     Ok(())
 }
 
 /// Record one plan's turns, plain greedy and chained live.
 fn record_transcript(
-    model: &mut lib::OlmoHybrid,
+    model: &mut llm::OlmoHybrid,
     tokenizer: &tokenizers::Tokenizer,
     plan: &TranscriptPlan,
     model_id: &str,
     settings_token: &str,
     device_label: &str,
-) -> BquestResult<lib::nu::Value> {
-    let mut turn_rows: Vec<lib::nu::Value> = Vec::new();
+) -> BquestResult<harness::nu::Value> {
+    let mut turn_rows: Vec<harness::nu::Value> = Vec::new();
     let mut trail: Vec<u32> = Vec::new();
     for (index, prompt) in plan.turns.iter().enumerate() {
-        let options = lib::GenerateOptions {
+        let options = llm::GenerateOptions {
             temperature: None,
             top_p: None,
             sample_len: plan.budget,
             chat: true,
             ignore_stops: false,
             speculate: false,
-            ..lib::GenerateOptions::default()
+            ..llm::GenerateOptions::default()
         };
         let context_before = trail.len();
         let turn_started = std::time::Instant::now();
         let mut generation = if index == 0 {
             model.generate(tokenizer, prompt, &options)?
         } else {
-            let restored = lib::RestoredContext {
+            let restored = llm::RestoredContext {
                 context_len: model.context_len(),
                 context_ids: trail.clone(),
             };
@@ -158,8 +158,8 @@ fn record_transcript(
         let report = generation.finish();
         text.push_str(&report.rest);
         let finish = match report.finish_reason {
-            Some(lib::FinishReason::StopToken) => "stop_token",
-            Some(lib::FinishReason::SampleLen) => "sample_len",
+            Some(llm::FinishReason::StopToken) => "stop_token",
+            Some(llm::FinishReason::SampleLen) => "sample_len",
             None => "early_stop",
         };
         let suffix_ids =
@@ -172,8 +172,8 @@ fn record_transcript(
             emitted.len(),
             turn_started.elapsed().as_secs_f64()
         );
-        turn_rows.push(lib::nu::Value::record(
-            lib::nu::record! {
+        turn_rows.push(harness::nu::Value::record(
+            harness::nu::record! {
                 "index" => v_int(index as i64),
                 "prompt" => v_str(prompt),
                 "text" => v_str(&text),
@@ -192,12 +192,12 @@ fn record_transcript(
         Ok(elapsed) => elapsed.as_secs() as i64,
         Err(_) => 0,
     };
-    Ok(lib::nu::Value::record(
-        lib::nu::record! {
+    Ok(harness::nu::Value::record(
+        harness::nu::record! {
             "name" => v_str(&plan.name),
             "kind" => v_str(&plan.kind),
-            "meta" => lib::nu::Value::record(
-                lib::nu::record! {
+            "meta" => harness::nu::Value::record(
+                harness::nu::record! {
                     "model" => v_str(model_id),
                     "settings" => v_str(settings_token),
                     "device" => v_str(device_label),
@@ -206,7 +206,7 @@ fn record_transcript(
                 },
                 span(),
             ),
-            "turns" => lib::nu::Value::list(turn_rows, span()),
+            "turns" => harness::nu::Value::list(turn_rows, span()),
         },
         span(),
     ))
@@ -227,8 +227,8 @@ pub(crate) struct RecordedTranscript {
 }
 
 fn read_transcript(path: &Path) -> BquestResult<RecordedTranscript> {
-    let value = lib::nu::load_value(path)?;
-    lib::nu::conform(&value, &lib::nu::parse_typedef(TRANSCRIPT_TYPEDEF)?)?;
+    let value = harness::nu::load_value(path)?;
+    harness::nu::conform(&value, &harness::nu::parse_typedef(TRANSCRIPT_TYPEDEF)?)?;
     let record = match value.as_record() {
         Ok(record) => record,
         Err(e) => snafu::whatever!("transcript {}: {e}", path.display()),
@@ -258,8 +258,8 @@ pub(crate) struct PhaseRow {
 }
 
 fn read_phases(path: &Path) -> BquestResult<Vec<PhaseRow>> {
-    let value = lib::nu::load_value(path)?;
-    lib::nu::conform(&value, &lib::nu::parse_typedef(PHASES_TYPEDEF)?)?;
+    let value = harness::nu::load_value(path)?;
+    harness::nu::conform(&value, &harness::nu::parse_typedef(PHASES_TYPEDEF)?)?;
     let rows = match value.as_list() {
         Ok(list) => list,
         Err(e) => snafu::whatever!("phases {}: {e}", path.display()),
@@ -333,7 +333,7 @@ pub(crate) enum PolicyKind {
 
 pub(crate) struct PolicyState {
     kind: PolicyKind,
-    inner: lib::DraftPolicy,
+    inner: llm::DraftPolicy,
     ema: f64,
     level_ema: [f64; 5],
     gate_skips: usize,
@@ -344,7 +344,7 @@ impl PolicyState {
     pub(crate) fn new(kind: PolicyKind) -> Self {
         Self {
             kind,
-            inner: lib::DraftPolicy::new(),
+            inner: llm::DraftPolicy::new(),
             ema: 2.0,
             level_ema: [2.0; 5],
             gate_skips: 0,
@@ -364,7 +364,7 @@ impl PolicyState {
     /// The round's draft, with the candidate gate applied after the match.
     fn round_draft(
         &mut self,
-        index: &lib::LookupIndex,
+        index: &llm::LookupIndex,
         budget: usize,
     ) -> Option<(usize, Vec<u32>)> {
         let probe = self.inner.probe_limit();
@@ -448,7 +448,7 @@ pub(crate) fn replay_transcript(
     let mut policy = PolicyState::new(policy_kind);
     let mut trail: Vec<u32> = Vec::new();
     for (turn_index, turn) in transcript.turns.iter().enumerate() {
-        let mut index = lib::LookupIndex::new();
+        let mut index = llm::LookupIndex::new();
         index.extend(&trail);
         index.extend(&turn.suffix_ids);
         let emitted = &turn.emitted_ids;
@@ -541,7 +541,7 @@ pub(crate) fn speculate_simulate(args: &SpeculateSimulateArgs) -> BquestResult<(
         args.transcripts.display()
     );
 
-    let mut result_rows: Vec<lib::nu::Value> = Vec::new();
+    let mut result_rows: Vec<harness::nu::Value> = Vec::new();
     let mut aggregates: HashMap<String, (u64, u64, u64, u64)> = HashMap::new();
     let mut summary_keys: Vec<(String, String)> = Vec::new();
     for file in &transcript_files {
@@ -584,8 +584,8 @@ pub(crate) fn speculate_simulate(args: &SpeculateSimulateArgs) -> BquestResult<(
                     }
                     aggregate.2 += tally.tokens;
                     aggregate.3 += tally.passes;
-                    result_rows.push(lib::nu::Value::record(
-                        lib::nu::record! {
+                    result_rows.push(harness::nu::Value::record(
+                        harness::nu::record! {
                             "transcript" => v_str(&transcript.name),
                             "kind" => v_str(&transcript.kind),
                             "policy" => v_str(&policy_name),
@@ -605,7 +605,7 @@ pub(crate) fn speculate_simulate(args: &SpeculateSimulateArgs) -> BquestResult<(
         }
     }
 
-    let mut summary_rows: Vec<lib::nu::Value> = Vec::new();
+    let mut summary_rows: Vec<harness::nu::Value> = Vec::new();
     for (policy_name, cost_name) in &summary_keys {
         let key = format!("{policy_name}\u{1f}{cost_name}");
         let (prose_tokens, prose_passes, all_tokens, all_passes) = aggregates[&key];
@@ -619,8 +619,8 @@ pub(crate) fn speculate_simulate(args: &SpeculateSimulateArgs) -> BquestResult<(
         } else {
             all_tokens as f64 / all_passes as f64
         };
-        summary_rows.push(lib::nu::Value::record(
-            lib::nu::record! {
+        summary_rows.push(harness::nu::Value::record(
+            harness::nu::record! {
                 "policy" => v_str(policy_name),
                 "cost_model" => v_str(cost_name),
                 "prose_tokens" => v_int(prose_tokens as i64),
@@ -632,25 +632,25 @@ pub(crate) fn speculate_simulate(args: &SpeculateSimulateArgs) -> BquestResult<(
         ));
     }
 
-    let report = lib::nu::Value::record(
-        lib::nu::record! {
+    let report = harness::nu::Value::record(
+        harness::nu::record! {
             "transcripts_dir" => v_str(&args.transcripts.display().to_string()),
-            "results" => lib::nu::Value::list(result_rows, span()),
-            "summary" => lib::nu::Value::list(summary_rows.clone(), span()),
+            "results" => harness::nu::Value::list(result_rows, span()),
+            "summary" => harness::nu::Value::list(summary_rows.clone(), span()),
         },
         span(),
     );
-    lib::nu::save_value(&args.out, &report)?;
+    harness::nu::save_value(&args.out, &report)?;
     eprintln!("speculate simulate: report -> {}", args.out.display());
-    let stdout_summary = lib::nu::Value::list(summary_rows, span());
-    println!("{}", lib::nu::to_nuon_text(&stdout_summary)?);
+    let stdout_summary = harness::nu::Value::list(summary_rows, span());
+    println!("{}", harness::nu::to_nuon_text(&stdout_summary)?);
     Ok(())
 }
 
 /// The phase-annotation aid: emitted tokens as decoded pieces.
 pub(crate) fn speculate_tokens(cli: &Cli, args: &SpeculateTokensArgs) -> BquestResult<()> {
-    let config = lib::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
-    let tokenizer = lib::load_tokenizer(&config.model_dir())?;
+    let config = llm::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
+    let tokenizer = llm::load_tokenizer(&config.model_dir())?;
     let path = args
         .transcripts
         .join(format!("spec_transcript_{}.nuon", args.name));
