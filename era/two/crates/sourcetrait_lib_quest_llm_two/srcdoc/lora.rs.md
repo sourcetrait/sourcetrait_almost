@@ -15,6 +15,16 @@ Why those in particular: cached key-value state and prefix snapshots must stay
 expert-invariant, so an adapter that moved a key or value projection would make
 every saved context wrong for every posture but the one that saved it.
 
+The head delta is the one amendment to that surface, and it passes the same
+test from the other side: the unembedding is post-cache, so seven trained head
+rows change no cached state and no snapshot. It exists because the norm probe
+read the seven channel ids' head rows as untrained-uniform - identical to five
+decimals with the never-trained family - while the competing tool-marker rows
+carry real trained directions; without a head lever the routing argmax fights
+trained rows with frozen noise. Embedding rows stay frozen deliberately: a
+marker token inside a cached prefix would make an embedding delta break
+snapshot invariance.
+
 Zero-init keeps adapter-off bit-exact, which is the zero-regression fallback the
 whole program leans on. The low-rank pairs draw `a` from a normal and leave `b` at
 zero, so an untrained pair contributes exactly nothing rather than nearly nothing.
@@ -61,6 +71,21 @@ smaller than the pair that would approximate it.
 
 Added at forward rather than merged at load, so the base taps stay shared and
 unmodified. A zero delta therefore yields the base convolution bit-exact.
+
+## struct HeadDelta
+
+Two column groups rather than one [7, hidden] tensor, because the seven ids
+split into two contiguous vocabulary runs (the config id, then the six-run
+block) and contiguity is what lets both the loss block and the serving merge
+work by narrow rather than by scatter.
+
+### fn init
+
+### fn placement
+
+The toy vocabulary cannot hold the real ids, so the groups park at its tail.
+That placement is what lets the toy gate exercise the delta's gradient path
+and its adapter-off exactness without a real checkpoint.
 
 ## struct GdnAdapters
 
@@ -122,6 +147,11 @@ disagree with a fresh one about which projections adapt.
 The conv delta needs the inverse of the save-time assembly: it persists as one
 `(channels, 1, kernel)` tensor and trains as `kernel` rows, so each tap is a
 stride through the stored values rather than a contiguous slice.
+
+The head delta likewise persists as one `[7, hidden]` row tensor and trains as
+two column groups, so save transposes columns to rows and load inverts it. An
+artifact carrying no channel-delta tensor loads with the delta at zeros, which
+is what keeps every pre-amendment adapter resumable.
 
 Validation is strict and loud throughout - version, model identity, rank against
 every pair, dtype, and shape - because the failure it prevents is a wrong-model

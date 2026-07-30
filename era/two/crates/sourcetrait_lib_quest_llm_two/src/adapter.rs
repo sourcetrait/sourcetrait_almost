@@ -20,7 +20,8 @@ pub fn adapter_path(adapters_dir: &Path, token: &str) -> LibQuestResult<PathBuf>
     config::expand_path(token)
 }
 
-/// One target weight's delta: a low-rank pair, or a dense conv delta.
+/// One target weight's delta: a low-rank pair, a dense conv delta, or
+/// the channel columns' head rows.
 #[derive(Debug)]
 pub(crate) enum AdapterDelta {
     LowRank {
@@ -29,6 +30,11 @@ pub(crate) enum AdapterDelta {
         scale: f64,
     },
     Dense {
+        delta: candle_core::Tensor,
+    },
+    /// Seven unembedding rows (config, then the six-run block), added at
+    /// the real channel ids; never materialized vocabulary-wide.
+    Rows {
         delta: candle_core::Tensor,
     },
 }
@@ -41,22 +47,36 @@ impl AdapterDelta {
                 (a.matmul(b)? * *scale)?.t()?.contiguous()
             }
             AdapterDelta::Dense { delta } => Ok(delta.clone()),
+            AdapterDelta::Rows { .. } => unreachable!("rows apply by slice, never whole"),
         }
     }
 
-    /// The checkpoint shape this delta expects.
-    fn expected_shape(&self) -> Vec<usize> {
+    /// Merge this delta into a base weight, in f32.
+    fn merge(
+        &self,
+        base: candle_core::Tensor,
+    ) -> candle_core::Result<candle_core::Tensor> {
+        let base = base.to_dtype(candle_core::DType::F32)?;
         match self {
-            AdapterDelta::LowRank { a, b, .. } => {
-                vec![b.dims()[1], a.dims()[0]]
+            AdapterDelta::Rows { delta } => {
+                let hidden = delta.dims()[1];
+                let config_at = consts::TOKEN_EXTRA_ID_0 as usize;
+                let run_at = consts::TOKEN_EXTRA_ID_1 as usize;
+                let config_rows = (base.narrow(0, config_at, 1)? + delta.narrow(0, 0, 1)?)?;
+                let run_rows = (base.narrow(0, run_at, 6)? + delta.narrow(0, 1, 6)?)?;
+                base.slice_assign(&[config_at..config_at + 1, 0..hidden], &config_rows)?
+                    .slice_assign(&[run_at..run_at + 6, 0..hidden], &run_rows)
             }
-            AdapterDelta::Dense { delta } => delta.dims().to_vec(),
+            _ => base + self.materialize()?,
         }
     }
 }
 
 /// Map an adapter tensor name to its checkpoint weight, or reject it.
 fn target_weight_name(delta_name: &str) -> LibQuestResult<(String, &'static str)> {
+    if delta_name == consts::HEAD_DELTA_TENSOR {
+        return Ok((String::from("lm_head.weight"), "rows"));
+    }
     let Some(rest) = delta_name.strip_prefix("model.layers.") else {
         snafu::whatever!("adapter tensor {delta_name} is outside model.layers");
     };
@@ -176,6 +196,7 @@ impl AdapterFile {
             a: Option<candle_core::Tensor>,
             b: Option<candle_core::Tensor>,
             conv: Option<candle_core::Tensor>,
+            rows: Option<candle_core::Tensor>,
         }
         let mut pending: HashMap<String, Pending> = HashMap::new();
         for (name, view) in parsed.tensors() {
@@ -185,6 +206,7 @@ impl AdapterFile {
                 a: None,
                 b: None,
                 conv: None,
+                rows: None,
             });
             match kind {
                 "lora_a" => {
@@ -201,6 +223,13 @@ impl AdapterFile {
                     );
                     entry.b = Some(tensor);
                 }
+                "rows" => {
+                    snafu::ensure_whatever!(
+                        tensor.dims().len() == 2 && tensor.dims()[0] == 7,
+                        "adapter tensor {name}: channel rows must be [7, hidden]"
+                    );
+                    entry.rows = Some(tensor);
+                }
                 _ => {
                     snafu::ensure_whatever!(
                         tensor.dims().len() == 3,
@@ -213,12 +242,13 @@ impl AdapterFile {
 
         let mut deltas = HashMap::new();
         for (weight_name, entry) in pending {
-            let delta = match (entry.a, entry.b, entry.conv) {
-                (Some(a), Some(b), None) => AdapterDelta::LowRank { a, b, scale },
-                (None, None, Some(delta)) => AdapterDelta::Dense { delta },
+            let delta = match (entry.a, entry.b, entry.conv, entry.rows) {
+                (Some(a), Some(b), None, None) => AdapterDelta::LowRank { a, b, scale },
+                (None, None, Some(delta), None) => AdapterDelta::Dense { delta },
+                (None, None, None, Some(delta)) => AdapterDelta::Rows { delta },
                 _ => snafu::whatever!(
                     "adapter target {weight_name} is incomplete (needs lora_a + lora_b, \
-                     or one conv delta)"
+                     one conv delta, or one channel-rows delta)"
                 ),
             };
             deltas.insert(weight_name, delta);
@@ -240,11 +270,31 @@ impl AdapterFile {
             let Some(shape) = shapes.get(weight_name.as_str()) else {
                 snafu::whatever!("adapter target {weight_name} is not in the checkpoint");
             };
-            let expected = delta.expected_shape();
-            snafu::ensure_whatever!(
-                **shape == expected,
-                "adapter target {weight_name}: checkpoint shape {shape:?} vs delta {expected:?}"
-            );
+            match delta {
+                AdapterDelta::LowRank { a, b, .. } => {
+                    let expected = vec![b.dims()[1], a.dims()[0]];
+                    snafu::ensure_whatever!(
+                        **shape == expected,
+                        "adapter target {weight_name}: checkpoint shape {shape:?} vs delta {expected:?}"
+                    );
+                }
+                AdapterDelta::Dense { delta } => {
+                    let expected = delta.dims().to_vec();
+                    snafu::ensure_whatever!(
+                        **shape == expected,
+                        "adapter target {weight_name}: checkpoint shape {shape:?} vs delta {expected:?}"
+                    );
+                }
+                AdapterDelta::Rows { delta } => {
+                    let hidden = delta.dims()[1];
+                    let past_run = consts::TOKEN_EXTRA_ID_1 as usize + 6;
+                    snafu::ensure_whatever!(
+                        shape.len() == 2 && shape[1] == hidden && shape[0] >= past_run,
+                        "adapter target {weight_name}: checkpoint shape {shape:?} cannot \
+                         take [7, {hidden}] channel rows"
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -266,8 +316,7 @@ impl DeltaBackend {
         let Some(delta) = self.deltas.get(name) else {
             return Ok(base);
         };
-        let merged = (base.to_dtype(candle_core::DType::F32)? + delta.materialize()?)?;
-        merged.to_dtype(dtype)
+        delta.merge(base)?.to_dtype(dtype)
     }
 }
 

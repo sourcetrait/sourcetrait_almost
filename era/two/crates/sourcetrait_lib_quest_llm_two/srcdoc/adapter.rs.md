@@ -29,17 +29,23 @@ weights themselves.
 The convolution delta is dense because decomposing a four-tap kernel buys
 nothing.
 
+The channel-rows delta merges by slicing the seven rows at the real ids rather
+than materializing anything vocabulary-wide; the head is the one target whose
+full delta would be the size of the weight itself.
+
 ### fn materialize
 
-### fn expected_shape
+### fn merge
 
 ## fn target_weight_name
 
 The placement check, and it is a REJECT-BY-NAME surface rather than a filter.
 Only the readout surface may carry a delta - the GDN query, query convolution,
-gate and output projections, attention query and output, and all three MLP
-projections. A state-carrying target has no legal name here at all, which is
-what keeps cached KV and prefix snapshots expert-invariant.
+gate and output projections, attention query and output, all three MLP
+projections, and the channel-rows head delta. A state-carrying target has no
+legal name here at all, which is what keeps cached KV and prefix snapshots
+expert-invariant; the head rows pass that test because the unembedding is
+post-cache.
 
 ## fn kind_str
 

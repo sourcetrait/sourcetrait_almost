@@ -31,6 +31,14 @@ alike has zero spread, and the standard deviation is what the advantage divides
 by, so without this a uniform group divides by noise and produces arbitrary
 large advantages instead of no signal.
 
+## fn apply_head_delta
+
+Narrow-and-cat rather than slice-assign, because differentiability through both
+is not equally certain across burn versions and the cat form is unambiguous.
+Applied per logits chunk rather than to the head matrix, so nothing
+vocabulary-wide is ever materialized: the delta's cost is two thin matmuls and
+one concatenation per chunk.
+
 ## fn masked_logprob_sum
 
 The one primitive underneath all three objectives, which is why the mean-against-

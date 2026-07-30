@@ -99,6 +99,7 @@ pub use crate::lora::{
     AttnAdapters,
     ConvDelta,
     GdnAdapters,
+    HeadDelta,
     LayerAdapters,
     LoraPair,
     ModelAdapters,

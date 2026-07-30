@@ -33,3 +33,9 @@ pub const TOKEN_EXTRA_ID_6: u32 = 100275;
 /// The insufficiency tag; special, so detect by id and never by text.
 pub const TOKEN_ENDOFPROMPT: u32 = 100276;
 pub const TOKEN_PAD: u32 = 100277;
+
+/// The channel head delta's artifact tensor (rows: config, the six).
+pub const HEAD_DELTA_TENSOR: &str = "lm_head.channel_delta";
+/// The delta's two trainable groups, as the optimizer names them.
+pub const HEAD_DELTA_CONFIG_PARAM: &str = "lm_head.channel_delta.config";
+pub const HEAD_DELTA_RUN_PARAM: &str = "lm_head.channel_delta.run";

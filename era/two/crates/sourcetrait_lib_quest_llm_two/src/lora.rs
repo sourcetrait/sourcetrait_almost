@@ -85,6 +85,45 @@ impl<B: Backend> ConvDelta<B> {
     }
 }
 
+/// The reserved channel columns' unembedding delta, zero-init so
+/// adapter-off stays exact. Two contiguous column groups over the
+/// transposed head: the config column, then the six-run block.
+pub struct HeadDelta<B: Backend> {
+    /// The config channel's column, as [hidden, 1].
+    pub config_col: burn::tensor::Tensor<B, 2>,
+    /// The six contiguous run columns (input through close), [hidden, 6].
+    pub run_cols: burn::tensor::Tensor<B, 2>,
+    /// The config column's vocabulary index.
+    pub config_index: usize,
+    /// The run block's first vocabulary index.
+    pub run_start: usize,
+}
+
+impl<B: Backend> HeadDelta<B> {
+    /// Zero-init at the channel columns; a vocabulary too small for the
+    /// real ids parks the groups at its tail (the toy gate's placement).
+    pub fn init(hidden: usize, vocab: usize, device: &B::Device) -> Self {
+        let (config_index, run_start) = Self::placement(vocab);
+        Self {
+            config_col: burn::tensor::Tensor::zeros([hidden, 1], device).require_grad(),
+            run_cols: burn::tensor::Tensor::zeros([hidden, 6], device).require_grad(),
+            config_index,
+            run_start,
+        }
+    }
+
+    /// The real channel ids where they fit, else the vocabulary tail.
+    pub fn placement(vocab: usize) -> (usize, usize) {
+        let config = consts::TOKEN_EXTRA_ID_0 as usize;
+        let run = consts::TOKEN_EXTRA_ID_1 as usize;
+        if vocab > run + 6 {
+            (config, run)
+        } else {
+            (vocab - 7, vocab - 6)
+        }
+    }
+}
+
 /// A GDN layer's sanctioned adapters (readout surface only).
 pub struct GdnAdapters<B: Backend> {
     pub q: LoraPair<B>,
@@ -197,9 +236,11 @@ fn pair_muts<'t, B: Backend>(
     params.push((format!("{prefix}.{target}.lora_b"), &mut pair.b));
 }
 
-/// The whole model's trainable state: one LayerAdapters per layer.
+/// The whole model's trainable state: one LayerAdapters per layer,
+/// plus the channel columns' head delta.
 pub struct ModelAdapters<B: Backend> {
     pub layers: Vec<LayerAdapters<B>>,
+    pub head: HeadDelta<B>,
     pub rank: usize,
     pub alpha: f64,
     pub seed: u64,
@@ -245,7 +286,13 @@ impl<B: Backend> ModelAdapters<B> {
             };
             layers.push(layer);
         }
-        Ok(Self { layers, rank, alpha, seed })
+        Ok(Self {
+            layers,
+            head: HeadDelta::init(hidden, config.vocab_size, device),
+            rank,
+            alpha,
+            seed,
+        })
     }
 
     /// Resume from a saved adapter, at the artifact's own geometry.
@@ -307,7 +354,35 @@ impl<B: Backend> ModelAdapters<B> {
         }
 
         let mut adapters = Self::init(config, rank, alpha, seed, device)?;
+        if let Some((shape, values)) = stored.get(consts::HEAD_DELTA_TENSOR) {
+            let hidden = adapters.head.config_col.dims()[0];
+            snafu::ensure_whatever!(
+                *shape == vec![7, hidden],
+                "{}: expected [7, {hidden}], got {shape:?}",
+                consts::HEAD_DELTA_TENSOR
+            );
+            let config_values: Vec<f32> = values[..hidden].to_vec();
+            let mut run_values = vec![0f32; hidden * 6];
+            for column in 0..6 {
+                for row in 0..hidden {
+                    run_values[row * 6 + column] = values[(1 + column) * hidden + row];
+                }
+            }
+            adapters.head.config_col = burn::tensor::Tensor::from_data(
+                burn::tensor::TensorData::new(config_values, [hidden, 1]),
+                device,
+            )
+            .require_grad();
+            adapters.head.run_cols = burn::tensor::Tensor::from_data(
+                burn::tensor::TensorData::new(run_values, [hidden, 6]),
+                device,
+            )
+            .require_grad();
+        }
         for (name, tensor) in adapters.params_mut() {
+            if name == consts::HEAD_DELTA_CONFIG_PARAM || name == consts::HEAD_DELTA_RUN_PARAM {
+                continue;
+            }
             let replacement = match name.split_once(".delta_tap") {
                 Some((prefix, tap_index)) => {
                     let Ok(tap) = tap_index.parse::<usize>() else {
@@ -354,13 +429,15 @@ impl<B: Backend> ModelAdapters<B> {
         Ok(adapters)
     }
 
-    /// Named refs to every trainable tensor, layer-major.
+    /// Named refs to every trainable tensor, layer-major, head last.
     #[allow(dead_code)]
     pub fn params(&self) -> Vec<(String, &burn::tensor::Tensor<B, 2>)> {
         let mut params = Vec::new();
         for (index, layer) in self.layers.iter().enumerate() {
             params.extend(layer.params(&format!("model.layers.{index}")));
         }
+        params.push((String::from(consts::HEAD_DELTA_CONFIG_PARAM), &self.head.config_col));
+        params.push((String::from(consts::HEAD_DELTA_RUN_PARAM), &self.head.run_cols));
         params
     }
 
@@ -370,6 +447,11 @@ impl<B: Backend> ModelAdapters<B> {
         for (index, layer) in self.layers.iter_mut().enumerate() {
             params.extend(layer.params_mut(&format!("model.layers.{index}")));
         }
+        params.push((
+            String::from(consts::HEAD_DELTA_CONFIG_PARAM),
+            &mut self.head.config_col,
+        ));
+        params.push((String::from(consts::HEAD_DELTA_RUN_PARAM), &mut self.head.run_cols));
         params
     }
 
@@ -403,6 +485,18 @@ impl<B: Backend> ModelAdapters<B> {
                 ));
             }
         }
+        let hidden = self.head.config_col.dims()[0];
+        let config_values = tensor_f32_values(&self.head.config_col)?;
+        let run_values = tensor_f32_values(&self.head.run_cols)?;
+        let mut head_values = vec![0f32; 7 * hidden];
+        head_values[..hidden].copy_from_slice(&config_values);
+        for column in 0..6 {
+            for row in 0..hidden {
+                head_values[(1 + column) * hidden + row] = run_values[row * 6 + column];
+            }
+        }
+        let head_bytes: Vec<u8> = head_values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        buffers.push((String::from(consts::HEAD_DELTA_TENSOR), vec![7, hidden], head_bytes));
         buffers.sort_by(|left, right| left.0.cmp(&right.0));
 
         let views: Vec<(String, safetensors::tensor::TensorView)> = buffers
@@ -427,7 +521,7 @@ impl<B: Backend> ModelAdapters<B> {
         metadata.insert(
             String::from("targets"),
             String::from(
-                "gdn:q_proj,q_conv1d,g_proj,o_proj;attn:q_proj,o_proj;mlp:gate_proj,up_proj,down_proj",
+                "gdn:q_proj,q_conv1d,g_proj,o_proj;attn:q_proj,o_proj;mlp:gate_proj,up_proj,down_proj;head:channel_delta",
             ),
         );
         metadata.insert(

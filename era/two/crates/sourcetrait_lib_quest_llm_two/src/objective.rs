@@ -13,10 +13,40 @@ type FloatTensor<B, const D: usize> = burn::tensor::Tensor<B, D>;
 /// The spread below which a group counts as zero-variance.
 const ADVANTAGE_EPS: f32 = 1e-6;
 
+/// Add the head delta's contribution onto a logits chunk, by its two
+/// column groups; narrow-and-cat so the whole path stays autodiff.
+pub fn apply_head_delta<AD: AutodiffBackend>(
+    logits: FloatTensor<AD, 2>,
+    hidden_rows: &FloatTensor<AD, 2>,
+    delta: &lora::HeadDelta<AD>,
+) -> FloatTensor<AD, 2> {
+    let vocab = logits.dims()[1];
+    let config_at = delta.config_index;
+    let run_at = delta.run_start;
+    let config_add = hidden_rows.clone().matmul(delta.config_col.clone());
+    let run_add = hidden_rows.clone().matmul(delta.run_cols.clone());
+    let mut parts: Vec<FloatTensor<AD, 2>> = Vec::with_capacity(5);
+    if config_at > 0 {
+        parts.push(logits.clone().narrow(1, 0, config_at));
+    }
+    parts.push(logits.clone().narrow(1, config_at, 1) + config_add);
+    let gap = run_at - (config_at + 1);
+    if gap > 0 {
+        parts.push(logits.clone().narrow(1, config_at + 1, gap));
+    }
+    parts.push(logits.clone().narrow(1, run_at, 6) + run_add);
+    let tail = vocab - (run_at + 6);
+    if tail > 0 {
+        parts.push(logits.clone().narrow(1, run_at + 6, tail));
+    }
+    burn::tensor::Tensor::cat(parts, 1)
+}
+
 /// The masked positions' summed target log-probability, head-chunked.
 fn masked_logprob_sum<AD: AutodiffBackend>(
     hidden: FloatTensor<AD, 2>,
     lm_head_transposed: &FloatTensor<AD, 2>,
+    head_delta: Option<&lora::HeadDelta<AD>>,
     targets: &[u32],
     mask: &[u8],
     chunk: usize,
@@ -35,7 +65,11 @@ fn masked_logprob_sum<AD: AutodiffBackend>(
         let end = (start + chunk).min(n);
         let rows = end - start;
         let hidden_rows = hidden.clone().narrow(0, start, rows);
-        let logits = hidden_rows.matmul(lm_head_transposed.clone());
+        let logits = hidden_rows.clone().matmul(lm_head_transposed.clone());
+        let logits = match head_delta {
+            Some(delta) => apply_head_delta::<AD>(logits, &hidden_rows, delta),
+            None => logits,
+        };
         let log_probs = burn::tensor::activation::log_softmax(logits, 1);
         let indices: Vec<i64> = targets[start..end].iter().map(|t| *t as i64).collect();
         let index_tensor = burn::tensor::Tensor::<AD, 2, Int>::from_data(
@@ -70,6 +104,7 @@ pub fn supervised_count(mask: &[u8]) -> usize {
 pub fn masked_cross_entropy<AD: AutodiffBackend>(
     hidden: FloatTensor<AD, 2>,
     lm_head_transposed: &FloatTensor<AD, 2>,
+    head_delta: Option<&lora::HeadDelta<AD>>,
     targets: &[u32],
     mask: &[u8],
     chunk: usize,
@@ -80,7 +115,15 @@ pub fn masked_cross_entropy<AD: AutodiffBackend>(
         supervised > 0,
         "the loss mask supervises no position, so this example trains nothing"
     );
-    let summed = masked_logprob_sum::<AD>(hidden, lm_head_transposed, targets, mask, chunk, device)?;
+    let summed = masked_logprob_sum::<AD>(
+        hidden,
+        lm_head_transposed,
+        head_delta,
+        targets,
+        mask,
+        chunk,
+        device,
+    )?;
     Ok(summed.neg().div_scalar(supervised as f64))
 }
 
@@ -88,6 +131,7 @@ pub fn masked_cross_entropy<AD: AutodiffBackend>(
 pub fn sequence_logprob<AD: AutodiffBackend>(
     hidden: FloatTensor<AD, 2>,
     lm_head_transposed: &FloatTensor<AD, 2>,
+    head_delta: Option<&lora::HeadDelta<AD>>,
     targets: &[u32],
     mask: &[u8],
     chunk: usize,
@@ -97,7 +141,15 @@ pub fn sequence_logprob<AD: AutodiffBackend>(
         supervised_count(mask) > 0,
         "the sequence masks no position, so it carries no log-probability"
     );
-    masked_logprob_sum::<AD>(hidden, lm_head_transposed, targets, mask, chunk, device)
+    masked_logprob_sum::<AD>(
+        hidden,
+        lm_head_transposed,
+        head_delta,
+        targets,
+        mask,
+        chunk,
+        device,
+    )
 }
 
 /// softplus as max(x, 0) + ln(1 + exp(-|x|)): the backward is safe.

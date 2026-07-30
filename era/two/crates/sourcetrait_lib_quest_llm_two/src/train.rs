@@ -197,6 +197,7 @@ fn dims_block_forward<B: Backend>(
 fn cross_entropy_chunked<AD: AutodiffBackend>(
     hidden: FloatTensor<AD, 2>,
     lm_head_transposed: &FloatTensor<AD, 2>,
+    head_delta: Option<&HeadDelta<AD>>,
     targets: &[u32],
     chunk: usize,
     device: &AD::Device,
@@ -208,7 +209,11 @@ fn cross_entropy_chunked<AD: AutodiffBackend>(
     while start < n {
         let end = (start + chunk).min(n);
         let rows = hidden.clone().narrow(0, start, end - start);
-        let logits = rows.matmul(lm_head_transposed.clone());
+        let logits = rows.clone().matmul(lm_head_transposed.clone());
+        let logits = match head_delta {
+            Some(delta) => objective::apply_head_delta::<AD>(logits, &rows, delta),
+            None => logits,
+        };
         let log_probs = burn::tensor::activation::log_softmax(logits, 1);
         let indices: Vec<i64> = targets[start..end].iter().map(|t| *t as i64).collect();
         let index_tensor = burn::tensor::Tensor::<AD, 2, Int>::from_data(
@@ -252,15 +257,25 @@ pub fn forward_cache<AD: AutodiffBackend>(
     (layer_inputs, x)
 }
 
-/// The loss block: one sequence's scalar loss plus its seed gradient.
+/// The loss block: one sequence's scalar loss, its seed gradient, and
+/// the head delta's own gradients when a delta is in the block.
 pub fn seed_from_hidden<AD, F>(
     model: &HybridModel<AD::InnerBackend>,
+    head_delta: Option<&HeadDelta<AD>>,
     top_x: FloatTensor<AD::InnerBackend, 2>,
     build_loss: F,
-) -> LibQuestResult<(f32, FloatTensor<AD::InnerBackend, 2>)>
+) -> LibQuestResult<(
+    f32,
+    FloatTensor<AD::InnerBackend, 2>,
+    HashMap<String, FloatTensor<AD::InnerBackend, 2>>,
+)>
 where
     AD: AutodiffBackend,
-    F: FnOnce(FloatTensor<AD, 2>, &FloatTensor<AD, 2>) -> LibQuestResult<FloatTensor<AD, 1>>,
+    F: FnOnce(
+        FloatTensor<AD, 2>,
+        &FloatTensor<AD, 2>,
+        Option<&HeadDelta<AD>>,
+    ) -> LibQuestResult<FloatTensor<AD, 1>>,
 {
     let top_input = FloatTensor::<AD, 2>::from_inner(top_x).require_grad();
     let hidden = oracle::rms_norm(
@@ -269,35 +284,59 @@ where
         model.eps,
     );
     let head = FloatTensor::<AD, 2>::from_inner(model.lm_head_transposed.clone());
-    let loss = build_loss(hidden, &head)?;
+    let loss = build_loss(hidden, &head, head_delta)?;
     let loss_value: f32 = loss.clone().into_scalar().elem();
     let mut top_grads = loss.backward();
+    let head_grads = head_delta_grads::<AD>(head_delta, &mut top_grads)?;
     let Some(grad_out) = top_input.grad_remove(&mut top_grads) else {
         snafu::whatever!("no gradient reached the loss block input");
     };
-    Ok((loss_value, grad_out))
+    Ok((loss_value, grad_out, head_grads))
 }
 
-/// A paired loss block's yield: the loss and one seed per sequence.
-pub type PairedSeed<AD> = (
+/// Pull the head delta's gradients out of a loss block's backward.
+fn head_delta_grads<AD: AutodiffBackend>(
+    head_delta: Option<&HeadDelta<AD>>,
+    grads: &mut <AD as AutodiffBackend>::Gradients,
+) -> LibQuestResult<HashMap<String, FloatTensor<AD::InnerBackend, 2>>> {
+    let mut head_grads = HashMap::new();
+    if let Some(delta) = head_delta {
+        let (Some(config_grad), Some(run_grad)) = (
+            delta.config_col.grad_remove(grads),
+            delta.run_cols.grad_remove(grads),
+        ) else {
+            snafu::whatever!("no gradient reached the head delta");
+        };
+        head_grads.insert(String::from(consts::HEAD_DELTA_CONFIG_PARAM), config_grad);
+        head_grads.insert(String::from(consts::HEAD_DELTA_RUN_PARAM), run_grad);
+    }
+    Ok(head_grads)
+}
+
+/// A paired loss block's yield: the loss, one seed per sequence, and
+/// the head delta's gradients.
+pub type PairedSeedGrads<AD> = (
     f32,
     FloatTensor<<AD as AutodiffBackend>::InnerBackend, 2>,
     FloatTensor<<AD as AutodiffBackend>::InnerBackend, 2>,
+    HashMap<String, FloatTensor<<AD as AutodiffBackend>::InnerBackend, 2>>,
 );
 
 /// The paired loss block: two sequences under one coupled loss.
 pub fn seed_pair_from_hidden<AD, F>(
     model: &HybridModel<AD::InnerBackend>,
+    head_delta: Option<&HeadDelta<AD>>,
     left_x: FloatTensor<AD::InnerBackend, 2>,
     right_x: FloatTensor<AD::InnerBackend, 2>,
     build_loss: F,
-) -> LibQuestResult<PairedSeed<AD>>
+) -> LibQuestResult<PairedSeedGrads<AD>>
 where
     AD: AutodiffBackend,
     F: FnOnce(
         FloatTensor<AD, 2>,
         FloatTensor<AD, 2>,
         &FloatTensor<AD, 2>,
+        Option<&HeadDelta<AD>>,
     ) -> LibQuestResult<FloatTensor<AD, 1>>,
 {
     let left_input = FloatTensor::<AD, 2>::from_inner(left_x).require_grad();
@@ -306,16 +345,17 @@ where
     let left_hidden = oracle::rms_norm(left_input.clone(), &norm, model.eps);
     let right_hidden = oracle::rms_norm(right_input.clone(), &norm, model.eps);
     let head = FloatTensor::<AD, 2>::from_inner(model.lm_head_transposed.clone());
-    let loss = build_loss(left_hidden, right_hidden, &head)?;
+    let loss = build_loss(left_hidden, right_hidden, &head, head_delta)?;
     let loss_value: f32 = loss.clone().into_scalar().elem();
     let mut top_grads = loss.backward();
+    let head_grads = head_delta_grads::<AD>(head_delta, &mut top_grads)?;
     let (Some(left_grad), Some(right_grad)) = (
         left_input.grad_remove(&mut top_grads),
         right_input.grad_remove(&mut top_grads),
     ) else {
         snafu::whatever!("a paired loss left one sequence without a gradient");
     };
-    Ok((loss_value, left_grad, right_grad))
+    Ok((loss_value, left_grad, right_grad, head_grads))
 }
 
 /// Pass two: a per-layer VJP top down from a seed gradient.
@@ -404,13 +444,19 @@ pub fn chain_step<AD: AutodiffBackend>(
 ) -> LibQuestResult<StepOutcome<AD::InnerBackend>> {
     let (layer_inputs, top_x) =
         forward_cache::<AD>(model, adapters, mask_inner, inputs, device);
-    let (loss, seed) = seed_from_hidden::<AD, _>(model, top_x, |hidden, head| {
-        Ok(cross_entropy_chunked::<AD>(
-            hidden, head, targets, loss_chunk, device,
-        ))
-    })?;
-    let grads =
+    let (loss, seed, head_grads) = seed_from_hidden::<AD, _>(
+        model,
+        Some(&adapters.head),
+        top_x,
+        |hidden, head, delta| {
+            Ok(cross_entropy_chunked::<AD>(
+                hidden, head, delta, targets, loss_chunk, device,
+            ))
+        },
+    )?;
+    let mut grads =
         chain_from_seed::<AD>(model, adapters, mask_inner, &layer_inputs, seed, device)?;
+    accumulate_grads(&mut grads, head_grads);
     Ok(StepOutcome { loss, grads })
 }
 
@@ -439,13 +485,14 @@ fn full_graph_step<AD: AutodiffBackend>(
     let loss = cross_entropy_chunked::<AD>(
         hidden,
         &FloatTensor::from_inner(model.lm_head_transposed.clone()),
+        Some(&adapters.head),
         targets,
         loss_chunk,
         device,
     );
     let loss_value: f32 = loss.clone().into_scalar().elem();
     let mut grads = loss.backward();
-    let mut lora_grads: HashMap<String, FloatTensor<AD::InnerBackend, 2>> = HashMap::new();
+    let mut lora_grads = head_delta_grads::<AD>(Some(&adapters.head), &mut grads)?;
     for (index, layer_adapters) in adapters.layers.iter().enumerate() {
         let prefix = format!("model.layers.{index}");
         for (name, tensor) in layer_adapters.params(&prefix) {
@@ -1063,16 +1110,22 @@ pub fn sft_loop<AD: AutodiffBackend>(
             );
             let (layer_inputs, top_x) =
                 forward_cache::<AD>(model, adapters, &mask_inner, inputs, device);
-            let (loss, seed) = seed_from_hidden::<AD, _>(model, top_x, |hidden, head| {
-                objective::masked_cross_entropy::<AD>(
-                    hidden,
-                    head,
-                    targets,
-                    target_mask,
-                    options.loss_chunk,
-                    device,
-                )
-            })?;
+            let (loss, seed, head_grads) = seed_from_hidden::<AD, _>(
+                model,
+                Some(&adapters.head),
+                top_x,
+                |hidden, head, delta| {
+                    objective::masked_cross_entropy::<AD>(
+                        hidden,
+                        head,
+                        delta,
+                        targets,
+                        target_mask,
+                        options.loss_chunk,
+                        device,
+                    )
+                },
+            )?;
             let grads = chain_from_seed::<AD>(
                 model,
                 adapters,
@@ -1082,6 +1135,7 @@ pub fn sft_loop<AD: AutodiffBackend>(
                 device,
             )?;
             accumulate_grads(&mut accumulated, grads);
+            accumulate_grads(&mut accumulated, head_grads);
             batch_loss += loss;
             trained_tokens += supervised;
         }
@@ -1174,14 +1228,16 @@ pub fn dpo_loop<AD: AutodiffBackend>(
             forward_cache::<AD>(model, adapters, &mask_inner, rejected_in, device);
 
         let loss_chunk = options.loss_chunk;
-        let (loss, chosen_seed, rejected_seed) = seed_pair_from_hidden::<AD, _>(
+        let (loss, chosen_seed, rejected_seed, head_grads) = seed_pair_from_hidden::<AD, _>(
             model,
+            Some(&adapters.head),
             chosen_top,
             rejected_top,
-            |chosen_hidden, rejected_hidden, head| {
+            |chosen_hidden, rejected_hidden, head, delta| {
                 let chosen_logprob = objective::sequence_logprob::<AD>(
                     chosen_hidden,
                     head,
+                    delta,
                     chosen_targets,
                     chosen_mask,
                     loss_chunk,
@@ -1190,6 +1246,7 @@ pub fn dpo_loop<AD: AutodiffBackend>(
                 let rejected_logprob = objective::sequence_logprob::<AD>(
                     rejected_hidden,
                     head,
+                    delta,
                     rejected_targets,
                     rejected_mask,
                     loss_chunk,
@@ -1222,6 +1279,7 @@ pub fn dpo_loop<AD: AutodiffBackend>(
             device,
         )?;
         accumulate_grads(&mut accumulated, rejected_grads);
+        accumulate_grads(&mut accumulated, head_grads);
 
         if step == 0 {
             first_loss = loss;
@@ -1325,17 +1383,23 @@ pub fn rlvr_loop<AD: AutodiffBackend>(
             let (layer_inputs, top_x) =
                 forward_cache::<AD>(model, adapters, &mask_inner, inputs, device);
             let advantage = *advantage;
-            let (loss, seed) = seed_from_hidden::<AD, _>(model, top_x, |hidden, head| {
-                let logprob = objective::sequence_logprob::<AD>(
-                    hidden,
-                    head,
-                    targets,
-                    target_mask,
-                    options.loss_chunk,
-                    device,
-                )?;
-                Ok(objective::policy_gradient_loss::<AD>(logprob, advantage))
-            })?;
+            let (loss, seed, head_grads) = seed_from_hidden::<AD, _>(
+                model,
+                Some(&adapters.head),
+                top_x,
+                |hidden, head, delta| {
+                    let logprob = objective::sequence_logprob::<AD>(
+                        hidden,
+                        head,
+                        delta,
+                        targets,
+                        target_mask,
+                        options.loss_chunk,
+                        device,
+                    )?;
+                    Ok(objective::policy_gradient_loss::<AD>(logprob, advantage))
+                },
+            )?;
             let grads = chain_from_seed::<AD>(
                 model,
                 adapters,
@@ -1345,6 +1409,7 @@ pub fn rlvr_loop<AD: AutodiffBackend>(
                 device,
             )?;
             accumulate_grads(&mut accumulated, grads);
+            accumulate_grads(&mut accumulated, head_grads);
             group_loss += loss;
             trained_tokens += objective::supervised_count(target_mask);
         }

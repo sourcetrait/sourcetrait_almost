@@ -75,7 +75,15 @@ The chain beneath this never learns what it is training, which is what lets
 continued pretraining, supervised, preference and reinforcement share one
 trainer.
 
-## type PairedSeed
+The head delta is the one adapter whose gradients come out of THIS backward
+rather than out of the chain: it lives inside the loss block, so its grads are
+extracted here and merged into the accumulated map beside the chain's. The
+reference paths pass no delta, which is what keeps the frozen-base
+log-probabilities frozen.
+
+## fn head_delta_grads
+
+## type PairedSeedGrads
 
 ## fn seed_pair_from_hidden
 
