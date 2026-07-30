@@ -5,14 +5,26 @@ use crate::*;
 const INJECTED_SYSTEM: &str = "You are a helpful function-calling AI assistant. \
 You do not currently have access to any functions. <functions></functions>";
 
+/// The quest-native system turn; train and serve both read this one.
+pub const QUEST_SYSTEM: &str =
+    "You are a helpful Quest AI assistant. You have access to Quest Toolkit.";
+
 /// The Thinkspace's own turn role, which never crosses the wire. A
 /// reasoning FORM is the request; the Thinkspace answers on a thought,
 /// and the model finishes inside the same turn.
 pub const THOUGHT_ROLE: &str = "thought";
 
-/// The byte-exact default rendering: one user turn, generation prompt.
+/// The quest default rendering: Quest Toolkit system turn, one user
+/// turn, generation prompt.
 pub fn chat_wrap(user_prompt: &str) -> String {
-    chat_render(&[ChatMessage::user(user_prompt)], true).text
+    chat_render(
+        &[
+            ChatMessage::system(QUEST_SYSTEM),
+            ChatMessage::user(user_prompt),
+        ],
+        true,
+    )
+    .text
 }
 
 /// Continuation rendering for a context that ended mid assistant turn.

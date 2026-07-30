@@ -37,9 +37,18 @@ fn tool(content: &str) -> ChatMessage {
 }
 
 #[test]
-fn chat_wrap_matches_template_default_rendering() {
-    let expected = "<|im_start|>system\nYou are a helpful function-calling AI assistant. You do not currently have access to any functions. <functions></functions><|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n";
+fn chat_wrap_renders_the_quest_posture() {
+    let expected = "<|im_start|>system\nYou are a helpful Quest AI assistant. You have access to Quest Toolkit.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n";
     assert_eq!(chat_wrap("Hi"), expected);
+}
+
+#[test]
+fn default_render_still_injects_the_template_system() {
+    let expected = format!("{INJECTED_HEADER}<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n");
+    assert_eq!(
+        chat_render(&[ChatMessage::user("Hi")], true).text,
+        expected
+    );
 }
 
 #[test]

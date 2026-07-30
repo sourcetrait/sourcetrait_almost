@@ -36,13 +36,23 @@ fn tool_markers_are_single_tokens() {
 }
 
 #[test]
-fn chat_wrap_renders_the_pinned_token_count() {
-    // 43 tokens for this exact prompt text, pinned by the C2 dump ids
-    // through the original stack.
+fn default_render_carries_the_pinned_token_count() {
+    // 43 tokens for this exact prompt under the checkpoint's own
+    // injected-default rendering, pinned by the C2 dump ids through the
+    // original stack.
+    let tokenizer = dpo_tokenizer();
+    let rendered =
+        chat_render(&[ChatMessage::user("What is the capital of France?")], true).text;
+    let encoding = tokenizer.encode(rendered, false).expect("encodes");
+    assert_eq!(encoding.get_ids().len(), 43);
+}
+
+#[test]
+fn chat_wrap_renders_the_quest_token_count() {
     let tokenizer = dpo_tokenizer();
     let rendered = chat_wrap("What is the capital of France?");
     let encoding = tokenizer.encode(rendered, false).expect("encodes");
-    assert_eq!(encoding.get_ids().len(), 43);
+    assert_eq!(encoding.get_ids().len(), 35);
 }
 
 #[test]

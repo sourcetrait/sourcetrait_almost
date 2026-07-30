@@ -10,6 +10,12 @@ single-shape inference helpers the engine and the battery rigs drive.
 AND the byte span of every assistant turn so a training example's loss boundary
 is exact by construction from ONE render.
 
+The posture split: `chat_render` stays template-parity - it injects the
+checkpoint's own default system turn when none is supplied, which is what the
+reference gate and the C2 token-count pin ride - while `chat_wrap` is
+quest-postured, supplying the Quest Toolkit system turn explicitly so the
+injection never fires on the live path.
+
 The span form exists because the alternative is measurably wrong against THIS
 template. An assistant turn renders differently BY POSITION - the end-of-text
 token when last, `<|im_end|>` plus a newline when interior - so the upstream
@@ -25,6 +31,15 @@ asked to produce it. That exclusion is a decision rather than the inherited
 off-by-one.
 
 ## const INJECTED_SYSTEM
+
+## const QUEST_SYSTEM
+
+The checkpoint's injected default describes exactly the behaviour the offload
+training removes - a function-calling assistant with no functions - so serving
+under it conditions against the reach. This is the replacement, and it is the
+single source both sides read: `chat_wrap` on the live path and the pack's
+system-turn prepend in bquest. Quest Toolkit names the chat toolkit contract
+in general (config, input, output, pass, nu, liquid).
 
 ## fn chat_wrap
 

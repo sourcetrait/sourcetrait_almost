@@ -135,6 +135,7 @@ pub use crate::chat::{
     ChatRender,
     ChatRole,
     EncodedRender,
+    QUEST_SYSTEM,
     THOUGHT_ROLE,
     TokenSpan,
     chat_continue,

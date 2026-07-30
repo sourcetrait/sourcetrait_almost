@@ -66,6 +66,13 @@ train nothing while looking like an example.
 The verifier name is checked at load rather than at grading time, so an unknown
 verifier fails before a run rather than partway through one.
 
+## fn with_quest_system
+
+The pack half of the quest posture: the same `QUEST_SYSTEM` constant the live
+wrap reads, prepended wherever an example carries no system role, so train and
+serve cannot drift apart at the system turn. An example carrying its own system
+role passes through untouched - the posture is a default, not an override.
+
 ## fn encode_supervised
 
 The span boundaries come from the renderer rather than from re-measuring a

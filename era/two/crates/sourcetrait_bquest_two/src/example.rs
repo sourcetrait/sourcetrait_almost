@@ -112,12 +112,27 @@ pub(crate) fn load_rlvr(path: &Path) -> BquestResult<Vec<RlvrExample>> {
     Ok(examples)
 }
 
+/// A conversation under the quest posture: the Quest Toolkit system
+/// turn prepended wherever an example carries no system role.
+fn with_quest_system(messages: &[llm::ChatMessage]) -> Vec<llm::ChatMessage> {
+    if messages
+        .iter()
+        .any(|message| message.role == Some(llm::ChatRole::System))
+    {
+        return messages.to_vec();
+    }
+    let mut postured = Vec::with_capacity(messages.len() + 1);
+    postured.push(llm::ChatMessage::system(llm::QUEST_SYSTEM));
+    postured.extend_from_slice(messages);
+    postured
+}
+
 /// Render and encode a conversation, masked to its assistant spans.
 pub(crate) fn encode_supervised(
     tokenizer: &tokenizers::Tokenizer,
     messages: &[llm::ChatMessage],
 ) -> BquestResult<(Vec<u32>, Vec<u8>)> {
-    let render = llm::chat_render(messages, false);
+    let render = llm::chat_render(&with_quest_system(messages), false);
     let encoded = llm::encode_render(tokenizer, &render)?;
     let mut mask = vec![0u8; encoded.ids.len()];
     for span in &encoded.assistant_spans {
@@ -133,7 +148,7 @@ pub(crate) fn encode_prompt(
     tokenizer: &tokenizers::Tokenizer,
     prompt: &[llm::ChatMessage],
 ) -> BquestResult<Vec<u32>> {
-    let render = llm::chat_render(prompt, true);
+    let render = llm::chat_render(&with_quest_system(prompt), true);
     Ok(llm::encode_render(tokenizer, &render)?.ids)
 }
 
