@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_lib_quest_llm_two"
-version = "0.0.0-3"
+version = "0.0.0-4"
 edition = "2024"
 description = "The era-two LLM inference engine and trainer core"
 authors = ["SourceTrait <development@sourcetrait.com>"]

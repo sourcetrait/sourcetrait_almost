@@ -51,23 +51,39 @@ impl AdapterDelta {
         }
     }
 
-    /// Merge this delta into a base weight, in f32.
-    fn merge(
+    /// Merge into a base weight: dense targets add in f32; rows splice by id.
+    pub(crate) fn merge(
         &self,
         base: candle_core::Tensor,
     ) -> candle_core::Result<candle_core::Tensor> {
-        let base = base.to_dtype(candle_core::DType::F32)?;
         match self {
             AdapterDelta::Rows { delta } => {
-                let hidden = delta.dims()[1];
+                let dtype = base.dtype();
+                let vocab = base.dim(0)?;
                 let config_at = consts::TOKEN_EXTRA_ID_0 as usize;
                 let run_at = consts::TOKEN_EXTRA_ID_1 as usize;
-                let config_rows = (base.narrow(0, config_at, 1)? + delta.narrow(0, 0, 1)?)?;
-                let run_rows = (base.narrow(0, run_at, 6)? + delta.narrow(0, 1, 6)?)?;
-                base.slice_assign(&[config_at..config_at + 1, 0..hidden], &config_rows)?
-                    .slice_assign(&[run_at..run_at + 6, 0..hidden], &run_rows)
+                let config_rows = (base
+                    .narrow(0, config_at, 1)?
+                    .to_dtype(candle_core::DType::F32)?
+                    + delta.narrow(0, 0, 1)?)?
+                .to_dtype(dtype)?;
+                let run_rows = (base
+                    .narrow(0, run_at, 6)?
+                    .to_dtype(candle_core::DType::F32)?
+                    + delta.narrow(0, 1, 6)?)?
+                .to_dtype(dtype)?;
+                let mut parts = vec![
+                    base.narrow(0, 0, config_at)?,
+                    config_rows,
+                    base.narrow(0, config_at + 1, run_at - config_at - 1)?,
+                    run_rows,
+                ];
+                if vocab > run_at + 6 {
+                    parts.push(base.narrow(0, run_at + 6, vocab - run_at - 6)?);
+                }
+                candle_core::Tensor::cat(&parts, 0)
             }
-            _ => base + self.materialize()?,
+            _ => base.to_dtype(candle_core::DType::F32)? + self.materialize()?,
         }
     }
 }

@@ -1,10 +1,12 @@
 //! AdapterLoad locks: the three-tier token resolution, the
 //! direction-3 placement + format validations, the checkpoint
-//! geometry guard, and the zero-adapter exactness gate (a zero-b
-//! adapter load must read value-equal to the plain load).
+//! geometry guard, the rows splice, and the zero-adapter exactness
+//! gate (a zero-b adapter load must read value-equal to the plain
+//! load).
 use crate::*;
 
 use crate::adapter::{
+    AdapterDelta,
     AdapterFile,
     adapter_path,
 };
@@ -68,6 +70,73 @@ fn adapter_token_resolves_in_three_tiers() {
     let home = std::env::var("HOME").expect("HOME");
     let expanded = adapter_path(&dir, "~/x.safetensors").expect("expanded");
     assert_eq!(expanded, PathBuf::from(format!("{home}/x.safetensors")));
+}
+
+/// The rows merge splices the seven channel rows through f32 and
+/// leaves every other row untouched, in the base's own dtype - the
+/// vocabulary-wide f32 materialization it replaced is what OOM'd the
+/// serve load.
+#[test]
+fn rows_delta_splices_only_the_channel_rows() {
+    let device = candle_core::Device::Cpu;
+    let hidden = 4usize;
+    let vocab = 100352usize;
+    let config_at = consts::TOKEN_EXTRA_ID_0 as usize;
+    let run_at = consts::TOKEN_EXTRA_ID_1 as usize;
+    let base_values: Vec<f32> = (0..vocab * hidden)
+        .map(|i| ((i % 251) as f32) * 0.5 - 62.0)
+        .collect();
+    let base = candle_core::Tensor::from_vec(base_values, (vocab, hidden), &device)
+        .expect("base")
+        .to_dtype(candle_core::DType::BF16)
+        .expect("bf16 base");
+    let delta_values: Vec<f32> = (0..7 * hidden).map(|i| ((i + 1) as f32) * 0.25).collect();
+    let delta =
+        candle_core::Tensor::from_vec(delta_values, (7, hidden), &device).expect("delta");
+
+    let merged = AdapterDelta::Rows { delta: delta.clone() }
+        .merge(base.clone())
+        .expect("rows merge");
+    assert_eq!(merged.dtype(), candle_core::DType::BF16);
+    assert_eq!(merged.dims(), base.dims());
+
+    let expected_rows = |at: usize, delta_at: usize, rows: usize| -> Vec<Vec<f32>> {
+        ((base
+            .narrow(0, at, rows)
+            .expect("narrow")
+            .to_dtype(candle_core::DType::F32)
+            .expect("f32")
+            + delta.narrow(0, delta_at, rows).expect("delta narrow"))
+        .expect("add"))
+        .to_dtype(candle_core::DType::BF16)
+        .expect("round")
+        .to_dtype(candle_core::DType::F32)
+        .expect("back")
+        .to_vec2::<f32>()
+        .expect("host")
+    };
+    let merged_host = merged
+        .to_dtype(candle_core::DType::F32)
+        .expect("f32")
+        .to_vec2::<f32>()
+        .expect("host");
+    let base_host = base
+        .to_dtype(candle_core::DType::F32)
+        .expect("f32")
+        .to_vec2::<f32>()
+        .expect("host");
+
+    assert_eq!(merged_host[config_at], expected_rows(config_at, 0, 1)[0]);
+    let expected_run = expected_rows(run_at, 1, 6);
+    for offset in 0..6 {
+        assert_eq!(merged_host[run_at + offset], expected_run[offset]);
+    }
+    for row in 0..vocab {
+        if row == config_at || (run_at..run_at + 6).contains(&row) {
+            continue;
+        }
+        assert_eq!(merged_host[row], base_host[row], "row {row} moved");
+    }
 }
 
 #[test]

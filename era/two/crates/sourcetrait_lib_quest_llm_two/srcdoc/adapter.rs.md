@@ -37,6 +37,19 @@ full delta would be the size of the weight itself.
 
 ### fn merge
 
+Rows splice by narrow-and-cat, mirroring the trainer's apply_head_delta:
+the seven merged rows go through f32 and one cast back, and the other
+hundred thousand ride as views into one cat in the base dtype. The first
+cut cast the whole head to f32 and chained two slice_assigns over it;
+candle's slice_assign pads its source and a u8 mask to the full tensor
+shape and runs where_cond, so beside ~13.6 GiB of resident weights the
+vocabulary-wide f32 transients exceeded the card's remaining ~10 GiB and
+every r2_sft_head daemon load died with CUDA_ERROR_OUT_OF_MEMORY - while
+plain-LoRA adapters loaded fine, which is what localized it. The tail
+guard covers a checkpoint whose vocabulary ends exactly at the run
+block; the two leading segments are non-empty for any geometry
+validate_geometry admits.
+
 ## fn target_weight_name
 
 The placement check, and it is a REJECT-BY-NAME surface rather than a filter.
@@ -71,7 +84,9 @@ header at the delta's implied shape. Metadata can be edited; geometry cannot.
 ### fn apply
 
 The merge goes base to f32, plus delta, then ONE cast to the requested dtype.
-Adding in the model dtype would round twice.
+Adding in the model dtype would round twice. Rows come back already in the
+base dtype - the same one-cast discipline applied per changed row - so the
+trailing cast is a no-op there.
 
 ## impl SimpleBackend for DeltaBackend
 
