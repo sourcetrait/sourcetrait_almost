@@ -1,7 +1,7 @@
-# hybrid.rs
+# oracle.rs
 
 The stateless Olmo-Hybrid forward on burn: the oracle triangle's third stack,
-beside the original python one and the candle library.
+beside the original python one and this crate's own candle engine.
 
 It is implemented from the pinned checkpoint semantics rather than translated
 from the candle implementation, and that is the entire reason it exists. Era one's

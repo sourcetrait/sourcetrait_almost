@@ -1,4 +1,4 @@
-# hybrid_load.rs
+# oracle_load.rs
 
 Independent checkpoint plumbing for the burn oracle: its own config
 deserialization and its own safetensors-to-host reader, plus the dump readers the

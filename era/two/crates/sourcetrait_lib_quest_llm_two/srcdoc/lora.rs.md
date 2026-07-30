@@ -62,6 +62,10 @@ smaller than the pair that would approximate it.
 Added at forward rather than merged at load, so the base taps stay shared and
 unmodified. A zero delta therefore yields the base convolution bit-exact.
 
+## struct GdnAdapters
+
+## struct AttnAdapters
+
 ## enum LayerAdapters
 
 Two variants rather than one struct with optional fields, which is what makes the
