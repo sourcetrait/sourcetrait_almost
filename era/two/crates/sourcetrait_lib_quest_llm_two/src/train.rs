@@ -12,6 +12,9 @@ use burn::tensor::{
 type FloatTensor<B, const D: usize> = burn::tensor::Tensor<B, D>;
 pub type OptState<B> = <burn::optim::AdamW as SimpleOptimizer<B>>::State<2>;
 
+/// The supervised loop's per-pass reshuffle seed (deterministic).
+const SFT_SHUFFLE_SEED: u64 = 0x5EED_0001;
+
 /// The knobs every stage loop shares.
 pub struct LoopOptions {
     pub steps: usize,
@@ -257,6 +260,14 @@ pub fn forward_cache<AD: AutodiffBackend>(
     (layer_inputs, x)
 }
 
+/// A loss block's yield: the loss, its seed gradient, and the head
+/// delta's own gradients.
+pub type SeedGrads<AD> = (
+    f32,
+    FloatTensor<<AD as AutodiffBackend>::InnerBackend, 2>,
+    HashMap<String, FloatTensor<<AD as AutodiffBackend>::InnerBackend, 2>>,
+);
+
 /// The loss block: one sequence's scalar loss, its seed gradient, and
 /// the head delta's own gradients when a delta is in the block.
 pub fn seed_from_hidden<AD, F>(
@@ -264,11 +275,7 @@ pub fn seed_from_hidden<AD, F>(
     head_delta: Option<&HeadDelta<AD>>,
     top_x: FloatTensor<AD::InnerBackend, 2>,
     build_loss: F,
-) -> LibQuestResult<(
-    f32,
-    FloatTensor<AD::InnerBackend, 2>,
-    HashMap<String, FloatTensor<AD::InnerBackend, 2>>,
-)>
+) -> LibQuestResult<SeedGrads<AD>>
 where
     AD: AutodiffBackend,
     F: FnOnce(
@@ -1090,12 +1097,26 @@ pub fn sft_loop<AD: AutodiffBackend>(
     let mut first_loss = 0f32;
     let mut last_loss = 0f32;
     let mut trained_tokens = 0usize;
+    // Per-pass seeded reshuffle: a fixed order replays the same neighbor
+    // sequence every pass, compounding order effects at batch 1.
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    let mut order_epoch = usize::MAX;
     let started = std::time::Instant::now();
     for step in 0..options.steps {
         let mut accumulated: HashMap<String, FloatTensor<AD::InnerBackend, 2>> = HashMap::new();
         let mut batch_loss = 0f32;
         for slot in 0..accumulate {
-            let index = (step * accumulate + slot) % rows.len();
+            let flat = step * accumulate + slot;
+            let epoch = flat / rows.len();
+            if epoch != order_epoch {
+                let mut rng = SplitMix64::new(SFT_SHUFFLE_SEED ^ epoch as u64);
+                for high in (1..order.len()).rev() {
+                    let pick = rng.next_below(high + 1);
+                    order.swap(high, pick);
+                }
+                order_epoch = epoch;
+            }
+            let index = order[flat % rows.len()];
             let (ids, mask) = (&rows[index], &masks[index]);
             snafu::ensure_whatever!(
                 ids.len() == seq_len + 1 && mask.len() == seq_len + 1,

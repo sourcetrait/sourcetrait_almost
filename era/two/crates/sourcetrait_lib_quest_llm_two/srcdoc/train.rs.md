@@ -213,6 +213,24 @@ A row supervising no position raises rather than stepping, because a zero-loss
 step would look clean while training nothing. Packing should have dropped it
 already.
 
+The per-pass reshuffle exists because a fixed order at batch 1 replays the
+identical neighbor sequence every pass, so momentum wake and interference
+compound on the same rows instead of averaging out; measured as tail-row
+wobble on a 170-row set before it landed. The permutation is Fisher-Yates
+over SplitMix64 seeded by a constant xor the epoch, so a run is reproducible
+and two passes never share an order. The other loops keep their fixed order:
+cpt chunks are already shuffled at pack time, and the preference and
+reinforcement loops index pairs and groups whose internal order carries
+meaning.
+
+Resuming a settled adapter at the peak rate destabilizes it before it
+re-settles, measured live: a two-pass continuation of a floored twelve-pass
+run lifted 47 of 170 rows back over the 0.01 bar with a worst of 0.39.
+Fresh AdamW moments make early updates near rate-sized regardless of
+gradient magnitude - the cold-moments condition the rlvr warmup note names,
+arriving through resume. A continuation therefore wants a settle-class rate
+or a fresh run; there is no cheap warm-rate top-up.
+
 ## struct EncodedPair
 
 ## fn dpo_loop
