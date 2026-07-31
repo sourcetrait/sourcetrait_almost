@@ -58,9 +58,9 @@ decode removes it, so only a caller holding token ids can know.
 ## fn think
 
 Runs the form on the Thinkspace's evaluator and renders the answer back
-as a thought turn carrying a typed `<output>` block. That is 10_Channels'
-ruling made true in practice rather than in intent - a result from `<nu>`
-comes back TYPED rather than as opaque text.
+as a thought turn carrying a typed `<output>` block. That is the channel
+design's ruling made true in practice rather than in intent - a result
+from `<nu>` comes back TYPED rather than as opaque text.
 
 A failure becomes `Repair` rather than a block describing the failure.
 The model would otherwise have to distinguish a result from a report of a

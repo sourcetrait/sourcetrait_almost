@@ -9,8 +9,8 @@ checkpoint - and it lives in the library anyway. It sat in a crate of its own
 once, so that an eon binary could speak the program's data language without
 linking an era's engine. That justification did not survive measurement: a
 binary carries only what it CALLS, so a consumer that never drives the engine
-never linked it, and every eon binary already depended on the library regardless
-(17_End_Use). The module path never moved either way, so `lib::nu` resolves as
+never linked it, and every eon binary already depended on the library
+regardless. The module path never moved either way, so `lib::nu` resolves as
 it always has.
 
 NUON is the program's primary data format. Artifacts we author are `.nuon` -
