@@ -62,6 +62,29 @@ fn the_string_family_is_registered_and_transforms() {
     assert_eq!(value.as_str().expect("string"), "ABC");
 }
 
+/// The data-transform syllabus's whole vocabulary resolves, so no
+/// trained reach can die as an implicit external at serve - the way
+/// `split row` did before the string family was measured in.
+#[test]
+fn the_transform_vocabulary_the_syllabus_teaches_resolves() {
+    let engine = evaluator();
+    for name in [
+        "columns", "each", "first", "get", "last", "length", "reverse", "sort", "sort-by",
+        "str capitalize", "str downcase", "str join", "str replace", "str trim", "str upcase",
+        "split row", "split words", "uniq", "where",
+    ] {
+        assert!(engine.resolves(name), "{name} is taught, so it must resolve");
+    }
+    let value = engine
+        .evaluate("{host: masa, port: 7842} | columns | length", None)
+        .expect("evaluates");
+    assert_eq!(value.as_int().expect("int"), 2);
+    let value = engine
+        .evaluate("[[name, size]; [a, 2], [b, 9], [c, 4]] | sort-by size | last | get name", None)
+        .expect("evaluates");
+    assert_eq!(value.as_str().expect("string"), "b");
+}
+
 /// Text interchange in both directions. NUON is the program's own
 /// format and JSON is the foreign seam, so the round trip through both
 /// is what a format-moving mode actually does.

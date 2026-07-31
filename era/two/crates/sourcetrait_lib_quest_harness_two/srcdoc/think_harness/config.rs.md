@@ -46,12 +46,23 @@ program and there is no reason for it to stop being data here.
 
 ## fn prepare
 
-The `liquid` key's PRESENCE is the switch, and that is all this code reads from
-it. The design states the presence rule and does not state what the value
-means, so nothing is inferred from it - a record there is not treated as extra
-fill data, because inventing that convention would make it real by
-implementation rather than by decision. When the value acquires a meaning, this
-is the line that changes.
+The `liquid` key's presence is the templating switch, and its value is a
+record of template bindings - the infill channel. Each key binds under its
+own name beside the pass channels, which is how a literal reaches the
+question's own text with nothing piped: `{liquid: {train: {...}}}` binds
+`train` and the template reads `{{ train.x }}`. An empty record is a
+templated prompt addressing the pass channels alone. The training set
+spells this same record in its set rows, so the runtime and the syllabus
+share one mechanism rather than the tree inventing a second one.
+
+An earlier revision read only the presence and bound the passes alone,
+recording that nothing was inferred from the value because the design had
+not yet given it a meaning. The realignment gave it one, and this is the
+line that changed.
+
+The value must BE a record, and a liquid key shadowing a pass channel's
+name is refused: the caller is code, and one name quietly meaning two
+values is the worse reading in both directions.
 
 A template referencing an unbound channel fails the whole turn rather than
 rendering a hole, which follows from the renderer being strict. That is the

@@ -82,6 +82,11 @@ pub fn split(config: &nu::Value) -> HarnessQuestResult<(nu::Record, nu::Record)>
 }
 
 /// Prepare one turn: render the prompt if asked, strip our own keys.
+///
+/// The liquid key carries a record of template bindings: each key binds
+/// under its own name beside the pass channels, which is how an infill
+/// call reads a literal into the question's own text. An empty record
+/// is a templated prompt addressing the pass channels alone.
 pub fn prepare(
     config: &nu::Value,
     prompt: &str,
@@ -89,11 +94,30 @@ pub fn prepare(
 ) -> HarnessQuestResult<PreparedTurn> {
     let conversation = Conversation::of(config)?;
     let (think_harness, visible) = split(config)?;
-    let templated = think_harness.get(LIQUID_KEY).is_some();
-    let prompt = if templated {
-        template::render(prompt, bindings)?
-    } else {
-        prompt.to_string()
+    let liquid = think_harness.get(LIQUID_KEY);
+    let templated = liquid.is_some();
+    let prompt = match liquid {
+        Some(value) => {
+            let nu::Value::Record { val, .. } = value else {
+                snafu::whatever!(
+                    "{LIQUID_KEY} carries a record of template bindings; got {}",
+                    value.get_type()
+                );
+            };
+            let mut bound: Vec<(String, nu::Value)> = bindings.to_vec();
+            for (key, value) in val.iter() {
+                let taken = bound
+                    .iter()
+                    .any(|(pass, _)| template::binding_name(pass) == key);
+                snafu::ensure_whatever!(
+                    !taken,
+                    "{LIQUID_KEY} binds `{key}`, which a pass channel already binds"
+                );
+                bound.push((key.clone(), value.clone()));
+            }
+            template::render(prompt, &bound)?
+        }
+        None => prompt.to_string(),
     };
     Ok(PreparedTurn {
         prompt,

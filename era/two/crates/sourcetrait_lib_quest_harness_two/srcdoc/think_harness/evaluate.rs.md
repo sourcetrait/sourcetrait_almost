@@ -153,6 +153,15 @@ because nothing that could was added.
 
 ## fn add_filters
 
+`columns` and `sort-by` arrived the way `split row` did: the data-transform
+syllabus asks `evaluate` for a record's field names and a table's largest
+row, and a trained transform whose head is unregistered dies as an implicit
+external at serve. The difference is that these two were measured in from
+the training set before the live failure rather than after it. The
+vocabulary lock in the tests is the standing check: every head the syllabus
+teaches must resolve here, so the set follows the syllabus rather than
+being curated on taste.
+
 ## fn add_math
 
 The bare `math` head is registered alongside its subcommands so an emission

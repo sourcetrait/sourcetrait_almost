@@ -221,7 +221,7 @@ fn plain_prose_still_answers_as_text() {
 #[test]
 fn assembly_shows_the_model_its_config_input_and_prompt() {
     let request = Request {
-        config: value("{env: {PWD: '/tmp/foo'}, liquid: true}"),
+        config: value("{env: {PWD: '/tmp/foo'}, liquid: {}}"),
         prompt: String::from("What directory am I in?"),
         bindings: vec![Binding::new("$in", value("[a, b]"))],
     };
@@ -246,7 +246,7 @@ fn assembly_shows_the_model_its_config_input_and_prompt() {
 #[test]
 fn a_templated_prompt_renders_from_its_bound_channel() {
     let request = Request {
-        config: value("{liquid: true}"),
+        config: value("{liquid: {}}"),
         prompt: String::from("Count of {{ in | size }}."),
         bindings: vec![Binding::new("$in", value("[a, b, c]"))],
     };
@@ -256,6 +256,23 @@ fn a_templated_prompt_renders_from_its_bound_channel() {
         "rendered prompt: {}",
         assembled.text
     );
+}
+
+/// An infill call: the liquid record reaches the question's own text,
+/// the key never reaches the model, and nothing is piped.
+#[test]
+fn an_infill_call_renders_the_literal_into_the_question() {
+    let request = Request {
+        config: value("{liquid: {train: {expression: '47 + 68'}}}"),
+        prompt: String::from("What is {{ train.expression }}?"),
+        bindings: vec![],
+    };
+    let assembled = assemble(&request).expect("assembles");
+    assert_eq!(
+        assembled.text, "What is 47 + 68?",
+        "no config block and no input block: the whole turn is the question"
+    );
+    assert!(assembled.templated);
 }
 
 #[test]

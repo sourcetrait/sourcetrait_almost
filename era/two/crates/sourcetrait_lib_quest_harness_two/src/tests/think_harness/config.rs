@@ -18,7 +18,7 @@ fn bindings(nuon: &str) -> Vec<(String, nu::Value)> {
 
 #[test]
 fn the_think_harness_keys_are_split_off_and_everything_else_stays() {
-    let config = nu::from_nuon_text("{env: {PWD: '/tmp'}, liquid: true, tone: terse}")
+    let config = nu::from_nuon_text("{env: {PWD: '/tmp'}, liquid: {}, tone: terse}")
         .expect("nuon");
     let (think_harness, visible) = split(&config).expect("splits");
     assert!(think_harness.get(LIQUID_KEY).is_some());
@@ -46,7 +46,7 @@ fn without_the_key_the_prompt_is_sent_verbatim() {
 
 #[test]
 fn with_the_key_the_prompt_renders_and_the_key_does_not_travel() {
-    let config = nu::from_nuon_text("{env: {PWD: '/tmp/foo'}, liquid: true}").expect("nuon");
+    let config = nu::from_nuon_text("{env: {PWD: '/tmp/foo'}, liquid: {}}").expect("nuon");
     let turn = prepare(
         &config,
         "List the {{ in.count }} newest files.",
@@ -62,9 +62,55 @@ fn with_the_key_the_prompt_renders_and_the_key_does_not_travel() {
     assert!(val.get("env").is_some(), "env does");
 }
 
+/// The infill contract: the liquid record's keys are template bindings,
+/// so a literal reaches the question's own text with nothing piped.
+#[test]
+fn the_liquid_records_keys_bind_into_the_template() {
+    let config = nu::from_nuon_text("{liquid: {train: {expression: '47 + 68'}}}")
+        .expect("nuon");
+    let turn = prepare(&config, "What is {{ train.expression }}?", &[])
+        .expect("prepares");
+    assert!(turn.templated);
+    assert_eq!(turn.prompt, "What is 47 + 68?");
+}
+
+/// Both channels serve one render: the pass bindings and the liquid
+/// record's keys address the same template.
+#[test]
+fn liquid_keys_bind_beside_the_pass_channels() {
+    let config = nu::from_nuon_text("{liquid: {train: {sep: '/'}}}").expect("nuon");
+    let turn = prepare(
+        &config,
+        "Join {{ in.count }} parts with {{ train.sep }}.",
+        &bindings("{count: 3}"),
+    )
+    .expect("prepares");
+    assert_eq!(turn.prompt, "Join 3 parts with /.");
+}
+
+/// The caller is code, so a flag where the bindings belong is refused
+/// rather than read as an empty record.
+#[test]
+fn a_liquid_value_that_is_not_a_record_is_refused() {
+    let config = nu::from_nuon_text("{liquid: true}").expect("nuon");
+    let error = prepare(&config, "hi", &[]).expect_err("refused").to_string();
+    assert!(error.contains("record of template bindings"), "got {error}");
+}
+
+/// A liquid key shadowing a pass channel would make one name mean two
+/// values, so it is refused rather than either one silently winning.
+#[test]
+fn a_liquid_key_colliding_with_a_pass_channel_is_refused() {
+    let config = nu::from_nuon_text("{liquid: {in: {n: 2}}}").expect("nuon");
+    let error = prepare(&config, "{{ in.n }}", &bindings("{n: 1}"))
+        .expect_err("refused")
+        .to_string();
+    assert!(error.contains("already binds"), "got {error}");
+}
+
 #[test]
 fn a_template_referencing_an_unbound_channel_fails_the_turn() {
-    let config = nu::from_nuon_text("{liquid: true}").expect("nuon");
+    let config = nu::from_nuon_text("{liquid: {}}").expect("nuon");
     assert!(prepare(&config, "{{ args.0 }}", &bindings("{n: 1}")).is_err());
 }
 
