@@ -301,6 +301,14 @@ fn answer(blocks: &[Block]) -> HarnessQuestResult<Outcome> {
             .unwrap_or_default(),
     };
 
+    if channel::carries_marker(&rendered) {
+        envelope.error(
+            "channel::stray_marker",
+            Some(Tag::Output.name()),
+            "the answer carries channel tokens that did not parse as blocks",
+        );
+    }
+
     let config = emitted_config(blocks, &mut envelope);
 
     if !envelope.is_clean() {

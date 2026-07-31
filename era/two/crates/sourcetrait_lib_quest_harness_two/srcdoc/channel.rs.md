@@ -93,6 +93,16 @@ is byte-identical to what the runtime renders and reads. A plain replace is safe
 because the `<|...|>` aliases do not occur in content by accident; the distinct
 form is what keeps that true.
 
+## fn carries_marker
+
+The prose path's guard, and it deliberately matches SPELLINGS rather
+than token ids. An emitted id always decodes to its spelling, so a text
+match cannot miss a real marker - and it is strictly wider: text
+assembled from ordinary tokens to LOOK like a marker deceives a
+downstream reader exactly as a real one would, so it repairs exactly
+the same. The id-level test the design first framed would need the ids
+threaded through `step`, and would catch less.
+
 ## fn parse_blocks
 
 Liberal on input, canonical on output, and the asymmetry is deliberate. The

@@ -312,6 +312,11 @@ pub fn authoring_to_wire(text: &str) -> String {
     out
 }
 
+/// Whether text carries any channel-token spelling; the prose guard.
+pub fn carries_marker(text: &str) -> bool {
+    TAGS.iter().any(|tag| text.contains(tag.spelling()))
+}
+
 /// Parse a decoded turn into its blocks, line-anchored.
 pub fn parse_blocks(text: &str, aliasing: Aliasing) -> HarnessQuestResult<Vec<Block>> {
     let lines: Vec<&str> = text.lines().collect();

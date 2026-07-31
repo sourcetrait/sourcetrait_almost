@@ -140,6 +140,17 @@ arguably wrong and is worth revisiting - it hands the caller a data
 literal where prose was expected - but the alternative is inventing a
 rendering the model did not ask for.
 
+The stray-marker guard closes the InternalThinkspace invariant's last
+hole: a marker mid-line is not an opener, so under tool-marker aliasing
+it used to sweep into the prose path and cross the wire inside an
+answer. The rendering is checked instead of the raw emission because
+rendered text is the only thing that crosses as prose - a liquid render
+that embeds a marker is caught by the same line. The other routes were
+already closed: an unclosed opener is a parse repair, unmarked lines
+beside real blocks are dropped, and the stray trailing closer the alias
+retirement is blocked on is in that dropped class, so this guard cannot
+disturb it.
+
 ## fn emitted_config
 
 A `<config>` travels OUTBOUND as the caller's curation, so one arriving

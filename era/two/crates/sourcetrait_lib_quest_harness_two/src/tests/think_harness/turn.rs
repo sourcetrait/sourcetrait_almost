@@ -189,6 +189,35 @@ fn an_unclosed_block_asks_for_repair_rather_than_erroring() {
     assert!(envelope.errors.iter().any(|row| row.kind == "channel::parse"));
 }
 
+/// The invariant: an emission carrying channel tokens that did not
+/// parse as blocks never crosses the wire as prose.
+#[test]
+fn a_stray_marker_in_prose_asks_for_repair_rather_than_crossing() {
+    let emission = "The answer rides <|extra_id_2|> mid-line, unparsed.";
+    let outcome =
+        interpret(&evaluator(), emission, Aliasing::ToolMarkers, false).expect("interprets");
+    let Outcome::Repair(envelope) = outcome else {
+        panic!("expected a repair, got {outcome:?}");
+    };
+    assert_eq!(envelope.errors[0].kind, "channel::stray_marker");
+}
+
+#[test]
+fn plain_prose_still_answers_as_text() {
+    let outcome = interpret(
+        &evaluator(),
+        "Just an ordinary sentence.",
+        Aliasing::ToolMarkers,
+        false,
+    )
+    .expect("interprets");
+    let Outcome::Answered(answer) = outcome else {
+        panic!("expected an answer, got {outcome:?}");
+    };
+    assert_eq!(answer.rendered, "Just an ordinary sentence.");
+    assert!(answer.value.is_none());
+}
+
 #[test]
 fn assembly_shows_the_model_its_config_input_and_prompt() {
     let request = Request {
