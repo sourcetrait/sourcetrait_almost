@@ -71,7 +71,7 @@ found rather than the first, so a caller sees the collision rather than
 guessing at it.
 
 A file is read HERE rather than handed to the model as a path. The prompt
-is a Liquid template that Questness renders, so what the turn needs is
+is a Liquid template that ThinkHarness renders, so what the turn needs is
 the text; passing the path would make the model's own filesystem access
 the mechanism, which it does not have.
 

@@ -5,7 +5,7 @@ members = [
   "crates/sourcetrait_dquest",
   "crates/sourcetrait_quest",
   # Parked while the harness and daemon are built; camp returns as the
-  # second QuestHarness consumer.
+  # second UseHarness consumer.
   # "crates/sourcetrait_quest_camp",
 ]
 

@@ -4,8 +4,8 @@ use crate::channel::{
     Aliasing,
     parse_blocks,
 };
-use crate::questness::contract::check_agreements;
-use crate::questness::evaluate::QuestnessEvaluator;
+use crate::think_harness::contract::check_agreements;
+use crate::think_harness::evaluate::ThinkHarnessEvaluator;
 
 /// The worked example from the channel design, in wire spelling.
 const WORKED: &str = "\
@@ -21,8 +21,8 @@ const WORKED: &str = "\
 const INTERACT: &str =
     "def --env interact [args: list<string>]: record<name: string> -> list<string> { [] }";
 
-fn evaluator() -> QuestnessEvaluator {
-    QuestnessEvaluator::new().expect("the evaluator builds")
+fn evaluator() -> ThinkHarnessEvaluator {
+    ThinkHarnessEvaluator::new().expect("the evaluator builds")
 }
 
 #[test]

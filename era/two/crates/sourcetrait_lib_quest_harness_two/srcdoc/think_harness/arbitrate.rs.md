@@ -1,6 +1,6 @@
 # arbitrate.rs
 
-Questness as an object rather than a set of functions. It holds the
+ThinkHarness as an object rather than a set of functions. It holds the
 Thinkspace's evaluator and nothing else, and the one thing it RUNS is a
 think turn. This is the module that closes the loop the other three open.
 
@@ -23,13 +23,13 @@ text to send back. A caller holding a `Step` cannot forget to service one,
 because no variant would let it.
 
 `Ask` is the opposite and it is the correction this module was rewritten
-for. It IS a step, because Questness does not service it and must not:
+for. It IS a step, because ThinkHarness does not service it and must not:
 the caller's own engine runs it, and the turn pauses until a later
 request carries the result. An earlier version of this file described a
 `serve` that crossed a seam to a client harness, and that seam was never
 part of the design - it was mine.
 
-## struct Questness
+## struct ThinkHarness
 
 Owns the evaluator rather than borrowing one, because the evaluator's
 whole design is build-once-clone-per-evaluation and the owner of the turn
@@ -38,11 +38,11 @@ what makes that ownership right rather than incidental.
 
 The model is NOT here, and neither is a harness. The model lives in the
 daemon's singleton container, which is about WEIGHTS; the conversation
-belongs to the Thinkspace's Questness. What Questness owns is the
+belongs to the Thinkspace's ThinkHarness. What ThinkHarness owns is the
 conversation about the model: it renders what goes in, reads what comes
 out, works out what it can for itself, and hands back anything it cannot.
 
-The consequence worth noting is that this makes Questness testable with
+The consequence worth noting is that this makes ThinkHarness testable with
 no model and no harness at all, which is why the arbitration locks run in
 milliseconds.
 

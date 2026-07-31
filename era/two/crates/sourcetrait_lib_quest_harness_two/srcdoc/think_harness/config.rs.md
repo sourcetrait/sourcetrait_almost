@@ -9,7 +9,7 @@ whatever arrives, records being open, so an unfamiliar key is a runtime fact
 rather than a schema violation. What is fixed is only which keys are addressed
 to us instead of to the model.
 
-## const QUESTNESS_KEYS
+## const THINK_HARNESS_KEYS
 
 ## const LIQUID_KEY
 
@@ -35,7 +35,7 @@ drops one the caller meant to keep.
 
 ## fn split
 
-Everything not in the Questness list passes through untouched, including keys
+Everything not in the ThinkHarness list passes through untouched, including keys
 nobody has sent before. `env` is the clearest case: it is a curated environment
 rather than the real one, and what the model learns about it is a disposition -
 that a key called `env` is its own environment - rather than a field this code

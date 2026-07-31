@@ -13,7 +13,7 @@ whoever owns the session - the daemon. A log that minted its own identity
 would need a hash and a random source in the crate every other crate
 depends on, to answer a question it is not the one asking.
 
-The consequence is that this type is the same on both sides. The Questness
+The consequence is that this type is the same on both sides. The ThinkHarness
 side passes two segments, a thinkspace over a session; the harness side
 passes one, a session. Nothing here knows which side it is on.
 

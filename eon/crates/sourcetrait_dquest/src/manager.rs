@@ -10,7 +10,7 @@ pub(crate) struct SessionManager {
     thinkspace: nom::ThinkspaceNom,
     log_root: Option<PathBuf>,
     live: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<nom::SessionNom>>>,
-    questness: QuestnessHandle,
+    think_harness: ThinkHarnessHandle,
 }
 
 /// A session's place in the registry, held for as long as it runs.
@@ -28,14 +28,14 @@ impl SessionManager {
     pub(crate) fn for_user(
         username: &str,
         log_root: Option<PathBuf>,
-        questness: impl bridge::all::Questness + 'static,
+        think_harness: impl bridge::all::ThinkHarness + 'static,
     ) -> Self {
-        let owner: Box<dyn bridge::all::Questness> = Box::new(questness);
+        let owner: Box<dyn bridge::all::ThinkHarness> = Box::new(think_harness);
         Self {
             thinkspace: nom::ThinkspaceNom::of(username),
             log_root,
             live: std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new())),
-            questness: std::sync::Arc::new(tokio::sync::Mutex::new(owner)),
+            think_harness: std::sync::Arc::new(tokio::sync::Mutex::new(owner)),
         }
     }
 
@@ -44,10 +44,10 @@ impl SessionManager {
         &self.thinkspace
     }
 
-    /// This space's turn owner. Every session shares the one Questness,
+    /// This space's turn owner. Every session shares the one ThinkHarness,
     /// which is what binds a continuation to the turn it continues.
-    pub(crate) fn questness(&self) -> QuestnessHandle {
-        std::sync::Arc::clone(&self.questness)
+    pub(crate) fn think_harness(&self) -> ThinkHarnessHandle {
+        std::sync::Arc::clone(&self.think_harness)
     }
 
     /// This session's log, addressed by space and then by session.

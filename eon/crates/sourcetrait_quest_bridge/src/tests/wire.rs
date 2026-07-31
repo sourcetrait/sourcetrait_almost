@@ -272,7 +272,7 @@ fn a_frame_that_is_not_a_message_is_refused() {
 }
 
 /// The whole point of the rewrite: a typed value crosses AS A VALUE
-/// rather than as a rendering of one, so no layer but Questness ever
+/// rather than as a rendering of one, so no layer but ThinkHarness ever
 /// sees a block.
 #[test]
 fn a_nu_value_crosses_the_wire_inside_a_request() {

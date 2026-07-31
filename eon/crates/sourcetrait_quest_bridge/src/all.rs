@@ -44,7 +44,7 @@ pub trait Engine {
 /// will own it.
 pub trait Era {
     type Engine: Engine;
-    type Questness: Questness;
+    type ThinkHarness: ThinkHarness;
 
     /// The era's identity, without loading anything.
     fn info() -> EraInfo;
@@ -58,10 +58,10 @@ pub trait Era {
     /// there and `Engine::open` documents them as unconsulted.
     fn engine(options: &ChatOptions) -> Result<Self::Engine, String>;
 
-    /// Build a Questness. One per Thinkspace, carrying that space's
+    /// Build a ThinkHarness. One per Thinkspace, carrying that space's
     /// conversation, so a consumer builds one per space rather than
     /// sharing one.
-    fn questness() -> Result<Self::Questness, String>;
+    fn think_harness() -> Result<Self::ThinkHarness, String>;
 }
 
 /// One repair row, addressed by cell-path rather than by span.
@@ -114,7 +114,7 @@ pub enum Step {
 ///
 /// `?Send` is deliberately NOT wanted - a consumer drives this from a
 /// blocking task, so the value has to cross a thread boundary.
-pub trait Questness: Send {
+pub trait ThinkHarness: Send {
     /// The text one turn shows the model.
     fn assemble(&mut self, request: &InferRequest) -> Result<String, String>;
 

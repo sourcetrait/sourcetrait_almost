@@ -1,4 +1,4 @@
-//! Questness itself: it owns the turn and arbitrates what it asks for.
+//! ThinkHarness itself: it owns the turn and arbitrates what it asks for.
 use crate::*;
 
 /// What one emission moved the turn to.
@@ -25,16 +25,16 @@ pub enum Step {
 ///
 /// It holds no harness and calls nothing out. The one thing it runs is a
 /// think turn, on the Thinkspace's own evaluator.
-pub struct Questness {
-    evaluator: QuestnessEvaluator,
+pub struct ThinkHarness {
+    evaluator: ThinkHarnessEvaluator,
     aliasing: channel::Aliasing,
     log: Option<session::SessionLog>,
 }
 
-impl Questness {
+impl ThinkHarness {
     pub fn new(aliasing: channel::Aliasing) -> HarnessQuestResult<Self> {
         Ok(Self {
-            evaluator: QuestnessEvaluator::new()?,
+            evaluator: ThinkHarnessEvaluator::new()?,
             aliasing,
             log: None,
         })
@@ -124,7 +124,7 @@ impl Questness {
             Err(error) => {
                 let mut envelope = Envelope::default();
                 envelope.error(
-                    "questness::evaluate",
+                    "think_harness::evaluate",
                     Some(Tag::Nu.name()),
                     &error.to_string(),
                 );
@@ -143,7 +143,7 @@ impl Questness {
             Err(error) => {
                 let mut envelope = Envelope::default();
                 envelope.error(
-                    "questness::repl",
+                    "think_harness::repl",
                     Some(Tag::Nu.name()),
                     &error.to_string(),
                 );

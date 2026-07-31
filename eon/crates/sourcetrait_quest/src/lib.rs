@@ -1,6 +1,6 @@
 pub(crate) mod converse;
 pub(crate) mod error;
-pub(crate) mod harness;
+pub(crate) mod use_harness;
 pub(crate) mod plugin;
 pub(crate) mod prompt;
 pub mod run;

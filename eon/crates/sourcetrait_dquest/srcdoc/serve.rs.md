@@ -3,7 +3,7 @@
 ## fn record
 
 A logging failure is DROPPED rather than reported, and the rule behind
-that is the same one the Questness side holds to: the log is a record of
+that is the same one the ThinkHarness side holds to: the log is a record of
 the work and never part of it, so nothing a turn does may depend on it
 landing. A session with no log at all takes the same path, which is what
 lets an unresolvable cache home turn logging off instead of refusing

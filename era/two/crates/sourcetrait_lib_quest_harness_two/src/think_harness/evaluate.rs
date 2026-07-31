@@ -22,11 +22,11 @@ pub const DENIED: [&str; 10] = [
 pub const PARSE_TIME_LOADERS: [&str; 2] = ["use", "overlay use"];
 
 /// The engine the inside path runs on: no filesystem, no externals.
-pub struct QuestnessEvaluator {
+pub struct ThinkHarnessEvaluator {
     base: r::nu::EngineState,
 }
 
-impl QuestnessEvaluator {
+impl ThinkHarnessEvaluator {
     /// Build the base engine once; every evaluation clones it.
     pub fn new() -> HarnessQuestResult<Self> {
         let mut base = nu_cmd_lang::create_default_context();
@@ -134,7 +134,7 @@ impl QuestnessEvaluator {
         let engine = self.base.clone();
         let source = source.to_string();
         let spawned = std::thread::Builder::new()
-            .name(String::from("questness-eval"))
+            .name(String::from("think_harness-eval"))
             .stack_size(PARSE_STACK_BYTES)
             .spawn(move || {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {

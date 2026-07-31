@@ -1,6 +1,6 @@
 # turn.rs
 
-The turn is the layer that makes Questness a model runtime rather than a
+The turn is the layer that makes ThinkHarness a model runtime rather than a
 prompt wrapper: it decides what the model is shown and what its emission
 obliges us to do next. Everything here is experimental in the campaign's
 sense - the shape is a first draft expected to move once there is a
@@ -32,7 +32,7 @@ boundaries to buy nothing.
 ## struct Request
 
 The caller's side before anything is rendered. `config` carries the whole
-record including the Questness keys, because stripping them is
+record including the ThinkHarness keys, because stripping them is
 `config::prepare`'s job and doing it earlier would mean two places knew
 the key list.
 
@@ -65,7 +65,7 @@ destination, and that is the correction this module was rewritten for. A
 form does not HAVE a destination that something decides for it: an
 evaluate is a think turn and nothing else ever is. Carrying the two as
 one shape with a flag beside it is what let a client-harness seam grow
-inside Questness, which never belonged here - Questness calls nothing
+inside ThinkHarness, which never belonged here - ThinkHarness calls nothing
 out.
 
 `Ask` carries its bindings because an ask with nothing bound to it is a
@@ -167,7 +167,7 @@ disagree and either could move.
 
 Binds the template to the OUTPUT value, falling back to `$in` when no
 `<pass>` names it. The fallback exists because the worked example in
-16_Questness always writes the pass explicitly, and a model that omits it
+16_ThinkHarness always writes the pass explicitly, and a model that omits it
 has still made its intent obvious - there is exactly one value in scope.
 
 Pass diagnostics are dropped on this path, which is a known soft spot. A

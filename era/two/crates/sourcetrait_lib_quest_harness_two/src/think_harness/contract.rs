@@ -7,7 +7,7 @@ pub const ARGS_POSITIONAL: &str = "args";
 
 /// What a def's signature says, before it is matched to a form.
 ///
-/// Internal to Questness. The form a body turns out to be is an
+/// Internal to ThinkHarness. The form a body turns out to be is an
 /// `InferNu`; this is only what the parser read on the way there.
 #[derive(Debug, Clone)]
 pub struct NuSignature {
@@ -33,7 +33,7 @@ impl NuSignature {
     }
 }
 
-impl questness::evaluate::QuestnessEvaluator {
+impl think_harness::evaluate::ThinkHarnessEvaluator {
     /// Read a `<|nu|>` body's signature back out of the parser.
     ///
     /// The head is discovered by diffing the declaration set rather than

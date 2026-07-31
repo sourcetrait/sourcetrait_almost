@@ -1,8 +1,8 @@
 //! The runtime config record: what we consume, what the model sees.
 use crate::*;
 
-/// Keys addressed to Questness, which never reach the model.
-pub const QUESTNESS_KEYS: [&str; 2] = ["liquid", "conversation"];
+/// Keys addressed to ThinkHarness, which never reach the model.
+pub const THINK_HARNESS_KEYS: [&str; 2] = ["liquid", "conversation"];
 
 /// The key whose presence makes the prompt a Liquid template.
 pub const LIQUID_KEY: &str = "liquid";
@@ -53,7 +53,7 @@ impl Conversation {
 #[derive(Debug, Clone)]
 pub struct PreparedTurn {
     pub prompt: String,
-    /// The config record with the Questness keys removed.
+    /// The config record with the ThinkHarness keys removed.
     pub visible: nu::Value,
     /// Whether the prompt was rendered rather than sent verbatim.
     pub templated: bool,
@@ -61,7 +61,7 @@ pub struct PreparedTurn {
     pub conversation: Conversation,
 }
 
-/// Split a config record into the Questness half and the visible half.
+/// Split a config record into the ThinkHarness half and the visible half.
 pub fn split(config: &nu::Value) -> HarnessQuestResult<(nu::Record, nu::Record)> {
     let nu::Value::Record { val, .. } = config else {
         snafu::whatever!(
@@ -69,16 +69,16 @@ pub fn split(config: &nu::Value) -> HarnessQuestResult<(nu::Record, nu::Record)>
             config.get_type()
         );
     };
-    let mut questness = nu::Record::new();
+    let mut think_harness = nu::Record::new();
     let mut visible = nu::Record::new();
     for (key, value) in val.iter() {
-        if QUESTNESS_KEYS.contains(&key.as_str()) {
-            questness.push(key.clone(), value.clone());
+        if THINK_HARNESS_KEYS.contains(&key.as_str()) {
+            think_harness.push(key.clone(), value.clone());
         } else {
             visible.push(key.clone(), value.clone());
         }
     }
-    Ok((questness, visible))
+    Ok((think_harness, visible))
 }
 
 /// Prepare one turn: render the prompt if asked, strip our own keys.
@@ -88,8 +88,8 @@ pub fn prepare(
     bindings: &[(String, nu::Value)],
 ) -> HarnessQuestResult<PreparedTurn> {
     let conversation = Conversation::of(config)?;
-    let (questness, visible) = split(config)?;
-    let templated = questness.get(LIQUID_KEY).is_some();
+    let (think_harness, visible) = split(config)?;
+    let templated = think_harness.get(LIQUID_KEY).is_some();
     let prompt = if templated {
         template::render(prompt, bindings)?
     } else {

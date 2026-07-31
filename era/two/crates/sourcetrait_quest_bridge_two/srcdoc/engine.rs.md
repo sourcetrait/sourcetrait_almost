@@ -39,9 +39,9 @@ which settings get loaded without writing into the suite's shared
 default - where the same choice would silently reach every other consumer
 of that default rather than only the one that made it.
 
-## struct TwoQuestness
+## struct TwoThinkHarness
 
-## impl Questness for TwoQuestness
+## impl ThinkHarness for TwoThinkHarness
 
 Every request's own config decides the disposition its turn ends with,
 the continuation path included: a resume carrying no config ends with

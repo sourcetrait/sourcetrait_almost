@@ -92,7 +92,7 @@ async fn daemon_with(
     let config =
         sourcetrait_quest_bridge::server_config(&material.files).expect("a server configuration");
     let container = ContainerHandle::spawn(move || Ok(engine));
-    let manager = crate::manager::SessionManager::for_user("box", log_root, crate::tests::manager::StubQuestness);
+    let manager = crate::manager::SessionManager::for_user("box", log_root, crate::tests::manager::StubThinkHarness);
     let task = tokio::spawn(serve(listener, config, container, manager.clone()));
     (address, task, manager)
 }

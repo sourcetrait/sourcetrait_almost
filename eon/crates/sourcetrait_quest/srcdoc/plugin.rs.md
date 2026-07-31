@@ -25,7 +25,7 @@ that reason rather than folded into a general leniency.
 
 ## fn runtime
 
-## fn questness
+## fn think_harness
 
 A poisoned lock is recovered rather than propagated. One call panicking
 must not make every later call fail, and there is no invariant behind the

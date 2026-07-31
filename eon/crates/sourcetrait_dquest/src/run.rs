@@ -46,8 +46,8 @@ fn serve_forever() -> DquestResult<()> {
     // The turn owner is cheap and synchronous, unlike the model, so a
     // failure here is a fault rather than an operational condition and
     // there is nothing to keep the daemon up for.
-    let questness = match <EraBridge as bridge::all::Era>::questness() {
-        Ok(questness) => questness,
+    let think_harness = match <EraBridge as bridge::all::Era>::think_harness() {
+        Ok(think_harness) => think_harness,
         Err(message) => {
             style::fail(&format!("Unable to start: the turn owner did not build: {message}"));
             std::process::exit(1);
@@ -80,7 +80,7 @@ fn serve_forever() -> DquestResult<()> {
         let manager = manager::SessionManager::for_user(
             &username,
             preflight::session_log_root(),
-            questness,
+            think_harness,
         );
         serve::serve(listener, config, container, manager).await;
         Ok(())

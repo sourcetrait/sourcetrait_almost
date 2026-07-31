@@ -1,7 +1,7 @@
 # evaluate.rs
 
 The engine `evaluate` round-trips on: the one nu mode that runs inside
-Questness rather than leaving for the client's harness.
+ThinkHarness rather than leaving for the client's harness.
 
 IT USED TO SIT BEHIND A DEFAULT-OFF FEATURE, on the argument that turning it on
 would make the trainer and the baseliner pay for a shell they never call. That
@@ -55,7 +55,7 @@ This is the concrete form of the_user's argument for sandboxing at all: nushell
 has more surface than a command allowlist reaches, so the allowlist is not where
 the line gets held. It is held by a read-only root.
 
-## struct QuestnessEvaluator
+## struct ThinkHarnessEvaluator
 
 ## fn new
 

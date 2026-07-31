@@ -62,8 +62,8 @@ pub(crate) use bridge::all::Engine;
 /// its turn is over, while the conversation belongs to the Thinkspace, so
 /// a caller returning with the result of an ask resumes rather than
 /// starting again.
-pub(crate) type QuestnessHandle =
-    std::sync::Arc<tokio::sync::Mutex<Box<dyn bridge::all::Questness>>>;
+pub(crate) type ThinkHarnessHandle =
+    std::sync::Arc<tokio::sync::Mutex<Box<dyn bridge::all::ThinkHarness>>>;
 
 pub(crate) use crate::container::ContainerHandle;
 pub(crate) use crate::error::{

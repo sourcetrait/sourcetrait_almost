@@ -49,13 +49,13 @@ pub(crate) async fn serve(
         // Every session in this space shares the one turn owner, so a
         // caller returning with an ask's result resumes the conversation
         // it left rather than starting a new one.
-        let questness = manager.questness();
+        let think_harness = manager.think_harness();
         tokio::spawn(async move {
             let _ticket = ticket;
             let Ok(stream) = acceptor.accept(stream).await else {
                 return;
             };
-            session(stream, container, questness, log).await;
+            session(stream, container, think_harness, log).await;
         });
     }
 }
@@ -63,7 +63,7 @@ pub(crate) async fn serve(
 /// Append one labelled record, if this session is logged at all.
 ///
 /// A logging failure is dropped rather than reported, which is the same
-/// rule the Questness side holds to: the log is a record of the work and
+/// rule the ThinkHarness side holds to: the log is a record of the work and
 /// never part of it, so nothing a turn does depends on it landing.
 fn record(
     log: &Option<log::SessionLog>,
@@ -80,7 +80,7 @@ fn record(
 pub(crate) async fn session(
     stream: r::tls::ServerStream<tokio::net::TcpStream>,
     container: ContainerHandle,
-    questness: QuestnessHandle,
+    think_harness: ThinkHarnessHandle,
     log: Option<log::SessionLog>,
 ) {
     let (read, write) = tokio::io::split(stream);
@@ -110,7 +110,7 @@ pub(crate) async fn session(
                 writer.send(answer).await.is_ok()
             }
             bridge::ClientToServer::Turn(request) => {
-                turn(&mut reader, &mut writer, &container, &questness, request, &log).await
+                turn(&mut reader, &mut writer, &container, &think_harness, request, &log).await
             }
             // Nothing is generating, or the turn arm would be running.
             bridge::ClientToServer::Cancel(_) => writer
@@ -149,12 +149,12 @@ pub(crate) async fn session(
 
 /// Drive one turn to an ending, generating as many times as it takes.
 ///
-/// A THINK NEVER LEAVES THIS LOOP. Questness runs it on the Thinkspace's
+/// A THINK NEVER LEAVES THIS LOOP. ThinkHarness runs it on the Thinkspace's
 /// own evaluator and hands back the text to feed the model again, so one
 /// wire turn can be several generations. Only an answer, an ask, an
 /// insufficiency or a repair ends it.
 ///
-/// THIS REQUIRES THE MULTI-THREADED RUNTIME. Questness is blocking all
+/// THIS REQUIRES THE MULTI-THREADED RUNTIME. ThinkHarness is blocking all
 /// the way down - its evaluator spawns a sized thread and joins it - so
 /// the turn owner is driven through `block_in_place`, which panics on a
 /// current-thread runtime rather than degrading.
@@ -162,13 +162,13 @@ async fn turn(
     reader: &mut Reader,
     writer: &mut Writer,
     container: &ContainerHandle,
-    questness: &QuestnessHandle,
+    think_harness: &ThinkHarnessHandle,
     request: bridge::InferRequest,
     log: &Option<log::SessionLog>,
 ) -> bool {
     // Held for the whole turn: the conversation is the Thinkspace's, so
     // a second turn interleaving generations would corrupt it.
-    let mut owner = questness.lock().await;
+    let mut owner = think_harness.lock().await;
     let mut feed = match tokio::task::block_in_place(|| owner.assemble(&request)) {
         Ok(text) => text,
         Err(message) => {
@@ -230,7 +230,7 @@ async fn turn(
             },
             // The turn PAUSES here. The caller runs it on its own engine
             // and returns the result on the next request, where this
-            // Questness resumes the same conversation.
+            // ThinkHarness resumes the same conversation.
             bridge::all::Step::Ask { form, inputs } => bridge::InferResponse {
                 nu: Some(form),
                 inputs,
@@ -314,7 +314,7 @@ async fn generate(
     let running = container.turn(text, chunks);
     tokio::pin!(running);
 
-    // The emission is reassembled because Questness must parse the WHOLE
+    // The emission is reassembled because ThinkHarness must parse the WHOLE
     // of it. The chunks still go out as they arrive, so a caller watching
     // raw output pays a copy rather than a wait.
     let mut answer = String::new();

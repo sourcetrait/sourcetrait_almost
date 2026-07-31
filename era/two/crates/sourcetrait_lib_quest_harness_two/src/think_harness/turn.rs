@@ -32,7 +32,7 @@ impl Binding {
 /// One turn's inputs, before anything is rendered.
 #[derive(Debug, Clone)]
 pub struct Request {
-    /// The caller's config record, Questness keys included.
+    /// The caller's config record, ThinkHarness keys included.
     pub config: nu::Value,
     pub prompt: String,
     pub bindings: Vec<Binding>,
@@ -42,18 +42,18 @@ pub struct Request {
 #[derive(Debug, Clone)]
 pub struct Assembled {
     pub text: String,
-    /// The config as the model sees it, Questness keys removed.
+    /// The config as the model sees it, ThinkHarness keys removed.
     pub visible: nu::Value,
     pub templated: bool,
     /// What happens to the conversation when this turn ends.
-    pub conversation: questness::config::Conversation,
+    pub conversation: think_harness::config::Conversation,
 }
 
 /// A finished answer: the value, its prose, and any emitted config.
 ///
 /// The config is REPORTED rather than judged here. Whether the model was
 /// entitled to send one is the response shape's question, so this layer
-/// says what arrived and `questness::shape` decides what it is worth.
+/// says what arrived and `think_harness::shape` decides what it is worth.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Answer {
     pub value: Option<nu::Value>,
@@ -77,7 +77,7 @@ pub enum Outcome {
     Repl {
         source: String,
     },
-    /// Every other form. Questness never runs one - it rides back to the
+    /// Every other form. ThinkHarness never runs one - it rides back to the
     /// caller with what it consumes, and the turn pauses there.
     Ask {
         form: bridge::InferNu,
@@ -96,7 +96,7 @@ pub fn assemble(request: &Request) -> HarnessQuestResult<Assembled> {
         .iter()
         .map(|binding| (binding.pass.clone(), binding.value.clone()))
         .collect();
-    let prepared = questness::config::prepare(
+    let prepared = think_harness::config::prepare(
         &request.config,
         &request.prompt,
         &bindings,
@@ -133,7 +133,7 @@ pub fn assemble(request: &Request) -> HarnessQuestResult<Assembled> {
 /// special and a skip-special decode strips it, so it is detectable by
 /// token id at the engine layer and never by scanning this text.
 pub fn interpret(
-    evaluator: &QuestnessEvaluator,
+    evaluator: &ThinkHarnessEvaluator,
     text: &str,
     aliasing: channel::Aliasing,
     insufficient: bool,
@@ -161,7 +161,7 @@ pub fn interpret(
 /// mode is the def's name, `$args` renders as a NUON literal at the call
 /// site, and `$in` rides the pipeline.
 pub fn run_think(
-    evaluator: &QuestnessEvaluator,
+    evaluator: &ThinkHarnessEvaluator,
     form: &bridge::InferNu,
     signature: &NuSignature,
     bindings: &[Binding],
@@ -196,7 +196,7 @@ pub fn run_think(
 
 /// The thought turn a think's answer comes back on.
 ///
-/// Questness-internal by construction: this never crosses the wire, so
+/// ThinkHarness-internal by construction: this never crosses the wire, so
 /// nothing outside the conversation with the model ever sees a role.
 pub fn thought_turn(block: &Block) -> String {
     format!(
@@ -215,7 +215,7 @@ fn binding_of<'a>(bindings: &'a [Binding], pass: &str) -> Option<&'a nu::Value> 
 
 /// The sub-turn path: read the contract, check it, bind the channels.
 fn sub_turn(
-    evaluator: &QuestnessEvaluator,
+    evaluator: &ThinkHarnessEvaluator,
     blocks: &[Block],
     nu_block: &Block,
 ) -> HarnessQuestResult<Outcome> {
@@ -241,7 +241,7 @@ fn sub_turn(
     if !envelope.is_clean() {
         return Ok(Outcome::Repair(envelope));
     }
-    let form = match questness::contract::form_of(&signature, &source) {
+    let form = match think_harness::contract::form_of(&signature, &source) {
         Ok(form) => form,
         Err(error) => {
             envelope.error("channel::nu_form", Some(Tag::Nu.name()), &error.to_string());
@@ -433,5 +433,5 @@ fn visible_is_empty(visible: &nu::Value) -> bool {
 /// index rule that would then drift.
 fn bound_blocks(blocks: &[Block]) -> Vec<(String, Option<&Block>)> {
     let mut discard = Envelope::default();
-    questness::contract::pass_bindings(blocks, &mut discard)
+    think_harness::contract::pass_bindings(blocks, &mut discard)
 }

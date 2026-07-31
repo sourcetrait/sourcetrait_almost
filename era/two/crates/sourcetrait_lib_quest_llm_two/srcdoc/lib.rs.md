@@ -3,7 +3,7 @@
 The llm lib: the candle engine (correctness core, speed tracks,
 capability), the burn oracle, and the trainer core. Split out of the old
 sourcetrait_lib_quest_two so the inference internals are one black-box
-crate; the channel/Questness/data-core half is
+crate; the channel/ThinkHarness/data-core half is
 sourcetrait_lib_quest_harness_two, which depends on this crate for the
 chat-render vocabulary.
 

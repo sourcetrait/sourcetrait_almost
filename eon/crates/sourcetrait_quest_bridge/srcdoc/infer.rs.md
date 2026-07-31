@@ -3,11 +3,11 @@
 The seven channel forms as data models, and the two envelopes that carry
 them. These are what both ends of a turn traffic in, which is the whole
 correction this module exists for: the block grammar is the PARSE of a
-token stream and belongs to Questness alone, so nothing else in the
+token stream and belongs to ThinkHarness alone, so nothing else in the
 system ever holds a tag, a header string and a content string.
 
 They live in the bridge because both ends are eon - the daemon speaks
-them through Questness, the plugin speaks them through QuestHarness -
+them through ThinkHarness, the plugin speaks them through UseHarness -
 and this crate is already what carries the types both ends traffic in.
 
 ## struct InferValue

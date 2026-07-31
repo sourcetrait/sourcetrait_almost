@@ -10,7 +10,7 @@ use crate::*;
 /// hold.
 pub(crate) struct QuestPlugin {
     runtime: tokio::runtime::Runtime,
-    harness: harness::QuestHarness,
+    harness: use_harness::UseHarness,
 }
 
 impl QuestPlugin {
@@ -20,7 +20,7 @@ impl QuestPlugin {
             .build()?;
         Ok(Self {
             runtime,
-            harness: harness::QuestHarness::default(),
+            harness: use_harness::UseHarness::default(),
         })
     }
 
@@ -30,10 +30,10 @@ impl QuestPlugin {
 
     /// This side's own nu engine, for what the model asks IT to run.
     ///
-    /// Questness never reaches it. An ask comes back on a response, this
+    /// ThinkHarness never reaches it. An ask comes back on a response, this
     /// runs it under its own confinement, and the value goes back on the
     /// next request.
-    pub(crate) fn harness(&self) -> harness::QuestHarness {
+    pub(crate) fn harness(&self) -> use_harness::UseHarness {
         self.harness.clone()
     }
 }

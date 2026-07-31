@@ -7,5 +7,5 @@ pub(crate) use sourcetrait_quest_bridge as bridge;
 pub use crate::engine::{
     BridgeTwo,
     TwoEngine,
-    TwoQuestness,
+    TwoThinkHarness,
 };

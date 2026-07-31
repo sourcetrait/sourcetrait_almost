@@ -2,7 +2,7 @@ pub mod channel;
 pub mod consts;
 pub(crate) mod error;
 pub mod nu;
-pub(crate) mod questness {
+pub(crate) mod think_harness {
     pub mod arbitrate;
     pub mod config;
     pub mod contract;
@@ -39,12 +39,12 @@ pub(crate) use crate::channel::{
     Envelope,
     Tag,
 };
-pub(crate) use crate::questness::contract::{
+pub(crate) use crate::think_harness::contract::{
     NuSignature,
     check_agreements,
 };
-pub(crate) use crate::questness::evaluate::QuestnessEvaluator;
-pub(crate) use crate::questness::turn;
+pub(crate) use crate::think_harness::evaluate::ThinkHarnessEvaluator;
+pub(crate) use crate::think_harness::turn;
 
 pub(crate) mod r {
     pub(crate) mod hash {
@@ -68,17 +68,17 @@ pub use crate::error::{
     HarnessQuestError,
     HarnessQuestResult,
 };
-pub use crate::questness::arbitrate::{
-    Questness,
+pub use crate::think_harness::arbitrate::{
+    ThinkHarness,
     Step,
 };
-pub use crate::questness::config::Conversation;
-pub use crate::questness::shape::{
+pub use crate::think_harness::config::Conversation;
+pub use crate::think_harness::shape::{
     Shape,
     ShapeMember,
     ShapeResponse,
 };
-pub use crate::questness::turn::{
+pub use crate::think_harness::turn::{
     Answer,
     Assembled,
     Binding,
@@ -91,7 +91,7 @@ mod tests {
     mod channel;
     mod consts;
     mod nu;
-    mod questness {
+    mod think_harness {
         mod arbitrate;
         mod config;
         mod contract;

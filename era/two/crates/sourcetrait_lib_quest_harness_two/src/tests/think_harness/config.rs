@@ -1,6 +1,6 @@
 //! Config locks: which keys reach the model, and which one switches
 //! the prompt from text into a template.
-use crate::questness::config::{
+use crate::think_harness::config::{
     CONVERSATION_KEY,
     Conversation,
     LIQUID_KEY,
@@ -17,11 +17,11 @@ fn bindings(nuon: &str) -> Vec<(String, nu::Value)> {
 }
 
 #[test]
-fn the_questness_keys_are_split_off_and_everything_else_stays() {
+fn the_think_harness_keys_are_split_off_and_everything_else_stays() {
     let config = nu::from_nuon_text("{env: {PWD: '/tmp'}, liquid: true, tone: terse}")
         .expect("nuon");
-    let (questness, visible) = split(&config).expect("splits");
-    assert!(questness.get(LIQUID_KEY).is_some());
+    let (think_harness, visible) = split(&config).expect("splits");
+    assert!(think_harness.get(LIQUID_KEY).is_some());
     assert!(visible.get(LIQUID_KEY).is_none());
     assert!(visible.get("env").is_some(), "env is the model's own");
     assert!(visible.get("tone").is_some(), "an unfamiliar key passes through");
@@ -90,7 +90,7 @@ fn an_unknown_conversation_value_is_refused() {
     assert!(error.contains("keep"), "got {error}");
 }
 
-/// The key is Questness-addressed: interpreted, then stripped, so the
+/// The key is ThinkHarness-addressed: interpreted, then stripped, so the
 /// model never sees it.
 #[test]
 fn the_conversation_key_never_reaches_the_model() {

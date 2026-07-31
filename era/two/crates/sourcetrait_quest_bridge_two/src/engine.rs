@@ -11,7 +11,7 @@ pub struct BridgeTwo;
 
 impl bridge::all::Era for BridgeTwo {
     type Engine = TwoEngine;
-    type Questness = TwoQuestness;
+    type ThinkHarness = TwoThinkHarness;
 
     /// From constants rather than a load, so a consumer can say what it
     /// is about to open before paying for the model.
@@ -30,33 +30,33 @@ impl bridge::all::Era for BridgeTwo {
         TwoEngine::load(options)
     }
 
-    fn questness() -> Result<Self::Questness, String> {
-        TwoQuestness::open()
+    fn think_harness() -> Result<Self::ThinkHarness, String> {
+        TwoThinkHarness::open()
     }
 }
 
-/// Era two's Questness behind the API's trait.
+/// Era two's ThinkHarness behind the API's trait.
 ///
 /// It adds nothing the library does not already provide: the whole of it
 /// is the conversion between the `Infer*` forms and what the library's
 /// own turn speaks.
-pub struct TwoQuestness {
-    inner: harness::Questness,
+pub struct TwoThinkHarness {
+    inner: harness::ThinkHarness,
     /// The last assembled request's conversation disposition.
     keep: bool,
 }
 
-impl TwoQuestness {
+impl TwoThinkHarness {
     fn open() -> Result<Self, String> {
-        // The boundary aliases the trained tool-marker attractor until
-        // channel-marker routing is trained, which 10_Channels measures
-        // as dead at zero of six without it.
-        let inner = harness::Questness::new(harness::channel::Aliasing::ToolMarkers).map_err(message_of)?;
+        // ToolMarkers stays until AliasRetirement: routing is trained and
+        // sampled-proven, but the shape leg's final emission carries a
+        // stray second closer that Strict would fault.
+        let inner = harness::ThinkHarness::new(harness::channel::Aliasing::ToolMarkers).map_err(message_of)?;
         Ok(Self { inner, keep: false })
     }
 }
 
-impl bridge::all::Questness for TwoQuestness {
+impl bridge::all::ThinkHarness for TwoThinkHarness {
     /// A request carrying an `output` is a CONTINUATION: the caller ran
     /// an ask and this is its result, so the conversation resumes rather
     /// than starting a fresh turn. Every request's own config decides

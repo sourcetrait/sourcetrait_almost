@@ -1,6 +1,6 @@
 //! Per-session text logging for the daemon's own side, split by grain.
 //!
-//! The era library carries its own for the Questness side of the seam,
+//! The era library carries its own for the ThinkHarness side of the seam,
 //! and this deliberately does not reach for it: an eon component must not
 //! depend on an era's library to write a text file, or the one edge the
 //! bridge exists to prevent gets opened for a convenience.

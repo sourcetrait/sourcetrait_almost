@@ -1,14 +1,14 @@
 //! Evaluator locks: what the engine can reach, what it refuses, and
 //! the one reach registration cannot close.
 use crate::*;
-use crate::questness::evaluate::{
+use crate::think_harness::evaluate::{
     DENIED,
     PARSE_TIME_LOADERS,
-    QuestnessEvaluator,
+    ThinkHarnessEvaluator,
 };
 
-fn evaluator() -> QuestnessEvaluator {
-    QuestnessEvaluator::new().expect("the evaluator builds")
+fn evaluator() -> ThinkHarnessEvaluator {
+    ThinkHarnessEvaluator::new().expect("the evaluator builds")
 }
 
 #[test]

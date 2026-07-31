@@ -2,8 +2,8 @@
 
 The convention that decides the output contract, and the first config key
 addressed to both sides. `env` passes through to the model and `liquid` is
-consumed by Questness and stripped; this one is read by each, which is why
-it is deliberately absent from the Questness key list - stripping it would
+consumed by ThinkHarness and stripped; this one is read by each, which is why
+it is deliberately absent from the ThinkHarness key list - stripping it would
 take it from the reader it was half written for.
 
 The default is trained rather than injected, and that is the sentence the

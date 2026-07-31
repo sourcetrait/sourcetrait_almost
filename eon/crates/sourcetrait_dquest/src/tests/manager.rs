@@ -4,9 +4,9 @@ use crate::manager::SessionManager;
 /// A turn owner that echoes, standing in where the locks are about the
 /// registry rather than about what a turn means.
 #[derive(Default)]
-pub(crate) struct StubQuestness;
+pub(crate) struct StubThinkHarness;
 
-impl crate::bridge::all::Questness for StubQuestness {
+impl crate::bridge::all::ThinkHarness for StubThinkHarness {
     fn assemble(
         &mut self,
         request: &crate::bridge::InferRequest,
@@ -40,7 +40,7 @@ impl crate::bridge::all::Questness for StubQuestness {
 
 #[test]
 fn a_ticket_holds_a_place_and_dropping_it_gives_the_place_back() {
-    let manager = SessionManager::for_user("box", None, StubQuestness);
+    let manager = SessionManager::for_user("box", None, StubThinkHarness);
     assert_eq!(manager.live(), 0);
 
     let first = manager.admit();
@@ -58,7 +58,7 @@ fn a_ticket_holds_a_place_and_dropping_it_gives_the_place_back() {
 /// by unwinding cannot leave itself behind in the registry.
 #[test]
 fn a_session_that_panics_still_gives_its_place_back() {
-    let manager = SessionManager::for_user("box", None, StubQuestness);
+    let manager = SessionManager::for_user("box", None, StubThinkHarness);
     let inner = manager.clone();
     // The manager now holds a turn owner behind a mutex, which is not
     // unwind-safe by inference. What is under test is the ticket's Drop,
@@ -77,7 +77,7 @@ fn a_session_that_panics_still_gives_its_place_back() {
 /// connection admit against the same one.
 #[test]
 fn clones_share_the_registry_and_the_space() {
-    let manager = SessionManager::for_user("box", None, StubQuestness);
+    let manager = SessionManager::for_user("box", None, StubThinkHarness);
     let other = manager.clone();
     let _ticket = other.admit();
 
@@ -85,12 +85,12 @@ fn clones_share_the_registry_and_the_space() {
     assert_eq!(manager.thinkspace(), other.thinkspace());
     assert_eq!(
         manager.thinkspace(),
-        SessionManager::for_user("box", None, StubQuestness).thinkspace(),
+        SessionManager::for_user("box", None, StubThinkHarness).thinkspace(),
         "the space follows the user rather than the registry"
     );
     assert_ne!(
         manager.thinkspace(),
-        SessionManager::for_user("someone_else", None, StubQuestness).thinkspace()
+        SessionManager::for_user("someone_else", None, StubThinkHarness).thinkspace()
     );
 }
 
@@ -99,7 +99,7 @@ fn clones_share_the_registry_and_the_space() {
 #[test]
 fn a_session_log_is_addressed_by_space_then_session() {
     let scratch = crate::tests::material::Scratch::make("manager_log");
-    let manager = SessionManager::for_user("box", Some(scratch.root.clone()), StubQuestness);
+    let manager = SessionManager::for_user("box", Some(scratch.root.clone()), StubThinkHarness);
     let ticket = manager.admit();
     let log = manager.log(&ticket).expect("a log opens under the root");
 
@@ -126,7 +126,7 @@ fn a_session_log_is_addressed_by_space_then_session() {
 #[test]
 fn each_grain_is_its_own_file() {
     let scratch = crate::tests::material::Scratch::make("manager_grains");
-    let manager = SessionManager::for_user("box", Some(scratch.root.clone()), StubQuestness);
+    let manager = SessionManager::for_user("box", Some(scratch.root.clone()), StubThinkHarness);
     let ticket = manager.admit();
     let log = manager.log(&ticket).expect("a log opens under the root");
 
@@ -154,7 +154,7 @@ fn each_grain_is_its_own_file() {
 #[test]
 fn the_chunk_sink_writes_the_stream_unframed() {
     let scratch = crate::tests::material::Scratch::make("manager_chunks");
-    let manager = SessionManager::for_user("box", Some(scratch.root.clone()), StubQuestness);
+    let manager = SessionManager::for_user("box", Some(scratch.root.clone()), StubThinkHarness);
     let ticket = manager.admit();
     let log = manager.log(&ticket).expect("a log opens under the root");
 
@@ -173,14 +173,14 @@ fn the_chunk_sink_writes_the_stream_unframed() {
 /// missing cache home from refusing connections.
 #[test]
 fn without_a_root_a_session_simply_is_not_logged() {
-    let manager = SessionManager::for_user("box", None, StubQuestness);
+    let manager = SessionManager::for_user("box", None, StubThinkHarness);
     let ticket = manager.admit();
     assert!(manager.log(&ticket).is_none());
 }
 
 #[test]
 fn the_listing_names_exactly_the_live_sessions() {
-    let manager = SessionManager::for_user("box", None, StubQuestness);
+    let manager = SessionManager::for_user("box", None, StubThinkHarness);
     let first = manager.admit();
     let second = manager.admit();
 

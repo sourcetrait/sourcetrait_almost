@@ -4,7 +4,7 @@ The turn loop lives here, and that placement is the file's one open
 question rather than a settled answer.
 
 The design puts it in the daemon: the daemon holds the weights and calls
-`step`, and Questness owns the conversation about the model rather than
+`step`, and ThinkHarness owns the conversation about the model rather than
 the model itself. What the wire carries today is a text turn and a text
 answer, so a `TurnRequest` cannot yet carry a config, a prompt and its
 bindings - and until it can, the only place that can assemble a turn is
@@ -32,7 +32,7 @@ measure.
 
 ## fn ask
 
-Takes the questness lock for the whole call, so one plugin process serves
+Takes the think_harness lock for the whole call, so one plugin process serves
 one turn at a time. That is not a limitation being accepted quietly: the
 daemon's container serialises generation anyway, so a second concurrent
 turn would queue behind the first at the far end regardless. Holding the

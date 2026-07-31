@@ -59,7 +59,7 @@ directly or through the era bridge, so the property the split protected was
 held by nothing. And a binary carries only what it CALLS, so a consumer that
 never touches the engine was never carrying it whatever the manifest said.
 
-## mod questness
+## mod think_harness
 
 Private, with its four submodules reached only through the public face above.
 That asymmetry is the point: a consumer builds a `Request`, calls `step`, and

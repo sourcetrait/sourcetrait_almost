@@ -2,7 +2,7 @@
 
 Liquid rendering and the nu value bridge under it. Liquid is a first-class
 customer of this crate rather than a preprocessing step bolted to one consumer,
-which is why it sits beside the data modules rather than inside Questness: the
+which is why it sits beside the data modules rather than inside ThinkHarness: the
 plugin, the daemon and the trainer can all render, and where a given template
 renders is an engineering choice per case rather than a fixed side of the wire.
 

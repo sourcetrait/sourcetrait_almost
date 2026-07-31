@@ -15,7 +15,7 @@ const INTERRUPT_POLL: std::time::Duration = std::time::Duration::from_millis(100
 /// Ask one turn and drive it, asks included, to an answer.
 ///
 /// THE TURN LOOP IS THE DAEMON'S. What runs here is the other half of a
-/// sequence: when the model asks THIS side to run something, QuestHarness
+/// sequence: when the model asks THIS side to run something, UseHarness
 /// runs it on its own engine and the value goes back as a continuation,
 /// where the Thinkspace's conversation resumes.
 pub(crate) fn ask(
@@ -30,7 +30,7 @@ pub(crate) fn ask(
 
 /// Connect, open, and turn until the model answers.
 async fn converse(
-    harness: harness::QuestHarness,
+    harness: use_harness::UseHarness,
     request: bridge::InferRequest,
     interrupted: &std::sync::atomic::AtomicBool,
 ) -> QuestPluginResult<bridge::InferResponse> {
@@ -44,7 +44,7 @@ async fn converse(
 
 /// The turn loop, once a session is open.
 async fn drive(
-    harness: &harness::QuestHarness,
+    harness: &use_harness::UseHarness,
     client: &mut bridge::TlsClientHandle,
     request: bridge::InferRequest,
     interrupted: &std::sync::atomic::AtomicBool,

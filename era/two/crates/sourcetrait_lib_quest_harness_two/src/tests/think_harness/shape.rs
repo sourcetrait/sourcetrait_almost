@@ -1,11 +1,11 @@
 //! Shape locks: what a caller declared, and what comes back under it.
 use crate::nu;
-use crate::questness::shape::{
+use crate::think_harness::shape::{
     Shape,
     ShapeMember,
     ShapeResponse,
 };
-use crate::questness::turn::Answer;
+use crate::think_harness::turn::Answer;
 
 fn value(nuon: &str) -> nu::Value {
     nu::from_nuon_text(nuon).expect("fixture parses")

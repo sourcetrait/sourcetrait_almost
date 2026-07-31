@@ -1,4 +1,4 @@
-//! QuestHarness: the plugin's own nu engine, for what the model asks of
+//! UseHarness: the plugin's own nu engine, for what the model asks of
 //! it.
 use crate::*;
 
@@ -81,14 +81,14 @@ impl QuestWorld {
 
 /// The plugin's harness: it runs what the model asked the CALLER to run.
 ///
-/// Questness never reaches this. An ask arrives on an `InferResponse`,
+/// ThinkHarness never reaches this. An ask arrives on an `InferResponse`,
 /// this runs it, and the value goes back on the next request.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct QuestHarness {
+pub(crate) struct UseHarness {
     world: QuestWorld,
 }
 
-impl QuestHarness {
+impl UseHarness {
     /// The script one ask becomes.
     ///
     /// A `<nu>` body DECLARES a def and does not call one, so the call is

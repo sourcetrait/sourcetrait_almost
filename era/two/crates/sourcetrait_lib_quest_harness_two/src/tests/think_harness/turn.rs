@@ -1,8 +1,8 @@
 //! Turn locks: what the model is shown, and what its emission means.
 use crate::channel::Aliasing;
 use crate::nu;
-use crate::questness::evaluate::QuestnessEvaluator;
-use crate::questness::turn::{
+use crate::think_harness::evaluate::ThinkHarnessEvaluator;
+use crate::think_harness::turn::{
     Binding,
     Outcome,
     Request,
@@ -11,8 +11,8 @@ use crate::questness::turn::{
     run_think,
 };
 
-fn evaluator() -> QuestnessEvaluator {
-    QuestnessEvaluator::new().expect("the evaluator builds")
+fn evaluator() -> ThinkHarnessEvaluator {
+    ThinkHarnessEvaluator::new().expect("the evaluator builds")
 }
 
 fn value(nuon: &str) -> nu::Value {
@@ -201,7 +201,7 @@ fn assembly_shows_the_model_its_config_input_and_prompt() {
     assert!(assembled.templated, "the liquid key switches templating on");
     assert!(
         !assembled.text.contains("liquid"),
-        "a Questness key must never reach the model: {}",
+        "a ThinkHarness key must never reach the model: {}",
         assembled.text
     );
     assert!(assembled.text.contains("<|extra_id_0|>"), "config block");
