@@ -224,16 +224,19 @@ fn register_commands(mut engine: r::nu::EngineState) -> HarnessQuestResult<r::nu
 ///
 /// `columns` and `sort-by` were measured in by the data-transform
 /// training set - a record's field names and a table's largest row are
-/// asked of `evaluate` - the same way `split row` measured the string
+/// asked of `evaluate` - and `drop` by the pipe-transform set (remove
+/// the last entry), the same way `split row` measured the string
 /// family in. A trained transform whose head is unregistered dies as an
 /// implicit external at serve, so the set follows the syllabus.
 fn add_filters(ws: &mut r::nu::StateWorkingSet) {
     use nu_command::{
-        Append, Columns, DropColumn, Each, Enumerate, Filter, Find, First, Flatten, Get, Last,
-        Length, Prepend, Reject, Reverse, Select, Skip, Sort, SortBy, Take, Uniq, Where, Wrap,
+        Append, Columns, Drop, DropColumn, Each, Enumerate, Filter, Find, First, Flatten, Get,
+        Last, Length, Prepend, Reject, Reverse, Select, Skip, Sort, SortBy, Take, Uniq, Where,
+        Wrap,
     };
     ws.add_decl(Box::new(Append));
     ws.add_decl(Box::new(Columns));
+    ws.add_decl(Box::new(Drop));
     ws.add_decl(Box::new(DropColumn));
     ws.add_decl(Box::new(Each));
     ws.add_decl(Box::new(Enumerate));

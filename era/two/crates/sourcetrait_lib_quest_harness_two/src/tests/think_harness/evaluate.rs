@@ -69,9 +69,9 @@ fn the_string_family_is_registered_and_transforms() {
 fn the_transform_vocabulary_the_syllabus_teaches_resolves() {
     let engine = evaluator();
     for name in [
-        "columns", "each", "first", "get", "last", "length", "reverse", "sort", "sort-by",
-        "str capitalize", "str downcase", "str join", "str replace", "str trim", "str upcase",
-        "split row", "split words", "uniq", "where",
+        "columns", "drop", "each", "first", "get", "last", "length", "reverse", "sort",
+        "sort-by", "str capitalize", "str downcase", "str join", "str replace", "str trim",
+        "str upcase", "split row", "split words", "uniq", "where",
     ] {
         assert!(engine.resolves(name), "{name} is taught, so it must resolve");
     }
