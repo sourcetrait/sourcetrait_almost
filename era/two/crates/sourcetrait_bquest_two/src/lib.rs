@@ -69,7 +69,10 @@ pub(crate) use crate::train::{
     train_rlvr,
     train_sft,
 };
-pub(crate) use crate::example::mix_instruct;
+pub(crate) use crate::example::{
+    mix_instruct,
+    mix_tokens,
+};
 pub(crate) use crate::rollout::{
     bench_run,
     rollout_run,
@@ -99,6 +102,7 @@ pub(crate) use crate::cli::{
     MixRenderArgs,
     MixRipArgs,
     MixSampleArgs,
+    MixTokensArgs,
     RolloutCommand,
     RolloutRunArgs,
     SpeculateCommand,

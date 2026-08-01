@@ -14,72 +14,6 @@ use llm::train::{
     TrainReport,
 };
 
-/// A loaded pack: the id rows and an optional per-position loss mask.
-pub(crate) struct ChunkPack {
-    pub(crate) rows: Vec<Vec<u32>>,
-    pub(crate) masks: Option<Vec<Vec<u8>>>,
-}
-
-/// Read a packed artifact: u32 ids and an optional u8 loss mask.
-fn load_chunks(path: &Path) -> BquestResult<ChunkPack> {
-    let bytes = fs::read(path)?;
-    let parsed = match safetensors::SafeTensors::deserialize(&bytes) {
-        Ok(parsed) => parsed,
-        Err(error) => snafu::whatever!("chunks parse failed: {error}"),
-    };
-    for name in parsed.names() {
-        snafu::ensure_whatever!(
-            name == example::TENSOR_IDS || name == example::TENSOR_LOSS_MASK,
-            "pack carries unrecognised tensor {name:?} \
-             (expected {:?} and optionally {:?})",
-            example::TENSOR_IDS,
-            example::TENSOR_LOSS_MASK
-        );
-    }
-    let Ok(view) = parsed.tensor(example::TENSOR_IDS) else {
-        snafu::whatever!("the artifact carries no {:?} tensor", example::TENSOR_IDS);
-    };
-    snafu::ensure_whatever!(
-        view.dtype() == safetensors::Dtype::U32,
-        "ids: expected u32, got {:?}",
-        view.dtype()
-    );
-    let shape = view.shape();
-    snafu::ensure_whatever!(shape.len() == 2, "ids: expected rank 2, got {shape:?}");
-    let (row_count, width) = (shape[0], shape[1]);
-    let values: Vec<u32> = view
-        .data()
-        .chunks_exact(4)
-        .map(|quad| u32::from_le_bytes([quad[0], quad[1], quad[2], quad[3]]))
-        .collect();
-    let rows: Vec<Vec<u32>> = (0..row_count)
-        .map(|row| values[row * width..(row + 1) * width].to_vec())
-        .collect();
-
-    let masks = match parsed.tensor(example::TENSOR_LOSS_MASK) {
-        Ok(mask_view) => {
-            snafu::ensure_whatever!(
-                mask_view.dtype() == safetensors::Dtype::U8,
-                "loss mask: expected u8, got {:?}",
-                mask_view.dtype()
-            );
-            snafu::ensure_whatever!(
-                mask_view.shape() == [row_count, width],
-                "loss mask shape {:?} does not match the ids [{row_count}, {width}]",
-                mask_view.shape()
-            );
-            let flat = mask_view.data().to_vec();
-            Some(
-                (0..row_count)
-                    .map(|row| flat[row * width..(row + 1) * width].to_vec())
-                    .collect(),
-            )
-        }
-        Err(_) => None,
-    };
-    Ok(ChunkPack { rows, masks })
-}
-
 /// `bquest train gate`: run the locks and print the NUON verdict.
 pub(crate) fn train_gate_verb() -> BquestResult<()> {
     let verdict = llm::train::run_train_gate()?;
@@ -122,6 +56,46 @@ fn stage_log_path(args: &StageArgs) -> PathBuf {
             args.out.with_file_name(format!("{stem}_steps.nuon"))
         }
     }
+}
+
+/// The token-loss dump's home: beside the step log, off the out stem.
+#[cfg(feature = "train-cuda")]
+fn token_losses_path(args: &StageArgs) -> PathBuf {
+    let stem = args
+        .out
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| String::from("adapter"));
+    args.out.with_file_name(format!("{stem}_token_losses.nuon"))
+}
+
+/// Write the final-pass token dump whole, one NUON line per row.
+#[cfg(feature = "train-cuda")]
+fn write_token_losses(
+    path: &Path,
+    rows: &[llm::train::RowTokenLosses],
+) -> BquestResult<()> {
+    let values: Vec<harness::nu::Value> = rows
+        .iter()
+        .map(|row| {
+            harness::nu::Value::record(
+                harness::nu::record! {
+                    "row" => v_int(row.row as i64),
+                    "positions" => harness::nu::Value::list(
+                        row.positions.iter().map(|p| v_int(*p as i64)).collect(),
+                        span(),
+                    ),
+                    "losses" => harness::nu::Value::list(
+                        row.losses.iter().map(|l| v_float(*l as f64)).collect(),
+                        span(),
+                    ),
+                },
+                span(),
+            )
+        })
+        .collect();
+    harness::nu::save_lines(path, &values)?;
+    Ok(())
 }
 
 /// The cpt log home, from its own args shape.
@@ -217,7 +191,7 @@ pub(crate) fn train_cpt(cli: &Cli, args: &TrainCptArgs) -> BquestResult<()> {
     let model_dir = config.model_dir();
     let model_id = config.model.clone();
     let alpha = args.alpha.unwrap_or(2.0 * args.rank as f64);
-    let pack = load_chunks(&args.chunks)?;
+    let pack = example::load_chunks(&args.chunks)?;
     snafu::ensure_whatever!(
         pack.masks.is_none(),
         "{} carries a loss mask, so it is a supervised pack - use `train sft`",
@@ -296,7 +270,7 @@ pub(crate) fn train_sft(cli: &Cli, args: &TrainSftArgs) -> BquestResult<()> {
     let config = llm::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
     let model_dir = config.model_dir();
     let model_id = config.model.clone();
-    let pack = load_chunks(&args.chunks)?;
+    let pack = example::load_chunks(&args.chunks)?;
     let Some(masks) = pack.masks else {
         snafu::whatever!(
             "{} carries no loss mask, so it is a continued-pretraining pack - \
@@ -330,7 +304,7 @@ pub(crate) fn train_sft(cli: &Cli, args: &TrainSftArgs) -> BquestResult<()> {
             masks: &masks,
             accumulate: args.accumulate,
         };
-        let report = llm::train::sft_loop::<llm::TrainCudaAd>(
+        let sft = llm::train::sft_loop::<llm::TrainCudaAd>(
             &model,
             &mut adapters,
             &batch,
@@ -339,7 +313,10 @@ pub(crate) fn train_sft(cli: &Cli, args: &TrainSftArgs) -> BquestResult<()> {
             |log| Ok(append_step_log(&log_path, log)?),
         )?;
         adapters.save(&args.stage.out, &model_id)?;
-        print_stage_summary("sft", &report, &args.stage.out, &log_path)
+        let dump_path = token_losses_path(&args.stage);
+        write_token_losses(&dump_path, &sft.token_losses)?;
+        eprintln!("bquest train sft: token losses -> {}", dump_path.display());
+        print_stage_summary("sft", &sft.report, &args.stage.out, &log_path)
     }
     #[cfg(not(feature = "train-cuda"))]
     {

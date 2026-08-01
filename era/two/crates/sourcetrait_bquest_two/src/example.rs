@@ -228,6 +228,125 @@ pub(crate) fn write_pack(
     Ok(())
 }
 
+/// A loaded pack: the id rows and an optional per-position loss mask.
+pub(crate) struct ChunkPack {
+    pub(crate) rows: Vec<Vec<u32>>,
+    pub(crate) masks: Option<Vec<Vec<u8>>>,
+}
+
+/// Read a packed artifact: u32 ids and an optional u8 loss mask.
+pub(crate) fn load_chunks(path: &Path) -> BquestResult<ChunkPack> {
+    let bytes = fs::read(path)?;
+    let parsed = match safetensors::SafeTensors::deserialize(&bytes) {
+        Ok(parsed) => parsed,
+        Err(error) => snafu::whatever!("chunks parse failed: {error}"),
+    };
+    for name in parsed.names() {
+        snafu::ensure_whatever!(
+            name == TENSOR_IDS || name == TENSOR_LOSS_MASK,
+            "pack carries unrecognised tensor {name:?} \
+             (expected {TENSOR_IDS:?} and optionally {TENSOR_LOSS_MASK:?})"
+        );
+    }
+    let Ok(view) = parsed.tensor(TENSOR_IDS) else {
+        snafu::whatever!("the artifact carries no {TENSOR_IDS:?} tensor");
+    };
+    snafu::ensure_whatever!(
+        view.dtype() == safetensors::Dtype::U32,
+        "ids: expected u32, got {:?}",
+        view.dtype()
+    );
+    let shape = view.shape();
+    snafu::ensure_whatever!(shape.len() == 2, "ids: expected rank 2, got {shape:?}");
+    let (row_count, width) = (shape[0], shape[1]);
+    let values: Vec<u32> = view
+        .data()
+        .chunks_exact(4)
+        .map(|quad| u32::from_le_bytes([quad[0], quad[1], quad[2], quad[3]]))
+        .collect();
+    let rows: Vec<Vec<u32>> = (0..row_count)
+        .map(|row| values[row * width..(row + 1) * width].to_vec())
+        .collect();
+
+    let masks = match parsed.tensor(TENSOR_LOSS_MASK) {
+        Ok(mask_view) => {
+            snafu::ensure_whatever!(
+                mask_view.dtype() == safetensors::Dtype::U8,
+                "loss mask: expected u8, got {:?}",
+                mask_view.dtype()
+            );
+            snafu::ensure_whatever!(
+                mask_view.shape() == [row_count, width],
+                "loss mask shape {:?} does not match the ids [{row_count}, {width}]",
+                mask_view.shape()
+            );
+            let flat = mask_view.data().to_vec();
+            Some(
+                (0..row_count)
+                    .map(|row| flat[row * width..(row + 1) * width].to_vec())
+                    .collect(),
+            )
+        }
+        Err(_) => None,
+    };
+    Ok(ChunkPack { rows, masks })
+}
+
+/// `bquest mix tokens`: a pack's rows as one decoded token per line.
+pub(crate) fn mix_tokens(cli: &Cli, args: &MixTokensArgs) -> BquestResult<()> {
+    let started = std::time::Instant::now();
+    let config = llm::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
+    let tokenizer = llm::load_tokenizer(&config.model_dir())?;
+    llm::verify_token_map(&tokenizer)?;
+    let pack = load_chunks(&args.chunks)?;
+
+    let mut values: Vec<harness::nu::Value> = Vec::new();
+    for (row_index, ids) in pack.rows.iter().enumerate() {
+        // The trailing pad run is padding, never content; trim it.
+        let mut effective = ids.len();
+        while effective > 0 && ids[effective - 1] == llm::consts::TOKEN_PAD {
+            effective -= 1;
+        }
+        for (position, id) in ids[..effective].iter().enumerate() {
+            let piece = match tokenizer.decode(&[*id], false) {
+                Ok(piece) => piece,
+                Err(e) => snafu::whatever!("decode failed at {row_index}:{position}: {e}"),
+            };
+            // Line breaks become their visible spellings in the value,
+            // keeping every line single-line for the NUON-lines writer.
+            let piece = piece.replace('\r', "\\r").replace('\n', "\\n");
+            let supervised = pack
+                .masks
+                .as_ref()
+                .map_or(0i64, |masks| masks[row_index][position] as i64);
+            values.push(harness::nu::Value::record(
+                harness::nu::record! {
+                    "row" => v_int(row_index as i64),
+                    "position" => v_int(position as i64),
+                    "id" => v_int(*id as i64),
+                    "piece" => v_str(&piece),
+                    "supervised" => v_int(supervised),
+                },
+                span(),
+            ));
+        }
+    }
+    harness::nu::save_lines(&args.out, &values)?;
+
+    let summary = harness::nu::Value::record(
+        harness::nu::record! {
+            "rows" => v_int(pack.rows.len() as i64),
+            "tokens" => v_int(values.len() as i64),
+            "masked" => v_bool(pack.masks.is_some()),
+            "out" => v_str(&args.out.display().to_string()),
+            "seconds" => v_float(started.elapsed().as_secs_f64()),
+        },
+        span(),
+    );
+    println!("{}", harness::nu::to_nuon_text(&summary)?);
+    Ok(())
+}
+
 /// `bquest mix instruct`: supervised examples, one whole per row.
 pub(crate) fn mix_instruct(cli: &Cli, args: &MixInstructArgs) -> BquestResult<()> {
     let started = std::time::Instant::now();

@@ -1077,6 +1077,19 @@ pub struct SupervisedBatch<'a> {
     pub accumulate: usize,
 }
 
+/// One row's last-visit losses at its supervised full-row positions.
+pub struct RowTokenLosses {
+    pub row: usize,
+    pub positions: Vec<usize>,
+    pub losses: Vec<f32>,
+}
+
+/// The supervised loop's report: the shared totals plus the token dump.
+pub struct SftReport {
+    pub report: TrainReport,
+    pub token_losses: Vec<RowTokenLosses>,
+}
+
 /// The supervised loop: masked cross-entropy over example rows.
 pub fn sft_loop<AD: AutodiffBackend>(
     model: &HybridModel<AD::InnerBackend>,
@@ -1085,7 +1098,7 @@ pub fn sft_loop<AD: AutodiffBackend>(
     options: &LoopOptions,
     device: &AD::Device,
     mut on_step: impl FnMut(&StepLog) -> Result<(), Box<dyn std::error::Error + Send + Sync>>,
-) -> LibQuestResult<TrainReport> {
+) -> LibQuestResult<SftReport> {
     let (rows, masks, accumulate) = (batch.rows, batch.masks, batch.accumulate);
     snafu::ensure_whatever!(!rows.is_empty(), "no supervised rows");
     let seq_len = rows[0].len() - 1;
@@ -1097,6 +1110,9 @@ pub fn sft_loop<AD: AutodiffBackend>(
     let mut first_loss = 0f32;
     let mut last_loss = 0f32;
     let mut trained_tokens = 0usize;
+    // Per-visit overwrite, so each slot ends as its row's LAST visit.
+    let mut final_token_losses: Vec<Option<RowTokenLosses>> =
+        (0..rows.len()).map(|_| None).collect();
     // Per-pass seeded reshuffle: a fixed order replays the same neighbor
     // sequence every pass, compounding order effects at batch 1.
     let mut order: Vec<usize> = (0..rows.len()).collect();
@@ -1131,6 +1147,7 @@ pub fn sft_loop<AD: AutodiffBackend>(
             );
             let (layer_inputs, top_x) =
                 forward_cache::<AD>(model, adapters, &mask_inner, inputs, device);
+            let mut visit_capture: Vec<objective::TokenLoss> = Vec::new();
             let (loss, seed, head_grads) = seed_from_hidden::<AD, _>(
                 model,
                 Some(&adapters.head),
@@ -1144,9 +1161,19 @@ pub fn sft_loop<AD: AutodiffBackend>(
                         target_mask,
                         options.loss_chunk,
                         device,
+                        Some(&mut visit_capture),
                     )
                 },
             )?;
+            // Target index + 1 is the token's own full-row position.
+            final_token_losses[index] = Some(RowTokenLosses {
+                row: index,
+                positions: visit_capture
+                    .iter()
+                    .map(|(target_index, _)| target_index + 1)
+                    .collect(),
+                losses: visit_capture.iter().map(|(_, loss)| *loss).collect(),
+            });
             let grads = chain_from_seed::<AD>(
                 model,
                 adapters,
@@ -1195,12 +1222,16 @@ pub fn sft_loop<AD: AutodiffBackend>(
             );
         }
     }
-    Ok(TrainReport {
-        first_loss,
-        final_loss: last_loss,
-        steps: options.steps,
-        trained_tokens,
-        seconds: started.elapsed().as_secs_f64(),
+    Ok(SftReport {
+        report: TrainReport {
+            first_loss,
+            final_loss: last_loss,
+            steps: options.steps,
+            trained_tokens,
+            seconds: started.elapsed().as_secs_f64(),
+        },
+        // A short run visits only some rows; only visited rows dump.
+        token_losses: final_token_losses.into_iter().flatten().collect(),
     })
 }
 

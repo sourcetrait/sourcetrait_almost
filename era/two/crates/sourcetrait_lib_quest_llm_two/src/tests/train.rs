@@ -168,6 +168,94 @@ fn diag_real_chain_grad_health_cuda_bf16() {
     }
 }
 
+/// SftLoop's token dump is the final pass decomposed: one entry per
+/// visited row, positions exactly the supervised full-row mask
+/// positions, and (single-row control) the dumped mean equal to the
+/// last step-log loss.
+#[test]
+fn sft_token_losses_decompose_the_final_pass() {
+    type ToyAd = burn::backend::Autodiff<CpuBack>;
+    let device: <CpuBack as burn::tensor::backend::BackendTypes>::Device =
+        Default::default();
+    let config = train::toy_config();
+    let model = HybridModel::<CpuBack>::new(&config, train::toy_weights(&config), device)
+        .expect("toy model");
+
+    let seq_len = 12usize;
+    let mut rng = SplitMix64::new(7);
+    let rows: Vec<Vec<u32>> = (0..3)
+        .map(|_| {
+            (0..seq_len + 1)
+                .map(|_| (rng.next_u64() % config.vocab_size as u64) as u32)
+                .collect()
+        })
+        .collect();
+    let mut masks: Vec<Vec<u8>> = vec![vec![0u8; seq_len + 1]; 3];
+    for slot in masks[0].iter_mut().skip(4).take(5) {
+        *slot = 1;
+    }
+    for position in [2usize, 3, 9] {
+        masks[1][position] = 1;
+    }
+    for slot in masks[2].iter_mut().skip(1) {
+        *slot = 1;
+    }
+
+    let options = train::LoopOptions {
+        steps: 7,
+        learning_rate: 1e-2,
+        warmup_steps: 2,
+        loss_chunk: 8,
+        log_every: usize::MAX,
+    };
+    let mut adapters =
+        ModelAdapters::<ToyAd>::init(&config, 4, 8.0, 42, &device).expect("toy adapters");
+    let batch = train::SupervisedBatch { rows: &rows, masks: &masks, accumulate: 1 };
+    let sft = train::sft_loop::<ToyAd>(&model, &mut adapters, &batch, &options, &device, |_| {
+        Ok(())
+    })
+    .expect("sft loop");
+
+    assert_eq!(sft.token_losses.len(), rows.len(), "one dump entry per visited row");
+    for dump in &sft.token_losses {
+        let mask = &masks[dump.row];
+        let expected: Vec<usize> = (1..mask.len()).filter(|i| mask[*i] != 0).collect();
+        assert_eq!(dump.positions, expected, "row {} dump positions", dump.row);
+        assert_eq!(dump.losses.len(), dump.positions.len());
+        assert!(
+            dump.losses.iter().all(|loss| loss.is_finite() && *loss >= 0.0),
+            "row {} carries a non-finite or negative loss",
+            dump.row
+        );
+    }
+
+    let one_rows = vec![rows[0].clone()];
+    let one_masks = vec![masks[0].clone()];
+    let mut adapters =
+        ModelAdapters::<ToyAd>::init(&config, 4, 8.0, 43, &device).expect("toy adapters");
+    let batch = train::SupervisedBatch { rows: &one_rows, masks: &one_masks, accumulate: 1 };
+    let mut last_loss = 0f32;
+    let sft = train::sft_loop::<ToyAd>(
+        &model,
+        &mut adapters,
+        &batch,
+        &train::LoopOptions { steps: 3, ..options },
+        &device,
+        |log| {
+            last_loss = log.loss;
+            Ok(())
+        },
+    )
+    .expect("single-row sft loop");
+    let dump = &sft.token_losses[0];
+    let mean: f64 =
+        dump.losses.iter().map(|loss| *loss as f64).sum::<f64>() / dump.losses.len() as f64;
+    assert!(
+        (mean - last_loss as f64).abs() <= 1e-4 * mean.abs().max(1.0),
+        "dumped mean {mean} does not decompose the final step loss {last_loss}"
+    );
+}
+
 /// The adapter artifact carries exactly the direction-3 surface: GDN
 /// q/q_conv/g/o + MLP, attn q/o + MLP - and NEVER a state-carrying
 /// tensor; the conv delta lands in the checkpoint's (channels, 1,

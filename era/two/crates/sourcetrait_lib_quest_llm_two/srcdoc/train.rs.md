@@ -207,6 +207,15 @@ that slice wrong shifts the supervised span by one token.
 
 ## struct SupervisedBatch
 
+## struct RowTokenLosses
+
+Positions are full-row token coordinates - target index plus one - so a
+dump row joins the pack token table on (row, position) with no
+off-by-one anywhere downstream. The position IS the token whose
+prediction the loss scored.
+
+## struct SftReport
+
 ## fn sft_loop
 
 A row supervising no position raises rather than stepping, because a zero-loss
@@ -230,6 +239,16 @@ Fresh AdamW moments make early updates near rate-sized regardless of
 gradient magnitude - the cold-moments condition the rlvr warmup note names,
 arriving through resume. A continuation therefore wants a settle-class rate
 or a fresh run; there is no cheap warm-rate top-up.
+
+The token capture overwrites per visit, so each slot ends holding its
+row's LAST visit whatever the epoch structure. A cheaper-looking
+"capture only the final rows.len() visits" window is wrong: with per-pass
+reshuffles a run ending mid-epoch leaves rows whose last visit predates
+the window. The dumped values are that visit's pre-update losses -
+exactly the numbers the step log records - so at accumulate 1 a dump
+row's mean reproduces the step log's loss for that row's final visit,
+which is the built-in cross-check. A run shorter than one pass dumps
+only the rows it visited.
 
 ## struct EncodedPair
 

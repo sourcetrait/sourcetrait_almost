@@ -122,6 +122,12 @@ clipped reply teaches the model to stop mid-answer.
 
 ## struct MixSampleArgs
 
+## struct MixTokensArgs
+
+The inspection half of the token-loss pair: its output joins the trainer's
+dump on (row, position), so the two artifacts share one coordinate and the
+polars frame needs no arithmetic.
+
 ## struct MixPackArgs
 
 ## struct MixRenderArgs

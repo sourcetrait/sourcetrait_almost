@@ -31,6 +31,12 @@ alike has zero spread, and the standard deviation is what the advantage divides
 by, so without this a uniform group divides by noise and produces arbitrary
 large advantages instead of no signal.
 
+## type TokenLoss
+
+The index is the TARGET index, not the token's full-row position; the
+consumer shifts by one. The shift lives at the consumer because only the
+trainer knows the row layout the targets were split from.
+
 ## fn apply_head_delta
 
 Narrow-and-cat rather than slice-assign, because differentiability through both
@@ -54,6 +60,12 @@ Masked positions contribute nothing by multiplication rather than by being
 skipped, so the graph shape is independent of the mask. Skipping them would make
 the number of graph nodes depend on the data, which is worse for a fixed-shape
 device.
+
+The capture reads the graph's own `picked` tensor rather than recomputing
+anything, so a dumped loss can never disagree with the loss that trained.
+The clone leaves the graph undisturbed, and the host readback lands beside
+the per-visit scalar sync the loss extraction already pays, so capturing on
+every visit costs no extra synchronization point.
 
 ## fn supervised_count
 

@@ -299,6 +299,18 @@ pub(crate) enum MixCommand {
     Instruct(MixInstructArgs),
     /// Stream one zstd dolma shard into a document table.
     Rip(MixRipArgs),
+    /// Render a pack's rows as decoded tokens, one line per position.
+    Tokens(MixTokensArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct MixTokensArgs {
+    /// A packed artifact (.safetensors) from `mix instruct` or `mix pack`.
+    #[arg(long)]
+    pub(crate) chunks: PathBuf,
+    /// The NUON-lines table: row, position, id, piece, supervised.
+    #[arg(long)]
+    pub(crate) out: PathBuf,
 }
 
 #[derive(Debug, clap::Args)]

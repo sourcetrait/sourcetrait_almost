@@ -18,6 +18,7 @@ pub fn run() {
             MixCommand::Sample(args) => mix_sample(args),
             MixCommand::Instruct(args) => mix_instruct(&cli, args),
             MixCommand::Rip(args) => mix_rip(args),
+            MixCommand::Tokens(args) => mix_tokens(&cli, args),
         },
         Command::Bench { command } => match command {
             BenchCommand::Run(args) => bench_run(&cli, args),

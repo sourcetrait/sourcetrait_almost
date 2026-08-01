@@ -99,6 +99,32 @@ is never asked to produce that newline.
 Truncation is deliberately not offered. A clipped response teaches the model to
 stop mid-answer, and dropping is visible in a report where clipping is not.
 
+## struct ChunkPack
+
+## fn load_chunks
+
+Moved here from the train module so the reader lives beside the writer and
+serves every build; the tokens verb reads packs in builds that carry no
+trainer. The rejection of unrecognised tensors exists because of what the
+previous form did: it read one named tensor and ignored the rest, so the first
+objective to write a second tensor beside the ids would have had it skipped in
+silence.
+
+## fn mix_tokens
+
+The join key downstream is (row, position) against the trainer's token-loss
+dump, whose positions are full-row coordinates - which is why this emits the
+plain enumeration index and never re-derives anything.
+
+Line breaks in a decoded piece become their visible spellings in the VALUE
+("\n" as two characters), not as a post-render escape: the frame then displays
+one row per line everywhere, and the NUON-lines writer's single-line guard
+holds without a second escaping layer.
+
+The trailing pad run is trimmed by scanning back over `TOKEN_PAD`, which is
+sound because pad is a special token no render ever emits as content; a CPT
+pack contains no pad and emits every position.
+
 ## fn write_pack
 
 Rows are `width` wide, and the trainer takes `ids[..width-1]` as inputs against

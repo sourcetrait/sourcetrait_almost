@@ -5,23 +5,23 @@ stage drivers over the library's objective-agnostic chain. The loops, the
 objectives and the gate live in the llm library; what is here is how a
 command line reaches them.
 
-## struct ChunkPack
-
-## fn load_chunks
-
-The rejection exists because of what the previous form did. It read one named
-tensor and ignored the rest, so the first objective to write a second tensor
-beside the ids would have had it skipped in silence - a run that completes
-cleanly having trained the wrong objective. The check lives in the reader
-rather than the writer because the reader is what a future writer's addition
-has to survive.
-
 ## fn train_gate_verb
 
 The verdict prints before the failure raises, so a failing gate still reports
 which lock failed and by how much.
 
 ## fn stage_log_path
+
+## fn token_losses_path
+
+Named off the adapter stem like the step log's default, and deliberately not
+off a `--log` override: both artifacts belong to the adapter they describe.
+
+## fn write_token_losses
+
+Written whole at run end rather than appended per step, because the dump is
+final-pass by definition - so unlike the step log it never accumulates a stale
+prefix across retries; a rerun replaces it.
 
 ## fn cpt_log_path
 

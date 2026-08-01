@@ -13,6 +13,9 @@ type FloatTensor<B, const D: usize> = burn::tensor::Tensor<B, D>;
 /// The spread below which a group counts as zero-variance.
 const ADVANTAGE_EPS: f32 = 1e-6;
 
+/// One supervised position's loss: (target index, negative log-prob).
+pub type TokenLoss = (usize, f32);
+
 /// Add the head delta's contribution onto a logits chunk, by its two
 /// column groups; narrow-and-cat so the whole path stays autodiff.
 pub fn apply_head_delta<AD: AutodiffBackend>(
@@ -43,6 +46,8 @@ pub fn apply_head_delta<AD: AutodiffBackend>(
 }
 
 /// The masked positions' summed target log-probability, head-chunked.
+/// `capture` collects each supervised position's TokenLoss as it goes.
+#[allow(clippy::too_many_arguments)]
 fn masked_logprob_sum<AD: AutodiffBackend>(
     hidden: FloatTensor<AD, 2>,
     lm_head_transposed: &FloatTensor<AD, 2>,
@@ -51,6 +56,7 @@ fn masked_logprob_sum<AD: AutodiffBackend>(
     mask: &[u8],
     chunk: usize,
     device: &AD::Device,
+    mut capture: Option<&mut Vec<TokenLoss>>,
 ) -> LibQuestResult<FloatTensor<AD, 1>> {
     let n = targets.len();
     snafu::ensure_whatever!(
@@ -77,6 +83,17 @@ fn masked_logprob_sum<AD: AutodiffBackend>(
             device,
         );
         let picked = log_probs.gather(1, index_tensor);
+        if let Some(capture) = capture.as_deref_mut() {
+            let values = match picked.clone().into_data().convert::<f32>().to_vec::<f32>() {
+                Ok(values) => values,
+                Err(error) => snafu::whatever!("token-loss extraction failed: {error:?}"),
+            };
+            for (offset, value) in values.iter().enumerate() {
+                if mask[start + offset] != 0 {
+                    capture.push((start + offset, -value));
+                }
+            }
+        }
         let weights: Vec<f32> = mask[start..end].iter().map(|m| *m as f32).collect();
         let weight_tensor = FloatTensor::<AD, 2>::from_data(
             burn::tensor::TensorData::new(weights, [rows, 1]),
@@ -101,6 +118,8 @@ pub fn supervised_count(mask: &[u8]) -> usize {
 }
 
 /// The supervised objective: mean cross-entropy over masked positions.
+/// `capture` receives each supervised position's TokenLoss when given.
+#[allow(clippy::too_many_arguments)]
 pub fn masked_cross_entropy<AD: AutodiffBackend>(
     hidden: FloatTensor<AD, 2>,
     lm_head_transposed: &FloatTensor<AD, 2>,
@@ -109,6 +128,7 @@ pub fn masked_cross_entropy<AD: AutodiffBackend>(
     mask: &[u8],
     chunk: usize,
     device: &AD::Device,
+    capture: Option<&mut Vec<TokenLoss>>,
 ) -> LibQuestResult<FloatTensor<AD, 1>> {
     let supervised = supervised_count(mask);
     snafu::ensure_whatever!(
@@ -123,6 +143,7 @@ pub fn masked_cross_entropy<AD: AutodiffBackend>(
         mask,
         chunk,
         device,
+        capture,
     )?;
     Ok(summed.neg().div_scalar(supervised as f64))
 }
@@ -149,6 +170,7 @@ pub fn sequence_logprob<AD: AutodiffBackend>(
         mask,
         chunk,
         device,
+        None,
     )
 }
 
