@@ -159,6 +159,15 @@ refused rather than left for the renderer's unknown-variable error -
 the strict render would catch it, but naming the slot contract is the
 message a tree author can act on.
 
+The zero-channel row is the no-input environment ask's spelling
+(RoundFour's environment_read): nothing in the conversation carries the
+answer, so fabricating a channel to satisfy the walker would be the
+invented-operand failure in the data layout. It is legal exactly where
+the template is slotless; a slotted template still demands its infill.
+The rule was "exactly one" until that class arrived, and the iter-side
+walker relaxed in the same edit - the two walkers must agree or a tree
+gates green in one and refuses in the other.
+
 The liquid record must bind `train` alone. The runtime binds any keys a
 caller sends; the WALKER gates training data, and a binding the tree's
 contract does not name is drift, not flexibility.

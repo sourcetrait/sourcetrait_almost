@@ -251,7 +251,7 @@ fn a_row_carrying_both_channels_is_refused() {
 }
 
 #[test]
-fn a_row_carrying_no_channel_is_refused() {
+fn a_no_input_row_renders_on_a_slotless_template() {
     let scratch = Scratch::new("neither");
     let method = piped_method(&scratch);
     write(
@@ -259,8 +259,31 @@ fn a_row_carrying_no_channel_is_refused() {
         "[\n  [teach, data];\n  [strings_two, { config: null, input: null }]\n  \
          [strings_declared, { config: null, input: [data, base] }]\n]\n",
     );
+    let rendered = render(&scratch.root, &method).expect("renders");
+    let case = rendered
+        .iter()
+        .find(|case| case.teach == "strings_two")
+        .expect("the no-input row renders");
+    assert_eq!(
+        case.prompt, "Join this together",
+        "a no-input row's prompt is the bare template body"
+    );
+    assert!(
+        matches!(case.input, crate::nu::Value::Nothing { .. }),
+        "a no-input row carries no piped value"
+    );
+}
+
+#[test]
+fn a_no_input_row_against_a_slotted_template_is_refused() {
+    let scratch = Scratch::new("neither_slotted");
+    let method = infill_method(&scratch);
+    write(
+        method.dir(&scratch.root).join("set").join("linux_proc.nuon"),
+        "[\n  [teach, data];\n  [mounts, { config: null, input: null }]\n]\n",
+    );
     let error = render(&scratch.root, &method).expect_err("refused").to_string();
-    assert!(error.contains("no data channel"), "got {error}");
+    assert!(error.contains("must infill it"), "got {error}");
 }
 
 #[test]

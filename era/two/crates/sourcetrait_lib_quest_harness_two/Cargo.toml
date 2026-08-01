@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_lib_quest_harness_two"
-version = "0.0.0-7"
+version = "0.0.0-8"
 edition = "2024"
 description = "The era-two harness library: channels, ThinkHarness, and the data core"
 authors = ["SourceTrait <development@sourcetrait.com>"]
@@ -14,7 +14,7 @@ keywords = ["sourcetrait", "quest", "harness"]
 # It is what decides whether two generated sets are comparable at all, so
 # it moves whenever the scheme changes rather than whenever the crate does.
 [package.metadata.training]
-version = "0.0.0-4"
+version = "0.0.0-5"
 
 [dependencies]
 liquid.workspace = true

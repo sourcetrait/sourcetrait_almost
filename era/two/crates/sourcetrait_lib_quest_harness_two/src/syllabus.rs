@@ -265,13 +265,20 @@ fn prompt_of(
     let liquid = liquid_of(&row.config, template, &row.teach)?;
     match (piped, liquid) {
         (true, Some(_)) => snafu::whatever!(
-            "row `{}` of `{template}` carries both channels; a row rides exactly one",
+            "row `{}` of `{template}` carries both channels; a row rides at most one",
             row.teach
         ),
-        (false, None) => snafu::whatever!(
-            "row `{}` of `{template}` carries no data channel",
-            row.teach
-        ),
+        // The no-input row: an ask whose answer lives outside the
+        // conversation binds nothing, so neither channel is the honest
+        // spelling - legal exactly where the template is slotless.
+        (false, None) => {
+            snafu::ensure_whatever!(
+                contract.is_none(),
+                "`{template}` carries a slot contract, so row `{}` must infill it",
+                row.teach
+            );
+            Ok(source.trim_end_matches('\n').to_string())
+        }
         (true, None) => {
             snafu::ensure_whatever!(
                 contract.is_none(),
