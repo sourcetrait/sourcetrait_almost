@@ -148,6 +148,41 @@ pub fn masked_cross_entropy<AD: AutodiffBackend>(
     Ok(summed.neg().div_scalar(supervised as f64))
 }
 
+/// Token-uniform supervised objective: the masked sum over a FIXED
+/// run-constant denominator instead of the row's own count.
+#[allow(clippy::too_many_arguments)]
+pub fn masked_cross_entropy_fixed<AD: AutodiffBackend>(
+    hidden: FloatTensor<AD, 2>,
+    lm_head_transposed: &FloatTensor<AD, 2>,
+    head_delta: Option<&lora::HeadDelta<AD>>,
+    targets: &[u32],
+    mask: &[u8],
+    chunk: usize,
+    device: &AD::Device,
+    denominator: f64,
+    capture: Option<&mut Vec<TokenLoss>>,
+) -> LibQuestResult<FloatTensor<AD, 1>> {
+    snafu::ensure_whatever!(
+        supervised_count(mask) > 0,
+        "the loss mask supervises no position, so this example trains nothing"
+    );
+    snafu::ensure_whatever!(
+        denominator > 0.0,
+        "a token-uniform loss needs a positive denominator, got {denominator}"
+    );
+    let summed = masked_logprob_sum::<AD>(
+        hidden,
+        lm_head_transposed,
+        head_delta,
+        targets,
+        mask,
+        chunk,
+        device,
+        capture,
+    )?;
+    Ok(summed.neg().div_scalar(denominator))
+}
+
 /// A sequence's total masked log-probability; not length-normalized.
 pub fn sequence_logprob<AD: AutodiffBackend>(
     hidden: FloatTensor<AD, 2>,

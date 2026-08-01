@@ -211,9 +211,15 @@ fn sft_token_losses_decompose_the_final_pass() {
     let mut adapters =
         ModelAdapters::<ToyAd>::init(&config, 4, 8.0, 42, &device).expect("toy adapters");
     let batch = train::SupervisedBatch { rows: &rows, masks: &masks, accumulate: 1 };
-    let sft = train::sft_loop::<ToyAd>(&model, &mut adapters, &batch, &options, &device, |_| {
-        Ok(())
-    })
+    let sft = train::sft_loop::<ToyAd>(
+        &model,
+        &mut adapters,
+        &batch,
+        train::SftObjective::ExampleMean,
+        &options,
+        &device,
+        |_| Ok(()),
+    )
     .expect("sft loop");
 
     assert_eq!(sft.token_losses.len(), rows.len(), "one dump entry per visited row");
@@ -239,6 +245,7 @@ fn sft_token_losses_decompose_the_final_pass() {
         &model,
         &mut adapters,
         &batch,
+        train::SftObjective::ExampleMean,
         &train::LoopOptions { steps: 3, ..options },
         &device,
         |log| {
@@ -254,6 +261,78 @@ fn sft_token_losses_decompose_the_final_pass() {
         (mean - last_loss as f64).abs() <= 1e-4 * mean.abs().max(1.0),
         "dumped mean {mean} does not decompose the final step loss {last_loss}"
     );
+}
+
+/// The token-uniform objective rescales each row's loss by exactly
+/// supervised/mean against the standing per-example mean: two frozen
+/// (zero-rate) runs over rows of distinct supervised counts step the
+/// same visit order, so each step's loss ratio must be one of the two
+/// count ratios, and both ratios must appear.
+#[test]
+fn sft_token_uniform_rescales_by_supervised_over_mean() {
+    type ToyAd = burn::backend::Autodiff<CpuBack>;
+    let device: <CpuBack as burn::tensor::backend::BackendTypes>::Device =
+        Default::default();
+    let config = train::toy_config();
+    let model = HybridModel::<CpuBack>::new(&config, train::toy_weights(&config), device)
+        .expect("toy model");
+
+    let seq_len = 12usize;
+    let mut rng = SplitMix64::new(11);
+    let rows: Vec<Vec<u32>> = (0..2)
+        .map(|_| {
+            (0..seq_len + 1)
+                .map(|_| (rng.next_u64() % config.vocab_size as u64) as u32)
+                .collect()
+        })
+        .collect();
+    let mut masks: Vec<Vec<u8>> = vec![vec![0u8; seq_len + 1]; 2];
+    for slot in masks[0].iter_mut().skip(1).take(3) {
+        *slot = 1;
+    }
+    for slot in masks[1].iter_mut().skip(1).take(9) {
+        *slot = 1;
+    }
+    let mean = (3.0 + 9.0) / 2.0;
+    let candidate_ratios = [3.0 / mean, 9.0 / mean];
+
+    let options = train::LoopOptions {
+        steps: 2,
+        learning_rate: 0.0,
+        warmup_steps: 1,
+        loss_chunk: 8,
+        log_every: usize::MAX,
+    };
+    let run = |objective: train::SftObjective| -> Vec<f32> {
+        let mut adapters =
+            ModelAdapters::<ToyAd>::init(&config, 4, 8.0, 42, &device).expect("toy adapters");
+        let batch = train::SupervisedBatch { rows: &rows, masks: &masks, accumulate: 1 };
+        let mut losses: Vec<f32> = Vec::new();
+        train::sft_loop::<ToyAd>(&model, &mut adapters, &batch, objective, &options, &device, |log| {
+            losses.push(log.loss);
+            Ok(())
+        })
+        .expect("frozen sft loop");
+        losses
+    };
+    let example = run(train::SftObjective::ExampleMean);
+    let token = run(train::SftObjective::TokenUniform);
+    assert_eq!(example.len(), 2);
+    assert_eq!(token.len(), 2);
+
+    let mut seen: Vec<f64> = Vec::new();
+    for (step, (token_loss, example_loss)) in token.iter().zip(example.iter()).enumerate() {
+        let ratio = *token_loss as f64 / *example_loss as f64;
+        let matched = candidate_ratios
+            .iter()
+            .find(|candidate| (ratio - **candidate).abs() <= 1e-4)
+            .copied();
+        let Some(matched) = matched else {
+            panic!("step {step} ratio {ratio} matches neither supervised/mean candidate");
+        };
+        seen.push(matched);
+    }
+    assert_ne!(seen[0], seen[1], "both rows must appear across the two steps");
 }
 
 /// The adapter artifact carries exactly the direction-3 surface: GDN

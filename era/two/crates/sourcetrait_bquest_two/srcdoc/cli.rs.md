@@ -61,7 +61,13 @@ Rank and alpha apply to fresh adapters alone. On a resume they come from the
 artifact, because a resumed adapter's geometry is already decided and a mismatched
 rank would load as garbage.
 
+## enum SftLoss
+
 ## struct TrainSftArgs
+
+`--loss token` is the SumLossTrial lever: token-uniform normalization
+over the pack-mean supervised count, rate-comparable with the default by
+construction, so a trial leg changes exactly one variable.
 
 ## struct TrainDpoArgs
 

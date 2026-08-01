@@ -122,6 +122,15 @@ pub(crate) struct StageArgs {
     pub(crate) log_every: usize,
 }
 
+/// The supervised loss normalization `train sft` applies per example.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum SftLoss {
+    /// The standing per-example mean over the row's own count.
+    Example,
+    /// Token-uniform: the sum over the pack-mean supervised count.
+    Token,
+}
+
 #[derive(Debug, clap::Args)]
 pub(crate) struct TrainSftArgs {
     /// A packed instruction artifact, from `mix instruct`.
@@ -130,6 +139,9 @@ pub(crate) struct TrainSftArgs {
     /// Rows folded into one optimizer step.
     #[arg(long, default_value_t = 1)]
     pub(crate) accumulate: usize,
+    /// Loss normalization: example mean, or token-uniform.
+    #[arg(long, value_enum, default_value_t = SftLoss::Example)]
+    pub(crate) loss: SftLoss,
     #[command(flatten)]
     pub(crate) stage: StageArgs,
 }

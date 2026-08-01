@@ -75,6 +75,16 @@ An example with nothing masked raises rather than returning zero. A zero-loss
 step looks exactly like a clean step while training nothing, so the error is the
 only way that condition is visible.
 
+## fn masked_cross_entropy_fixed
+
+The SumLossTrial lever. The denominator is a RUN constant rather than the
+row's count, so a long row's per-token gradient is no longer diluted by its
+own length - the mechanism the mean form applies at batch 1. Passing the
+pack-mean supervised count keeps the average row's step magnitude equal to
+the standing mean posture, which is what makes a rate transfer between the
+two objectives; passing 1.0 would be the pure sum and would rescale the
+effective rate by ~the mean count.
+
 ## fn sequence_logprob
 
 Deliberately not length-normalized. Normalizing here would change what the

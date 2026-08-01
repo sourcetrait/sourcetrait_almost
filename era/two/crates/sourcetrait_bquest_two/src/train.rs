@@ -283,8 +283,12 @@ pub(crate) fn train_sft(cli: &Cli, args: &TrainSftArgs) -> BquestResult<()> {
         .stage
         .steps
         .unwrap_or_else(|| rows.len().div_ceil(args.accumulate.max(1)));
+    let loss_label = match args.loss {
+        SftLoss::Example => "example",
+        SftLoss::Token => "token",
+    };
     eprintln!(
-        "bquest train sft: {} rows of {}, {steps} steps, accumulate {}, rank {}",
+        "bquest train sft: {} rows of {}, {steps} steps, accumulate {}, rank {}, loss {loss_label}",
         rows.len(),
         rows[0].len() - 1,
         args.accumulate,
@@ -304,10 +308,15 @@ pub(crate) fn train_sft(cli: &Cli, args: &TrainSftArgs) -> BquestResult<()> {
             masks: &masks,
             accumulate: args.accumulate,
         };
+        let objective = match args.loss {
+            SftLoss::Example => llm::train::SftObjective::ExampleMean,
+            SftLoss::Token => llm::train::SftObjective::TokenUniform,
+        };
         let sft = llm::train::sft_loop::<llm::TrainCudaAd>(
             &model,
             &mut adapters,
             &batch,
+            objective,
             &stage_options(&args.stage, steps),
             &device,
             |log| Ok(append_step_log(&log_path, log)?),

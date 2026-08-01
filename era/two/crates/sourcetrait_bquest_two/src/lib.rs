@@ -117,6 +117,7 @@ pub(crate) use crate::cli::{
 };
 #[cfg(feature = "train")]
 pub(crate) use crate::cli::{
+    SftLoss,
     StageArgs,
     TrainCptArgs,
     TrainDpoArgs,

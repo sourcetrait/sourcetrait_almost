@@ -207,6 +207,16 @@ that slice wrong shifts the supervised span by one token.
 
 ## struct SupervisedBatch
 
+## enum SftObjective
+
+Token-uniform divides by the PACK-mean supervised count, computed over
+every row whether visited or not, so a partial run prices tokens
+identically to a full one and two runs over one pack share a scale. The
+step log's loss column then reads sum/mean-count rather than the row
+mean, so the dump's mean-reproduces-the-log cross-check holds only for
+the example-mean objective; the dump itself is objective-independent
+(raw per-token values either way).
+
 ## struct RowTokenLosses
 
 Positions are full-row token coordinates - target index plus one - so a

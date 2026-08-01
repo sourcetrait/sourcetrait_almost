@@ -1077,6 +1077,15 @@ pub struct SupervisedBatch<'a> {
     pub accumulate: usize,
 }
 
+/// The supervised loss normalization the loop applies per example.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SftObjective {
+    /// The standing per-example mean over the row's own count.
+    ExampleMean,
+    /// Token-uniform: the sum over the pack-mean supervised count.
+    TokenUniform,
+}
+
 /// One row's last-visit losses at its supervised full-row positions.
 pub struct RowTokenLosses {
     pub row: usize,
@@ -1095,6 +1104,7 @@ pub fn sft_loop<AD: AutodiffBackend>(
     model: &HybridModel<AD::InnerBackend>,
     adapters: &mut ModelAdapters<AD>,
     batch: &SupervisedBatch<'_>,
+    objective: SftObjective,
     options: &LoopOptions,
     device: &AD::Device,
     mut on_step: impl FnMut(&StepLog) -> Result<(), Box<dyn std::error::Error + Send + Sync>>,
@@ -1102,6 +1112,15 @@ pub fn sft_loop<AD: AutodiffBackend>(
     let (rows, masks, accumulate) = (batch.rows, batch.masks, batch.accumulate);
     snafu::ensure_whatever!(!rows.is_empty(), "no supervised rows");
     let seq_len = rows[0].len() - 1;
+    // The token-uniform denominator is a RUN constant over the whole
+    // pack, visited or not, so a partial run prices tokens identically.
+    let mean_supervised = {
+        let total: usize = masks
+            .iter()
+            .map(|mask| objective::supervised_count(&mask[1..]))
+            .sum();
+        total as f64 / rows.len() as f64
+    };
     let mask_inner = oracle::causal_mask::<AD::InnerBackend>(seq_len, device);
     let optimizer = burn::optim::AdamWConfig::new().with_weight_decay(0.0).build();
     let mut states: HashMap<String, OptState<AD::InnerBackend>> = HashMap::new();
@@ -1152,8 +1171,8 @@ pub fn sft_loop<AD: AutodiffBackend>(
                 model,
                 Some(&adapters.head),
                 top_x,
-                |hidden, head, delta| {
-                    objective::masked_cross_entropy::<AD>(
+                |hidden, head, delta| match objective {
+                    SftObjective::ExampleMean => objective::masked_cross_entropy::<AD>(
                         hidden,
                         head,
                         delta,
@@ -1162,7 +1181,18 @@ pub fn sft_loop<AD: AutodiffBackend>(
                         options.loss_chunk,
                         device,
                         Some(&mut visit_capture),
-                    )
+                    ),
+                    SftObjective::TokenUniform => objective::masked_cross_entropy_fixed::<AD>(
+                        hidden,
+                        head,
+                        delta,
+                        targets,
+                        target_mask,
+                        options.loss_chunk,
+                        device,
+                        mean_supervised,
+                        Some(&mut visit_capture),
+                    ),
                 },
             )?;
             // Target index + 1 is the token's own full-row position.
