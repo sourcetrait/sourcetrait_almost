@@ -7,6 +7,12 @@ pass caches each layer's input and the loss block and each layer then run as
 their own small graphs chained by vector-Jacobian products. At most one layer's
 graph is live at a time.
 
+One layer's graph is itself too much at the production window, which is why
+the GDN layers checkpoint a second level down (`gdn_chain_segmented`). The r5
+fit probe attributed the step transient: ~5.7 GiB card-wide, dominated by one
+GDN layer's retained 512-step recurrence graph, and at steady state that
+transient stacks on the optimizer states and breached the end-user card.
+
 Burn autodiff over the sequential GDN recurrence is the correctness grade
 rather than the fast one. A chunked backward stays a later performance lever.
 
@@ -93,6 +99,56 @@ graph. That is why the preference stage's peak is roughly twice the supervised
 stage's at the same window.
 
 ## fn chain_from_seed
+
+`segment: None` is the monolithic per-layer chain, kept reachable because the
+gate's standing init and trained legs pin it against the full graph; the
+production loops all pass `Some(RECURRENCE_SEGMENT)`.
+
+## const RECURRENCE_SEGMENT
+
+Sized by the r5 fit probe. The monolithic 512-step retained chain was the step
+transient's mass (~4.5 GiB class of a ~5.7 GiB transient); 64 bounds the
+retained recurrence to one-eighth, which cleared the 20,564 MiB workstation
+bar with margin. Total recurrence FLOPs are segment-count-independent (one
+no-grad pass plus one in-graph pass whatever the width), so the width trades
+only retained memory against nothing - smaller is safer, 64 leaves the gate
+comfortable.
+
+## type SegmentedLayerGrads
+
+## fn gdn_chain_segmented
+
+Four phases, and the seam placement is the design: the recurrence consumes
+exactly six weight-free tensors (q, k, v, decay, beta from `gdn_pre`, state),
+so its backward needs no adapter bookkeeping and its inputs can be lifted as
+leaves from a no-grad pass without recomputing the projections.
+
+- Pass one (no grad, frozen adapter views): pre products, per-segment
+  boundary states, the whole recurrence output. Deterministic ops make the
+  saved output bitwise what the in-graph re-runs produce, which is what lets
+  the later phases treat it as a leaf.
+- Post backward: x, y and the gate rows as leaves through `gdn_post`;
+  collects the output-side adapter grads (o, MLP) plus the y/gate/x grads.
+- Recurrence backward, segments in reverse: each segment re-runs with its
+  boundary state and rule-input slices as leaves; the pseudo-loss is its
+  output-grad slice plus the NEXT segment's boundary adjoint dotted with its
+  final state, and its own state-input grad becomes the adjoint below. The
+  last segment carries no adjoint term because the objective never consumes
+  the final state; the first segment's adjoint is dropped because the initial
+  state is the zeros constant.
+- Pre backward: x as a leaf through `gdn_pre`; the pseudo-loss dots all six
+  pre products with their collected grads; yields the input-side adapter
+  grads (q, q_conv, g) and the pre half's x grad.
+
+The layer's input grad is the post and pre halves' sum - x feeds both the
+residuals and the projections. Adapter grads are collected permissively per
+phase (each phase's backward holds only its own params) and coverage is
+asserted once at the end, so a param silently missing from both halves still
+raises.
+
+The toy gate reads the segmented chain at exactly zero nmse against the full
+graph, tighter than the 1e-9 reassociation bar - the phases replay the same
+primitive ops in the same order, so on the toy the decomposition is bitwise.
 
 ## fn accumulate_grads
 
@@ -194,6 +250,16 @@ handles zero adapters - `b` is still zero there.
 
 The losses are asserted equal before the gradients are compared, since a
 gradient comparison over two different losses would mean nothing.
+
+The segmented legs run at `GATE_SEGMENT` (four segments over the toy's
+sixteen positions) so the multi-segment adjoint carry is what the bar
+covers - the production width over the toy sequence would collapse to one
+segment and prove only the split. Their bar is enforced HERE rather than by
+the gate verb, an asymmetry against the standing legs: the verb predates the
+fields and checks only what it names, so an internal ensure is what makes a
+segmented breach fail the shipped `bquest train gate` rather than pass it
+silently. The descent lock needs no segmented twin because `train_loop`
+itself now runs the segmented production path.
 
 ## fn forward_plain
 

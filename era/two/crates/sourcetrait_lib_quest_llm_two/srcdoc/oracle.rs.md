@@ -59,6 +59,31 @@ as a confusing failure much later.
 The tied-embedding branch exists for loader generality. These checkpoints ship
 untied, so it is the untied path that runs.
 
+## struct GdnPre
+
+## fn gdn_pre
+
+## fn gdn_recurrence
+
+## fn gdn_post
+
+The GDN forward is composed from these three pieces so the trainer can
+checkpoint the recurrence by segment: the pre half ends at the rule inputs
+(the natural seam - the recurrence consumes exactly these six tensors and no
+weight), the recurrence runs from a carried state and returns the final one,
+and the post half picks up at the gated output norm. The composition is
+op-for-op the old monolithic body - the pieces exist for the backward's
+benefit, and the forward gates re-read their standing digits across the split.
+
+The recurrence builds its output exactly as the monolith did (per-step
+[heads, 1, value] rows, one cat on the head-major axis, one swap), so a
+segmented run's concatenated slices are bitwise the monolithic output; that
+identity is what lets the segmented backward treat the saved output as a leaf.
+
+The carried state is an argument rather than a zeros literal because the
+segmented backward re-enters mid-sequence from a boundary state; the stateless
+forward passes the zeros itself.
+
 ## fn embed
 
 ## fn forward_all

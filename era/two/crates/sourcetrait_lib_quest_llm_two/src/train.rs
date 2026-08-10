@@ -50,44 +50,54 @@ pub struct StepOutcome<B: Backend> {
     pub grads: HashMap<String, FloatTensor<B, 2>>,
 }
 
+/// Zero-copy autodiff view of a frozen GDN block, as untracked constants.
+fn lift_gdn<AD: AutodiffBackend>(block: &GdnBlock<AD::InnerBackend>) -> GdnBlock<AD> {
+    GdnBlock {
+        input_norm: FloatTensor::from_inner(block.input_norm.clone()),
+        post_attention_norm: FloatTensor::from_inner(block.post_attention_norm.clone()),
+        q_transposed: FloatTensor::from_inner(block.q_transposed.clone()),
+        k_transposed: FloatTensor::from_inner(block.k_transposed.clone()),
+        v_transposed: FloatTensor::from_inner(block.v_transposed.clone()),
+        g_transposed: FloatTensor::from_inner(block.g_transposed.clone()),
+        o_transposed: FloatTensor::from_inner(block.o_transposed.clone()),
+        a_transposed: FloatTensor::from_inner(block.a_transposed.clone()),
+        b_transposed: FloatTensor::from_inner(block.b_transposed.clone()),
+        q_conv_taps: block.q_conv_taps.iter().map(|t| FloatTensor::from_inner(t.clone())).collect(),
+        k_conv_taps: block.k_conv_taps.iter().map(|t| FloatTensor::from_inner(t.clone())).collect(),
+        v_conv_taps: block.v_conv_taps.iter().map(|t| FloatTensor::from_inner(t.clone())).collect(),
+        a_log_row: FloatTensor::from_inner(block.a_log_row.clone()),
+        dt_bias_row: FloatTensor::from_inner(block.dt_bias_row.clone()),
+        o_norm: FloatTensor::from_inner(block.o_norm.clone()),
+        gate_transposed: FloatTensor::from_inner(block.gate_transposed.clone()),
+        up_transposed: FloatTensor::from_inner(block.up_transposed.clone()),
+        down_transposed: FloatTensor::from_inner(block.down_transposed.clone()),
+    }
+}
+
+/// Zero-copy autodiff view of a frozen attention block.
+fn lift_attn<AD: AutodiffBackend>(block: &AttnBlock<AD::InnerBackend>) -> AttnBlock<AD> {
+    AttnBlock {
+        q_transposed: FloatTensor::from_inner(block.q_transposed.clone()),
+        k_transposed: FloatTensor::from_inner(block.k_transposed.clone()),
+        v_transposed: FloatTensor::from_inner(block.v_transposed.clone()),
+        o_transposed: FloatTensor::from_inner(block.o_transposed.clone()),
+        q_norm: FloatTensor::from_inner(block.q_norm.clone()),
+        k_norm: FloatTensor::from_inner(block.k_norm.clone()),
+        post_attention_norm: FloatTensor::from_inner(block.post_attention_norm.clone()),
+        post_feedforward_norm: FloatTensor::from_inner(block.post_feedforward_norm.clone()),
+        gate_transposed: FloatTensor::from_inner(block.gate_transposed.clone()),
+        up_transposed: FloatTensor::from_inner(block.up_transposed.clone()),
+        down_transposed: FloatTensor::from_inner(block.down_transposed.clone()),
+    }
+}
+
 /// Zero-copy autodiff view of a frozen block, as untracked constants.
 fn lift_block<AD: AutodiffBackend>(
     block: &HybridBlock<AD::InnerBackend>,
 ) -> HybridBlock<AD> {
     match block {
-        HybridBlock::Gdn(block) => HybridBlock::Gdn(GdnBlock {
-            input_norm: FloatTensor::from_inner(block.input_norm.clone()),
-            post_attention_norm: FloatTensor::from_inner(block.post_attention_norm.clone()),
-            q_transposed: FloatTensor::from_inner(block.q_transposed.clone()),
-            k_transposed: FloatTensor::from_inner(block.k_transposed.clone()),
-            v_transposed: FloatTensor::from_inner(block.v_transposed.clone()),
-            g_transposed: FloatTensor::from_inner(block.g_transposed.clone()),
-            o_transposed: FloatTensor::from_inner(block.o_transposed.clone()),
-            a_transposed: FloatTensor::from_inner(block.a_transposed.clone()),
-            b_transposed: FloatTensor::from_inner(block.b_transposed.clone()),
-            q_conv_taps: block.q_conv_taps.iter().map(|t| FloatTensor::from_inner(t.clone())).collect(),
-            k_conv_taps: block.k_conv_taps.iter().map(|t| FloatTensor::from_inner(t.clone())).collect(),
-            v_conv_taps: block.v_conv_taps.iter().map(|t| FloatTensor::from_inner(t.clone())).collect(),
-            a_log_row: FloatTensor::from_inner(block.a_log_row.clone()),
-            dt_bias_row: FloatTensor::from_inner(block.dt_bias_row.clone()),
-            o_norm: FloatTensor::from_inner(block.o_norm.clone()),
-            gate_transposed: FloatTensor::from_inner(block.gate_transposed.clone()),
-            up_transposed: FloatTensor::from_inner(block.up_transposed.clone()),
-            down_transposed: FloatTensor::from_inner(block.down_transposed.clone()),
-        }),
-        HybridBlock::Attn(block) => HybridBlock::Attn(AttnBlock {
-            q_transposed: FloatTensor::from_inner(block.q_transposed.clone()),
-            k_transposed: FloatTensor::from_inner(block.k_transposed.clone()),
-            v_transposed: FloatTensor::from_inner(block.v_transposed.clone()),
-            o_transposed: FloatTensor::from_inner(block.o_transposed.clone()),
-            q_norm: FloatTensor::from_inner(block.q_norm.clone()),
-            k_norm: FloatTensor::from_inner(block.k_norm.clone()),
-            post_attention_norm: FloatTensor::from_inner(block.post_attention_norm.clone()),
-            post_feedforward_norm: FloatTensor::from_inner(block.post_feedforward_norm.clone()),
-            gate_transposed: FloatTensor::from_inner(block.gate_transposed.clone()),
-            up_transposed: FloatTensor::from_inner(block.up_transposed.clone()),
-            down_transposed: FloatTensor::from_inner(block.down_transposed.clone()),
-        }),
+        HybridBlock::Gdn(block) => HybridBlock::Gdn(lift_gdn::<AD>(block)),
+        HybridBlock::Attn(block) => HybridBlock::Attn(lift_attn::<AD>(block)),
     }
 }
 
@@ -365,6 +375,9 @@ where
     Ok((loss_value, left_grad, right_grad, head_grads))
 }
 
+/// The recurrence-segment width the production training loops run under.
+pub const RECURRENCE_SEGMENT: usize = 64;
+
 /// Pass two: a per-layer VJP top down from a seed gradient.
 pub fn chain_from_seed<AD: AutodiffBackend>(
     model: &HybridModel<AD::InnerBackend>,
@@ -372,6 +385,7 @@ pub fn chain_from_seed<AD: AutodiffBackend>(
     mask_inner: &FloatTensor<AD::InnerBackend, 2>,
     layer_inputs: &[FloatTensor<AD::InnerBackend, 2>],
     seed: FloatTensor<AD::InnerBackend, 2>,
+    segment: Option<usize>,
     device: &AD::Device,
 ) -> LibQuestResult<HashMap<String, FloatTensor<AD::InnerBackend, 2>>> {
     let dims = dims_of::<AD>(model);
@@ -384,6 +398,24 @@ pub fn chain_from_seed<AD: AutodiffBackend>(
         .enumerate()
         .rev()
     {
+        let prefix = format!("model.layers.{index}");
+        if let (HybridBlock::Gdn(gdn), Some(width)) = (block, segment) {
+            let (grads, grad_in) = gdn_chain_segmented::<AD>(
+                gdn,
+                layer_adapters,
+                &dims,
+                &layer_inputs[index],
+                &grad_out,
+                width,
+                &prefix,
+                device,
+            )?;
+            for (name, grad) in grads {
+                lora_grads.insert(name, grad);
+            }
+            grad_out = grad_in;
+            continue;
+        }
         let block_ad = lift_block::<AD>(block);
         let mask_ad = FloatTensor::<AD, 2>::from_inner(mask_inner.clone());
         let block_input =
@@ -398,7 +430,6 @@ pub fn chain_from_seed<AD: AutodiffBackend>(
         );
         let pseudo_loss = (out * FloatTensor::from_inner(grad_out.clone())).sum();
         let mut grads = pseudo_loss.backward();
-        let prefix = format!("model.layers.{index}");
         for (name, tensor) in layer_adapters.params(&prefix) {
             let Some(grad) = tensor.grad_remove(&mut grads) else {
                 snafu::whatever!("no gradient for {name} (graph detached?)");
@@ -411,6 +442,214 @@ pub fn chain_from_seed<AD: AutodiffBackend>(
         grad_out = next_grad;
     }
     Ok(lora_grads)
+}
+
+/// A segmented GDN gradient set plus the gradient handed to the layer below.
+type SegmentedLayerGrads<AD> = (
+    HashMap<String, FloatTensor<<AD as AutodiffBackend>::InnerBackend, 2>>,
+    FloatTensor<<AD as AutodiffBackend>::InnerBackend, 2>,
+);
+
+/// One GDN layer's VJP with the recurrence checkpointed by segment.
+#[allow(clippy::too_many_arguments)]
+fn gdn_chain_segmented<AD: AutodiffBackend>(
+    block: &oracle::GdnBlock<AD::InnerBackend>,
+    layer_adapters: &LayerAdapters<AD>,
+    dims: &HybridDims,
+    block_input: &FloatTensor<AD::InnerBackend, 2>,
+    grad_out: &FloatTensor<AD::InnerBackend, 2>,
+    segment: usize,
+    prefix: &str,
+    device: &AD::Device,
+) -> LibQuestResult<SegmentedLayerGrads<AD>> {
+    let LayerAdapters::Gdn(gdn_adapters) = layer_adapters else {
+        snafu::whatever!("a segmented GDN chain reached a non-GDN adapter set at {prefix}");
+    };
+    let segment = segment.max(1);
+    let n = block_input.dims()[0];
+
+    // Pass one, no grad: pre products, boundary states, the whole output.
+    let frozen = adapters_inner::<AD>(layer_adapters);
+    let LayerAdapters::Gdn(frozen_gdn) = &frozen else {
+        unreachable!("frozen views keep their layer kind by construction")
+    };
+    let pre = block.gdn_pre(
+        block_input.clone(),
+        dims.gdn_heads,
+        dims.gdn_key_dim,
+        dims.gdn_value_dim,
+        dims.eps,
+        device,
+        Some(frozen_gdn),
+    );
+    let mut state = FloatTensor::<AD::InnerBackend, 3>::zeros(
+        [dims.gdn_heads, dims.gdn_key_dim, dims.gdn_value_dim],
+        device,
+    )
+    .cast(burn::tensor::FloatDType::F32);
+    let mut boundaries: Vec<FloatTensor<AD::InnerBackend, 3>> = Vec::new();
+    let mut y_parts: Vec<FloatTensor<AD::InnerBackend, 3>> = Vec::new();
+    let mut start = 0usize;
+    while start < n {
+        let len = segment.min(n - start);
+        boundaries.push(state.clone());
+        let (y_seg, next) = oracle::gdn_recurrence::<AD::InnerBackend>(
+            pre.q.clone().narrow(0, start, len),
+            pre.k.clone().narrow(0, start, len),
+            pre.v.clone().narrow(0, start, len),
+            pre.decay.clone().narrow(0, start, len),
+            pre.beta.clone().narrow(0, start, len),
+            state,
+        );
+        y_parts.push(y_seg);
+        state = next;
+        start += len;
+    }
+    let y_full = burn::tensor::Tensor::cat(y_parts, 0);
+
+    // The post half's backward: output-side adapters, y and gate grads.
+    let block_ad = lift_gdn::<AD>(block);
+    let x_post = FloatTensor::<AD, 2>::from_inner(block_input.clone()).require_grad();
+    let y_leaf = FloatTensor::<AD, 3>::from_inner(y_full).require_grad();
+    let gate_leaf = FloatTensor::<AD, 2>::from_inner(pre.gate_rows.clone()).require_grad();
+    let out = block_ad.gdn_post(
+        x_post.clone(),
+        y_leaf.clone(),
+        gate_leaf.clone(),
+        dims.gdn_heads,
+        dims.gdn_value_dim,
+        dims.eps,
+        Some(gdn_adapters),
+    );
+    let pseudo_loss = (out * FloatTensor::from_inner(grad_out.clone())).sum();
+    let mut post_grads = pseudo_loss.backward();
+    let mut collected: HashMap<String, FloatTensor<AD::InnerBackend, 2>> = HashMap::new();
+    for (name, tensor) in layer_adapters.params(prefix) {
+        if let Some(grad) = tensor.grad_remove(&mut post_grads) {
+            collected.insert(name, grad);
+        }
+    }
+    let Some(grad_y) = y_leaf.grad_remove(&mut post_grads) else {
+        snafu::whatever!("no gradient reached the recurrence output at {prefix}");
+    };
+    let Some(grad_gate_rows) = gate_leaf.grad_remove(&mut post_grads) else {
+        snafu::whatever!("no gradient reached the gate rows at {prefix}");
+    };
+    let Some(grad_x_post) = x_post.grad_remove(&mut post_grads) else {
+        snafu::whatever!("no post-half input gradient at {prefix}");
+    };
+
+    // The recurrence backward, one segment at a time from the top: each
+    // takes its output-grad slice plus the boundary adjoint above it, and
+    // emits rule-input grads plus the adjoint for the segment below.
+    let seg_count = boundaries.len();
+    let mut adjoint: Option<FloatTensor<AD::InnerBackend, 3>> = None;
+    let mut grad_q_parts: Vec<FloatTensor<AD::InnerBackend, 3>> = Vec::with_capacity(seg_count);
+    let mut grad_k_parts: Vec<FloatTensor<AD::InnerBackend, 3>> = Vec::with_capacity(seg_count);
+    let mut grad_v_parts: Vec<FloatTensor<AD::InnerBackend, 3>> = Vec::with_capacity(seg_count);
+    let mut grad_d_parts: Vec<FloatTensor<AD::InnerBackend, 2>> = Vec::with_capacity(seg_count);
+    let mut grad_b_parts: Vec<FloatTensor<AD::InnerBackend, 2>> = Vec::with_capacity(seg_count);
+    for index in (0..seg_count).rev() {
+        let start = index * segment;
+        let len = segment.min(n - start);
+        let state_in =
+            FloatTensor::<AD, 3>::from_inner(boundaries[index].clone()).require_grad();
+        let q_leaf =
+            FloatTensor::<AD, 3>::from_inner(pre.q.clone().narrow(0, start, len)).require_grad();
+        let k_leaf =
+            FloatTensor::<AD, 3>::from_inner(pre.k.clone().narrow(0, start, len)).require_grad();
+        let v_leaf =
+            FloatTensor::<AD, 3>::from_inner(pre.v.clone().narrow(0, start, len)).require_grad();
+        let d_leaf = FloatTensor::<AD, 2>::from_inner(pre.decay.clone().narrow(0, start, len))
+            .require_grad();
+        let b_leaf = FloatTensor::<AD, 2>::from_inner(pre.beta.clone().narrow(0, start, len))
+            .require_grad();
+        let (y_seg, state_out) = oracle::gdn_recurrence::<AD>(
+            q_leaf.clone(),
+            k_leaf.clone(),
+            v_leaf.clone(),
+            d_leaf.clone(),
+            b_leaf.clone(),
+            state_in.clone(),
+        );
+        let mut pseudo_loss =
+            (y_seg * FloatTensor::from_inner(grad_y.clone().narrow(0, start, len))).sum();
+        if let Some(above) = &adjoint {
+            pseudo_loss = pseudo_loss + (state_out * FloatTensor::from_inner(above.clone())).sum();
+        }
+        let mut seg_grads = pseudo_loss.backward();
+        let Some(grad_q) = q_leaf.grad_remove(&mut seg_grads) else {
+            snafu::whatever!("no query gradient in segment {index} at {prefix}");
+        };
+        let Some(grad_k) = k_leaf.grad_remove(&mut seg_grads) else {
+            snafu::whatever!("no key gradient in segment {index} at {prefix}");
+        };
+        let Some(grad_v) = v_leaf.grad_remove(&mut seg_grads) else {
+            snafu::whatever!("no value gradient in segment {index} at {prefix}");
+        };
+        let Some(grad_d) = d_leaf.grad_remove(&mut seg_grads) else {
+            snafu::whatever!("no decay gradient in segment {index} at {prefix}");
+        };
+        let Some(grad_b) = b_leaf.grad_remove(&mut seg_grads) else {
+            snafu::whatever!("no beta gradient in segment {index} at {prefix}");
+        };
+        let Some(grad_state) = state_in.grad_remove(&mut seg_grads) else {
+            snafu::whatever!("no state adjoint in segment {index} at {prefix}");
+        };
+        grad_q_parts.push(grad_q);
+        grad_k_parts.push(grad_k);
+        grad_v_parts.push(grad_v);
+        grad_d_parts.push(grad_d);
+        grad_b_parts.push(grad_b);
+        adjoint = Some(grad_state);
+    }
+    grad_q_parts.reverse();
+    grad_k_parts.reverse();
+    grad_v_parts.reverse();
+    grad_d_parts.reverse();
+    grad_b_parts.reverse();
+    let grad_q = burn::tensor::Tensor::cat(grad_q_parts, 0);
+    let grad_k = burn::tensor::Tensor::cat(grad_k_parts, 0);
+    let grad_v = burn::tensor::Tensor::cat(grad_v_parts, 0);
+    let grad_d = burn::tensor::Tensor::cat(grad_d_parts, 0);
+    let grad_b = burn::tensor::Tensor::cat(grad_b_parts, 0);
+
+    // The pre half's backward: input-side adapters and the input gradient.
+    let x_pre = FloatTensor::<AD, 2>::from_inner(block_input.clone()).require_grad();
+    let pre_ad = block_ad.gdn_pre(
+        x_pre.clone(),
+        dims.gdn_heads,
+        dims.gdn_key_dim,
+        dims.gdn_value_dim,
+        dims.eps,
+        device,
+        Some(gdn_adapters),
+    );
+    let pseudo_loss = (pre_ad.q * FloatTensor::from_inner(grad_q)).sum()
+        + (pre_ad.k * FloatTensor::from_inner(grad_k)).sum()
+        + (pre_ad.v * FloatTensor::from_inner(grad_v)).sum()
+        + (pre_ad.decay * FloatTensor::from_inner(grad_d)).sum()
+        + (pre_ad.beta * FloatTensor::from_inner(grad_b)).sum()
+        + (pre_ad.gate_rows * FloatTensor::from_inner(grad_gate_rows)).sum();
+    let mut pre_grads = pseudo_loss.backward();
+    for (name, tensor) in layer_adapters.params(prefix) {
+        if let Some(grad) = tensor.grad_remove(&mut pre_grads) {
+            match collected.remove(&name) {
+                Some(existing) => collected.insert(name, existing + grad),
+                None => collected.insert(name, grad),
+            };
+        }
+    }
+    let Some(grad_x_pre) = x_pre.grad_remove(&mut pre_grads) else {
+        snafu::whatever!("no pre-half input gradient at {prefix}");
+    };
+    for (name, _) in layer_adapters.params(prefix) {
+        snafu::ensure_whatever!(
+            collected.contains_key(&name),
+            "no segmented gradient for {name}"
+        );
+    }
+    Ok((collected, grad_x_post + grad_x_pre))
 }
 
 /// Add one gradient set into an accumulator, summing on name.
@@ -440,6 +679,7 @@ pub fn scale_grads<B: Backend>(
 }
 
 /// One continued-pretraining step: the plain LM objective.
+#[allow(clippy::too_many_arguments)]
 pub fn chain_step<AD: AutodiffBackend>(
     model: &HybridModel<AD::InnerBackend>,
     adapters: &ModelAdapters<AD>,
@@ -447,6 +687,7 @@ pub fn chain_step<AD: AutodiffBackend>(
     inputs: &[u32],
     targets: &[u32],
     loss_chunk: usize,
+    segment: Option<usize>,
     device: &AD::Device,
 ) -> LibQuestResult<StepOutcome<AD::InnerBackend>> {
     let (layer_inputs, top_x) =
@@ -461,8 +702,15 @@ pub fn chain_step<AD: AutodiffBackend>(
             ))
         },
     )?;
-    let mut grads =
-        chain_from_seed::<AD>(model, adapters, mask_inner, &layer_inputs, seed, device)?;
+    let mut grads = chain_from_seed::<AD>(
+        model,
+        adapters,
+        mask_inner,
+        &layer_inputs,
+        seed,
+        segment,
+        device,
+    )?;
     accumulate_grads(&mut grads, head_grads);
     Ok(StepOutcome { loss, grads })
 }
@@ -549,6 +797,7 @@ pub fn train_loop<AD: AutodiffBackend>(
             inputs,
             targets,
             options.loss_chunk,
+            Some(RECURRENCE_SEGMENT),
             device,
         )?;
         if step == 0 {
@@ -889,11 +1138,13 @@ fn tensor_values<B: Backend>(tensor: &FloatTensor<B, 2>) -> LibQuestResult<Vec<f
     }
 }
 
-/// The gate verdict: the three toy locks' readings.
+/// The gate verdict: the toy locks' readings, segmented legs included.
 pub struct GateVerdict {
     pub adapter_off_exact: bool,
     pub init_grads: GradCompare,
     pub trained_grads: GradCompare,
+    pub segmented_init: GradCompare,
+    pub segmented_trained: GradCompare,
     pub first_loss: f32,
     pub final_loss: f32,
     pub descended: bool,
@@ -903,6 +1154,8 @@ pub struct GateVerdict {
 pub const GATE_GRAD_NMSE_BAR: f64 = 1e-9;
 /// The descent margin the 60-step lock must clear.
 const GATE_DESCENT_MARGIN: f32 = 0.05;
+/// The gate's segment width: four segments over the toy sequence.
+const GATE_SEGMENT: usize = 4;
 
 /// Run the three toy-config locks on cpu f32.
 pub fn run_train_gate() -> LibQuestResult<GateVerdict> {
@@ -940,7 +1193,7 @@ pub fn run_train_gate() -> LibQuestResult<GateVerdict> {
 
     let targets = &chunks[0][1..];
     let chain = chain_step::<ToyAd>(
-        &model, &adapters, &mask_inner, ids, targets, 8, &device,
+        &model, &adapters, &mask_inner, ids, targets, 8, None, &device,
     )?;
     let full = full_graph_step::<ToyAd>(
         &model, &adapters, &mask_inner, ids, targets, 8, &device,
@@ -952,6 +1205,22 @@ pub fn run_train_gate() -> LibQuestResult<GateVerdict> {
         full.loss
     );
     let init_grads = compare_grads(&chain.grads, &full.grads)?;
+    let segmented = chain_step::<ToyAd>(
+        &model, &adapters, &mask_inner, ids, targets, 8, Some(GATE_SEGMENT), &device,
+    )?;
+    snafu::ensure_whatever!(
+        (segmented.loss - full.loss).abs() <= 1e-6,
+        "segmented and full-graph losses diverge ({} vs {})",
+        segmented.loss,
+        full.loss
+    );
+    let segmented_init = compare_grads(&segmented.grads, &full.grads)?;
+    snafu::ensure_whatever!(
+        segmented_init.max_nmse <= GATE_GRAD_NMSE_BAR,
+        "the segmented chain misses the init gradient bar ({} vs {})",
+        segmented_init.max_nmse,
+        GATE_GRAD_NMSE_BAR
+    );
 
     let mut adapters = adapters;
     let warm_options = LoopOptions {
@@ -963,12 +1232,22 @@ pub fn run_train_gate() -> LibQuestResult<GateVerdict> {
     };
     train_loop::<ToyAd>(&model, &mut adapters, &chunks, &warm_options, &device, |_| Ok(()))?;
     let chain = chain_step::<ToyAd>(
-        &model, &adapters, &mask_inner, ids, targets, 8, &device,
+        &model, &adapters, &mask_inner, ids, targets, 8, None, &device,
     )?;
     let full = full_graph_step::<ToyAd>(
         &model, &adapters, &mask_inner, ids, targets, 8, &device,
     )?;
     let trained_grads = compare_grads(&chain.grads, &full.grads)?;
+    let segmented = chain_step::<ToyAd>(
+        &model, &adapters, &mask_inner, ids, targets, 8, Some(GATE_SEGMENT), &device,
+    )?;
+    let segmented_trained = compare_grads(&segmented.grads, &full.grads)?;
+    snafu::ensure_whatever!(
+        segmented_trained.max_nmse <= GATE_GRAD_NMSE_BAR,
+        "the segmented chain misses the trained gradient bar ({} vs {})",
+        segmented_trained.max_nmse,
+        GATE_GRAD_NMSE_BAR
+    );
 
     let mut adapters = ModelAdapters::<ToyAd>::init(&config, 4, 16.0, 42, &device)?;
     let descent_options = LoopOptions {
@@ -991,6 +1270,8 @@ pub fn run_train_gate() -> LibQuestResult<GateVerdict> {
         adapter_off_exact,
         init_grads,
         trained_grads,
+        segmented_init,
+        segmented_trained,
         first_loss: report.first_loss,
         final_loss: report.final_loss,
         descended: report.final_loss < report.first_loss - GATE_DESCENT_MARGIN,
@@ -1210,6 +1491,7 @@ pub fn sft_loop<AD: AutodiffBackend>(
                 &mask_inner,
                 &layer_inputs,
                 seed,
+                Some(RECURRENCE_SEGMENT),
                 device,
             )?;
             accumulate_grads(&mut accumulated, grads);
@@ -1350,6 +1632,7 @@ pub fn dpo_loop<AD: AutodiffBackend>(
             &mask_inner,
             &chosen_layers,
             chosen_seed,
+            Some(RECURRENCE_SEGMENT),
             device,
         )?;
         let rejected_grads = chain_from_seed::<AD>(
@@ -1358,6 +1641,7 @@ pub fn dpo_loop<AD: AutodiffBackend>(
             &mask_inner,
             &rejected_layers,
             rejected_seed,
+            Some(RECURRENCE_SEGMENT),
             device,
         )?;
         accumulate_grads(&mut accumulated, rejected_grads);
@@ -1488,6 +1772,7 @@ pub fn rlvr_loop<AD: AutodiffBackend>(
                 &mask_inner,
                 &layer_inputs,
                 seed,
+                Some(RECURRENCE_SEGMENT),
                 device,
             )?;
             accumulate_grads(&mut accumulated, grads);

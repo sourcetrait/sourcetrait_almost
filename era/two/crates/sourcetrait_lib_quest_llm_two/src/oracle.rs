@@ -236,8 +236,27 @@ impl<B: Backend> GdnBlock<B> {
         device: &B::Device,
         adapters: Option<&GdnAdapters<B>>,
     ) -> FloatTensor<B, 2> {
-        let n = x.dims()[0];
         let residual = x.clone();
+        let pre = self.gdn_pre(x, heads, key_dim, value_dim, eps, device, adapters);
+        let state = FloatTensor::<B, 3>::zeros([heads, key_dim, value_dim], device)
+            .cast(burn::tensor::FloatDType::F32);
+        let (y, _state) = gdn_recurrence(pre.q, pre.k, pre.v, pre.decay, pre.beta, state);
+        self.gdn_post(residual, y, pre.gate_rows, heads, value_dim, eps, adapters)
+    }
+
+    /// The mixer's pre-recurrence half: rule inputs and gate rows, in f32.
+    #[allow(clippy::too_many_arguments)]
+    pub fn gdn_pre(
+        &self,
+        x: FloatTensor<B, 2>,
+        heads: usize,
+        key_dim: usize,
+        value_dim: usize,
+        eps: f64,
+        device: &B::Device,
+        adapters: Option<&GdnAdapters<B>>,
+    ) -> GdnPre<B> {
+        let n = x.dims()[0];
         let normed = rms_norm(x, &self.input_norm, eps);
 
         let mut q_rows = normed.clone().matmul(self.q_transposed.clone());
@@ -282,38 +301,24 @@ impl<B: Backend> GdnBlock<B> {
         let q = l2_norm_last(q.reshape([n, heads, key_dim])).mul_scalar((key_dim as f64).powf(-0.5));
         let k = l2_norm_last(k.reshape([n, heads, key_dim]));
         let v = v.reshape([n, heads, value_dim]);
+        GdnPre { q, k, v, decay, beta, gate_rows }
+    }
 
-        let mut state =
-            FloatTensor::<B, 3>::zeros([heads, key_dim, value_dim], device).cast(compute);
-        let mut outputs: Vec<FloatTensor<B, 3>> = Vec::with_capacity(n);
-        for t in 0..n {
-            let q_t = q.clone().narrow(0, t, 1).reshape([heads, key_dim, 1]);
-            let k_t = k.clone().narrow(0, t, 1).reshape([heads, key_dim, 1]);
-            let v_t = v.clone().narrow(0, t, 1).reshape([heads, 1, value_dim]);
-            let decay_t = decay
-                .clone()
-                .narrow(0, t, 1)
-                .reshape([heads, 1, 1])
-                .exp()
-                .expand([heads, key_dim, value_dim]);
-            let beta_t = beta
-                .clone()
-                .narrow(0, t, 1)
-                .reshape([heads, 1, 1])
-                .expand([heads, 1, value_dim]);
-
-            state = state * decay_t;
-            let kv_mem = (state.clone() * k_t.clone().expand([heads, key_dim, value_dim]))
-                .sum_dim(1);
-            let delta = (v_t - kv_mem) * beta_t;
-            state = state
-                + k_t.clone().expand([heads, key_dim, value_dim])
-                    * delta.expand([heads, key_dim, value_dim]);
-            let y_t = (state.clone() * q_t.expand([heads, key_dim, value_dim])).sum_dim(1);
-            outputs.push(y_t);
-        }
-        let y = burn::tensor::Tensor::cat(outputs, 1).swap_dims(0, 1);
-
+    /// The mixer's post-recurrence half: gated norm, output mix, MLP.
+    #[allow(clippy::too_many_arguments)]
+    pub fn gdn_post(
+        &self,
+        x: FloatTensor<B, 2>,
+        y: FloatTensor<B, 3>,
+        gate_rows: FloatTensor<B, 2>,
+        heads: usize,
+        value_dim: usize,
+        eps: f64,
+        adapters: Option<&GdnAdapters<B>>,
+    ) -> FloatTensor<B, 2> {
+        let n = x.dims()[0];
+        let residual = x;
+        let compute = burn::tensor::FloatDType::F32;
         let o_norm_compute = self.o_norm.clone().cast(compute);
         let y = rms_norm_last(y, &o_norm_compute, O_NORM_EPS);
         let gate = burn::tensor::activation::silu(gate_rows).reshape([n, heads, value_dim]);
@@ -341,6 +346,59 @@ impl<B: Backend> GdnBlock<B> {
         }
         residual + feedforward
     }
+}
+
+/// The GDN mixer's pre-recurrence products: rule inputs plus gate rows.
+pub struct GdnPre<B: Backend> {
+    pub q: FloatTensor<B, 3>,
+    pub k: FloatTensor<B, 3>,
+    pub v: FloatTensor<B, 3>,
+    pub decay: FloatTensor<B, 2>,
+    pub beta: FloatTensor<B, 2>,
+    pub gate_rows: FloatTensor<B, 2>,
+}
+
+/// The sequential gated-delta recurrence over a span, from a carried state.
+pub fn gdn_recurrence<B: Backend>(
+    q: FloatTensor<B, 3>,
+    k: FloatTensor<B, 3>,
+    v: FloatTensor<B, 3>,
+    decay: FloatTensor<B, 2>,
+    beta: FloatTensor<B, 2>,
+    state: FloatTensor<B, 3>,
+) -> (FloatTensor<B, 3>, FloatTensor<B, 3>) {
+    let [n, heads, key_dim] = q.dims();
+    let value_dim = v.dims()[2];
+    let mut state = state;
+    let mut outputs: Vec<FloatTensor<B, 3>> = Vec::with_capacity(n);
+    for t in 0..n {
+        let q_t = q.clone().narrow(0, t, 1).reshape([heads, key_dim, 1]);
+        let k_t = k.clone().narrow(0, t, 1).reshape([heads, key_dim, 1]);
+        let v_t = v.clone().narrow(0, t, 1).reshape([heads, 1, value_dim]);
+        let decay_t = decay
+            .clone()
+            .narrow(0, t, 1)
+            .reshape([heads, 1, 1])
+            .exp()
+            .expand([heads, key_dim, value_dim]);
+        let beta_t = beta
+            .clone()
+            .narrow(0, t, 1)
+            .reshape([heads, 1, 1])
+            .expand([heads, 1, value_dim]);
+
+        state = state * decay_t;
+        let kv_mem = (state.clone() * k_t.clone().expand([heads, key_dim, value_dim]))
+            .sum_dim(1);
+        let delta = (v_t - kv_mem) * beta_t;
+        state = state
+            + k_t.clone().expand([heads, key_dim, value_dim])
+                * delta.expand([heads, key_dim, value_dim]);
+        let y_t = (state.clone() * q_t.expand([heads, key_dim, value_dim])).sum_dim(1);
+        outputs.push(y_t);
+    }
+    let y = burn::tensor::Tensor::cat(outputs, 1).swap_dims(0, 1);
+    (y, state)
 }
 
 impl<B: Backend> AttnBlock<B> {

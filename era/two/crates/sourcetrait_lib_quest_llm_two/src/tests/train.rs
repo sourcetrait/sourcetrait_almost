@@ -67,6 +67,7 @@ fn diag_toy_chain_grad_health_cuda_bf16() {
             &chunk[..seq_len],
             &chunk[1..],
             8,
+            Some(train::RECURRENCE_SEGMENT),
             &device,
         )
         .expect("chain step");
@@ -132,6 +133,7 @@ fn diag_real_chain_grad_health_cuda_bf16() {
             &first_chunk[..seq_len],
             &first_chunk[1..seq_len + 1],
             8,
+            Some(train::RECURRENCE_SEGMENT),
             &device,
         )
         .expect("chain step");
