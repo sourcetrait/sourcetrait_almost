@@ -14,7 +14,7 @@ keywords = ["sourcetrait", "quest", "harness"]
 # It is what decides whether two generated sets are comparable at all, so
 # it moves whenever the scheme changes rather than whenever the crate does.
 [package.metadata.training]
-version = "0.0.0-5"
+version = "0.0.0-6"
 
 [dependencies]
 liquid.workspace = true
