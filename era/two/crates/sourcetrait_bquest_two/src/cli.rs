@@ -268,6 +268,9 @@ pub(crate) struct TrainCptArgs {
     /// The adapter artifact path (.safetensors).
     #[arg(long)]
     pub(crate) out: PathBuf,
+    /// Amend a previous CPT adapter; without it, a fresh adapter.
+    #[arg(long)]
+    pub(crate) resume: Option<PathBuf>,
     /// LoRA rank; the production value is fixed library-wide.
     #[arg(long, default_value_t = 64)]
     pub(crate) rank: usize,

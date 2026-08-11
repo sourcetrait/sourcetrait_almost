@@ -219,13 +219,24 @@ pub(crate) fn train_cpt(cli: &Cli, args: &TrainCptArgs) -> BquestResult<()> {
             "bquest train cpt: model built in {:.1}s",
             load_start.elapsed().as_secs_f32()
         );
-        let mut adapters = ModelAdapters::<llm::TrainCudaAd>::init(
-            &hybrid_config,
-            args.rank,
-            alpha,
-            args.seed,
-            &device,
-        )?;
+        let mut adapters = match &args.resume {
+            Some(path) => {
+                eprintln!("bquest: resuming from adapter {}", path.display());
+                ModelAdapters::<llm::TrainCudaAd>::load(
+                    path,
+                    &hybrid_config,
+                    &model_id,
+                    &device,
+                )?
+            }
+            None => ModelAdapters::<llm::TrainCudaAd>::init(
+                &hybrid_config,
+                args.rank,
+                alpha,
+                args.seed,
+                &device,
+            )?,
+        };
         let options = LoopOptions {
             steps,
             learning_rate: args.learning_rate,

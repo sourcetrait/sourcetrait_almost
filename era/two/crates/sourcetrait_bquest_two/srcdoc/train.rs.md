@@ -46,7 +46,14 @@ flag would let a mismatched rank load as garbage.
 
 This verb carries its own argument struct rather than sharing `StageArgs`,
 which is why its learning-rate default is 2e-4 where every post-training stage
-defaults to 1e-5. It also offers no `--resume`, being first in the chain.
+defaults to 1e-5.
+
+`--resume` exists for the round-amend shape: new corpus content added to a
+settled CPT adapter without re-burning the whole mix. On resume the rank,
+alpha and seed flags are ignored (the artifact's geometry governs, as in
+`stage_adapters`). The rate discipline is the caller's: a resumed settled
+adapter takes a settle-class rate, never the 2e-4 peak - fresh AdamW moments
+make early updates near rate-sized regardless of gradient.
 
 ## fn train_sft
 
