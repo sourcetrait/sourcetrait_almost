@@ -33,8 +33,8 @@ fn render_node(command: &clap::Command, depth: usize, out: &mut String) {
     }
 }
 
-/// `bquest doc cli`: the whole tree on stdout.
-pub(crate) fn doc_cli() -> BquestResult<()> {
+/// `biquest doc cli`: the whole tree on stdout.
+pub(crate) fn doc_cli() -> BiquestResult<()> {
     let command = <Cli as clap::CommandFactory>::command();
     print!("{}", render_cli_tree(&command));
     Ok(())

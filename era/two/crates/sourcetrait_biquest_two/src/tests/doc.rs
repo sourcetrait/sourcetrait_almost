@@ -10,9 +10,9 @@ fn cli_tree_lists_categories_and_actions_with_summaries() {
     let tree = render_cli_tree(&command);
     let lines: Vec<&str> = tree.lines().collect();
     for expected in [
-        "capability # ",
         "doc # ",
-        "speculate # ",
+        "tokenize # ",
+        "tokenizer # ",
     ] {
         assert!(
             lines.iter().any(|line| line.starts_with(expected)),
@@ -20,14 +20,12 @@ fn cli_tree_lists_categories_and_actions_with_summaries() {
         );
     }
     for expected in [
-        " run # ",
-        " convert # ",
-        " score # ",
-        " bridge # ",
         " cli # ",
-        " record # ",
-        " simulate # ",
-        " tokens # ",
+        " ucd # ",
+        " dictionary # ",
+        " census # ",
+        " admit # ",
+        " ledger # ",
     ] {
         assert!(
             lines.iter().any(|line| line.starts_with(expected)),

@@ -1,0 +1,11 @@
+The english.txt word list is derived from the English Wiktionary
+via the wiktextract dumps published at https://kaikki.org/.
+
+Wiktionary content is dual-licensed under the Creative Commons
+Attribution-ShareAlike License (CC BY-SA) and the GNU Free
+Documentation License (GFDL). This derived word list is
+redistributed under CC BY-SA 4.0:
+https://creativecommons.org/licenses/by-sa/4.0/
+
+Extraction: Tatu Ylonen, Wiktextract: Wiktionary as
+Machine-Readable Structured Data, LREC 2022.
