@@ -168,12 +168,56 @@ impl<'a> Segmenter<'a> {
     }
 }
 
+/// One stretch of the test string: a keyword-page marker or content.
+enum TestPart<'a> {
+    /// A `<|XX|>` spelling: the keyword id and the spelling itself.
+    Marker(u8, &'a str),
+    Text(&'a str),
+}
+
+/// Split a test string at keyword-page spellings (`<|00|>`-`<|FF|>`).
+///
+/// Test-surface rendering only: corpus ingestion never reads a marker
+/// out of content - markers enter through deliberate rendering, and
+/// this is that path for the CLI.
+fn split_markers(text: &str) -> Vec<TestPart<'_>> {
+    let bytes = text.as_bytes();
+    let mut parts = Vec::new();
+    let mut rest_start = 0usize;
+    let mut i = 0usize;
+    while i + 6 <= bytes.len() {
+        let is_marker = bytes[i] == b'<'
+            && bytes[i + 1] == b'|'
+            && bytes[i + 2].is_ascii_hexdigit()
+            && bytes[i + 3].is_ascii_hexdigit()
+            && bytes[i + 4] == b'|'
+            && bytes[i + 5] == b'>';
+        if is_marker {
+            if rest_start < i {
+                parts.push(TestPart::Text(&text[rest_start..i]));
+            }
+            let hex = &text[i + 2..i + 4];
+            let id = u8::from_str_radix(hex, 16).expect("two hex digits");
+            parts.push(TestPart::Marker(id, &text[i..i + 6]));
+            i += 6;
+            rest_start = i;
+        } else {
+            i += 1;
+        }
+    }
+    if rest_start < text.len() {
+        parts.push(TestPart::Text(&text[rest_start..]));
+    }
+    parts
+}
+
 /// `biquest tokenize`: a string's tokens as a nu table on stdout.
 ///
 /// Columns: token (the id), unicode (`U+XXXX` for a character-layer
-/// token, null for a dictionary word), value (the token's text).
-/// Without --admitted the embedded full English set is the dictionary;
-/// its ids are the test surface's, not a trained vocabulary's.
+/// token, null for a keyword or dictionary word), value (the token's
+/// text). `<|XX|>` spellings render as keyword-page tokens. Without
+/// --admitted the embedded full English set is the dictionary; its
+/// ids are the test surface's, not a trained vocabulary's.
 pub(crate) fn tokenize_text(args: &TokenizeArgs) -> BiquestResult<()> {
     let table = CharacterTable::embedded()?;
     let admitted = match &args.admitted {
@@ -182,22 +226,38 @@ pub(crate) fn tokenize_text(args: &TokenizeArgs) -> BiquestResult<()> {
     };
     let segmenter = Segmenter::new(&table, &admitted);
     let mut rows: Vec<harness::nu::Value> = Vec::new();
-    for (token, text) in segmenter.segment_pieces(&args.text)? {
-        let unicode = match token.layer {
-            Layer::Character => {
-                let c = text.chars().next().unwrap_or('\u{FFFD}');
-                v_str(&format!("U+{:04X}", c as u32))
+    for part in split_markers(&args.text) {
+        match part {
+            TestPart::Marker(id, spelling) => {
+                rows.push(harness::nu::Value::record(
+                    harness::nu::record! {
+                        "token" => v_int(id as i64),
+                        "unicode" => harness::nu::Value::nothing(span()),
+                        "value" => v_str(spelling),
+                    },
+                    span(),
+                ));
             }
-            Layer::Dictionary => harness::nu::Value::nothing(span()),
-        };
-        rows.push(harness::nu::Value::record(
-            harness::nu::record! {
-                "token" => v_int(token.id as i64),
-                "unicode" => unicode,
-                "value" => v_str(&text),
-            },
-            span(),
-        ));
+            TestPart::Text(text) => {
+                for (token, text) in segmenter.segment_pieces(text)? {
+                    let unicode = match token.layer {
+                        Layer::Character => {
+                            let c = text.chars().next().unwrap_or('\u{FFFD}');
+                            v_str(&format!("U+{:04X}", c as u32))
+                        }
+                        Layer::Dictionary => harness::nu::Value::nothing(span()),
+                    };
+                    rows.push(harness::nu::Value::record(
+                        harness::nu::record! {
+                            "token" => v_int(token.id as i64),
+                            "unicode" => unicode,
+                            "value" => v_str(&text),
+                        },
+                        span(),
+                    ));
+                }
+            }
+        }
     }
     let rendered = harness::nu::to_nuon_pretty(&harness::nu::Value::list(rows, span()))?;
     println!("{rendered}");

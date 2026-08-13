@@ -45,9 +45,17 @@ surface-case round-trip (marker token, renderer rule, or lossy) is an
 open decision; token counts, and therefore the compression ledger, are
 unaffected by whichever lands.
 
-## fn tokenize_text
+## fn tokenize_text / fn split_markers
 
 TheUser's test surface: `biquest tokenize "string"` prints the token
 table as NUON text (not a plugin, so text is the interface). The
 unicode column is `U+XXXX` for a character-layer token and null for a
-dictionary word (his ruling); value is the token's text.
+keyword or dictionary word (his ruling); value is the token's text.
+
+`<|XX|>` spellings render as keyword-page tokens (his ruling: token 0,
+unicode null for `<|00|>`). That recognition lives in this verb alone,
+never in the segmenter: content tokenization stays collision-free by
+construction, and the test surface IS the deliberate-rendering path
+markers are allowed to enter through. The scan is byte-wise and
+boundary-safe because every matched byte is ASCII; a malformed
+spelling (`<|0|>`, `<|GG|>`) falls through to ordinary content.
