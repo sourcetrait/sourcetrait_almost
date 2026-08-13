@@ -25,10 +25,10 @@ admission produces from it is the real, NUON artifact.
 ## const ENGLISH_WORDS / fn embedded_words
 
 The extracted set is also vendored at `data/words/english.txt`
-(10.7 MB, CC BY-SA with the notice beside it) and embedded, as the
-bare `tokenize` command's default dictionary - TheUser's ruling that
-the test surface must show text as it WOULD tokenize with a
-dictionary. Its ids (alphabetical order above the character layer)
+(10.7 MB, CC BY-SA; attribution at the repository's
+docs/licenses/wiktionary/) and embedded, as the bare `tokenize`
+command's default dictionary - TheUser's ruling that the test surface
+must show text as it WOULD tokenize with a dictionary. Its ids (alphabetical order above the character layer)
 are the test surface's own; a trained vocabulary's ids come from an
 --admitted artifact instead. Re-vendor by rerunning `tokenizer
 dictionary` over a fresh dump.

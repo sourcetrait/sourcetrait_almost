@@ -8,11 +8,12 @@ version bump appends new rows after the 17 set rather than repacking,
 so the dense index stays a stable address.
 
 The UCD is vendored at `data/ucd/` (UnicodeData, PropList,
-CaseFolding, Scripts, plus the Unicode license) and embedded via
-include_str, TheUser's call: the table is a design constant, so the
-binary carries it and no verb takes a data path. The ~2.6 MB of text
-parses in ~20 ms at startup. A Unicode version bump re-vendors those
-four files; that is the whole migration.
+CaseFolding, Scripts) and embedded via include_str, TheUser's call:
+the table is a design constant, so the binary carries it and no verb
+takes a data path. The Unicode license sits at the repository's
+docs/licenses/unicode/. The ~2.6 MB of text parses in ~20 ms at
+startup. A Unicode version bump re-vendors those four files; that is
+the whole migration.
 
 ## enum CharClass
 

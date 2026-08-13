@@ -8,8 +8,8 @@ use crate::lexer::boundary_pieces;
 use crate::ucd::CharacterTable;
 
 /// The vendored English word set (folded, single-piece, sorted),
-/// extracted from the wiktextract dump; `data/words/WIKTIONARY-NOTICE.txt`
-/// carries the CC BY-SA attribution. Re-vendor via `tokenizer dictionary`.
+/// extracted from the wiktextract dump; the CC BY-SA attribution is
+/// at docs/licenses/wiktionary/. Re-vendor via `tokenizer dictionary`.
 const ENGLISH_WORDS: &str = include_str!("../data/words/english.txt");
 
 /// The embedded English word list, file order (alphabetical).
