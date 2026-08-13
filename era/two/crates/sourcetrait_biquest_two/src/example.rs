@@ -1,0 +1,458 @@
+//! Instruction-shaped examples: their shapes, ingest and packing.
+#![allow(dead_code)]
+use crate::*;
+
+/// A supervised example: one conversation, assistant turns supervised.
+pub(crate) const SFT_TYPEDEF: &str =
+    "table<messages: table<role: string, content: string>>";
+
+/// A preference pair: one prompt, two replies, the first preferred.
+pub(crate) const DPO_TYPEDEF: &str = "table<prompt: table<role: string, content: string>, \
+     chosen: string, rejected: string>";
+
+/// A verifiable prompt: what to ask, its verifier, its reference.
+pub(crate) const RLVR_TYPEDEF: &str = "table<prompt: table<role: string, content: string>, \
+     verifier: string, reference: string>";
+
+/// The pack artifact's tensors.
+pub(crate) const TENSOR_IDS: &str = "chunks";
+pub(crate) const TENSOR_LOSS_MASK: &str = "loss_mask";
+
+/// One preference pair, messages already parsed.
+pub(crate) struct DpoExample {
+    pub(crate) prompt: Vec<llm::ChatMessage>,
+    pub(crate) chosen: String,
+    pub(crate) rejected: String,
+}
+
+/// One verifiable prompt, messages already parsed.
+pub(crate) struct RlvrExample {
+    pub(crate) prompt: Vec<llm::ChatMessage>,
+    pub(crate) verifier: String,
+    pub(crate) reference: String,
+}
+
+/// One packed row: the window's ids and its per-position loss mask.
+pub(crate) struct PackedRow {
+    pub(crate) ids: Vec<u32>,
+    pub(crate) mask: Vec<u8>,
+}
+
+/// Read a message table into chat messages, aliases translated to wire.
+fn read_messages(rows: &[&harness::nu::Record]) -> BquestResult<Vec<llm::ChatMessage>> {
+    let mut messages = Vec::with_capacity(rows.len());
+    for row in rows {
+        let role = llm::ChatRole::parse(&field_str(row, "role")?)?;
+        let content = harness::channel::authoring_to_wire(&field_str(row, "content")?);
+        messages.push(llm::ChatMessage::new(role, &content));
+    }
+    Ok(messages)
+}
+
+fn load_table(path: &Path, typedef: &str) -> BquestResult<Vec<harness::nu::Value>> {
+    let value = harness::nu::load_value(path)?;
+    harness::nu::conform(&value, &harness::nu::parse_typedef(typedef)?)?;
+    let rows = match value.as_list() {
+        Ok(rows) => rows.to_vec(),
+        Err(e) => snafu::whatever!("{}: not a table: {e}", path.display()),
+    };
+    snafu::ensure_whatever!(!rows.is_empty(), "{}: no examples", path.display());
+    Ok(rows)
+}
+
+fn as_record(value: &harness::nu::Value) -> BquestResult<&harness::nu::Record> {
+    match value.as_record() {
+        Ok(record) => Ok(record),
+        Err(e) => snafu::whatever!("example row: {e}"),
+    }
+}
+
+/// Load supervised examples: one message list per row.
+pub(crate) fn load_sft(path: &Path) -> BquestResult<Vec<Vec<llm::ChatMessage>>> {
+    let mut examples = Vec::new();
+    for row in load_table(path, SFT_TYPEDEF)? {
+        let record = as_record(&row)?;
+        let messages = read_messages(&field_rows(record, "messages")?)?;
+        snafu::ensure_whatever!(
+            messages.iter().any(|m| m.role == Some(llm::ChatRole::Assistant)),
+            "a supervised example carries no assistant turn, so it would train nothing"
+        );
+        examples.push(messages);
+    }
+    Ok(examples)
+}
+
+/// Load preference pairs.
+pub(crate) fn load_dpo(path: &Path) -> BquestResult<Vec<DpoExample>> {
+    let mut examples = Vec::new();
+    for row in load_table(path, DPO_TYPEDEF)? {
+        let record = as_record(&row)?;
+        examples.push(DpoExample {
+            prompt: read_messages(&field_rows(record, "prompt")?)?,
+            chosen: field_str(record, "chosen")?,
+            rejected: field_str(record, "rejected")?,
+        });
+    }
+    Ok(examples)
+}
+
+/// Load verifiable prompts.
+pub(crate) fn load_rlvr(path: &Path) -> BquestResult<Vec<RlvrExample>> {
+    let mut examples = Vec::new();
+    for row in load_table(path, RLVR_TYPEDEF)? {
+        let record = as_record(&row)?;
+        let example = RlvrExample {
+            prompt: read_messages(&field_rows(record, "prompt")?)?,
+            verifier: field_str(record, "verifier")?,
+            reference: field_str(record, "reference")?,
+        };
+        verifier_known(&example.verifier)?;
+        examples.push(example);
+    }
+    Ok(examples)
+}
+
+/// A conversation under the quest posture: the Quest Toolkit system
+/// turn prepended wherever an example carries no system role.
+fn with_quest_system(messages: &[llm::ChatMessage]) -> Vec<llm::ChatMessage> {
+    if messages
+        .iter()
+        .any(|message| message.role == Some(llm::ChatRole::System))
+    {
+        return messages.to_vec();
+    }
+    let mut postured = Vec::with_capacity(messages.len() + 1);
+    postured.push(llm::ChatMessage::system(llm::QUEST_SYSTEM));
+    postured.extend_from_slice(messages);
+    postured
+}
+
+/// Render and encode a conversation, masked to its assistant spans.
+pub(crate) fn encode_supervised(
+    tokenizer: &tokenizers::Tokenizer,
+    messages: &[llm::ChatMessage],
+) -> BquestResult<(Vec<u32>, Vec<u8>)> {
+    let render = llm::chat_render(&with_quest_system(messages), false);
+    let encoded = llm::encode_render(tokenizer, &render)?;
+    let mut mask = vec![0u8; encoded.ids.len()];
+    for span in &encoded.assistant_spans {
+        for slot in mask[span.start..span.end].iter_mut() {
+            *slot = 1;
+        }
+    }
+    Ok((encoded.ids, mask))
+}
+
+/// Render a prompt with the assistant opener appended.
+pub(crate) fn encode_prompt(
+    tokenizer: &tokenizers::Tokenizer,
+    prompt: &[llm::ChatMessage],
+) -> BquestResult<Vec<u32>> {
+    let render = llm::chat_render(&with_quest_system(prompt), true);
+    Ok(llm::encode_render(tokenizer, &render)?.ids)
+}
+
+/// Pad one encoded example to `width`, or None if it is too long.
+pub(crate) fn pack_row(
+    ids: Vec<u32>,
+    mask: Vec<u8>,
+    width: usize,
+    pad_id: u32,
+) -> Option<PackedRow> {
+    if ids.len() > width || ids.is_empty() {
+        return None;
+    }
+    let mut ids = ids;
+    let mut mask = mask;
+    ids.resize(width, pad_id);
+    mask.resize(width, 0);
+    Some(PackedRow { ids, mask })
+}
+
+/// Write a packed set as the two-tensor artifact plus its provenance.
+pub(crate) fn write_pack(
+    out: &Path,
+    rows: &[PackedRow],
+    width: usize,
+    provenance: harness::nu::Record,
+) -> BquestResult<()> {
+    snafu::ensure_whatever!(!rows.is_empty(), "no rows survived packing");
+    let mut id_bytes: Vec<u8> = Vec::with_capacity(rows.len() * width * 4);
+    let mut mask_bytes: Vec<u8> = Vec::with_capacity(rows.len() * width);
+    for row in rows {
+        snafu::ensure_whatever!(
+            row.ids.len() == width && row.mask.len() == width,
+            "packed row width mismatch"
+        );
+        for id in &row.ids {
+            id_bytes.extend_from_slice(&id.to_le_bytes());
+        }
+        mask_bytes.extend_from_slice(&row.mask);
+    }
+    let id_view = match safetensors::tensor::TensorView::new(
+        safetensors::Dtype::U32,
+        vec![rows.len(), width],
+        &id_bytes,
+    ) {
+        Ok(view) => view,
+        Err(e) => snafu::whatever!("ids view failed: {e}"),
+    };
+    let mask_view = match safetensors::tensor::TensorView::new(
+        safetensors::Dtype::U8,
+        vec![rows.len(), width],
+        &mask_bytes,
+    ) {
+        Ok(view) => view,
+        Err(e) => snafu::whatever!("mask view failed: {e}"),
+    };
+    if let Some(parent) = out.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    match safetensors::serialize_to_file(
+        vec![
+            (String::from(TENSOR_IDS), id_view),
+            (String::from(TENSOR_LOSS_MASK), mask_view),
+        ],
+        None,
+        out,
+    ) {
+        Ok(()) => {}
+        Err(e) => snafu::whatever!("pack write failed: {e}"),
+    }
+    harness::nu::save_value(
+        &out.with_extension("nuon"),
+        &harness::nu::Value::record(provenance, span()),
+    )?;
+    Ok(())
+}
+
+/// A loaded pack: the id rows and an optional per-position loss mask.
+pub(crate) struct ChunkPack {
+    pub(crate) rows: Vec<Vec<u32>>,
+    pub(crate) masks: Option<Vec<Vec<u8>>>,
+}
+
+/// Read a packed artifact: u32 ids and an optional u8 loss mask.
+pub(crate) fn load_chunks(path: &Path) -> BquestResult<ChunkPack> {
+    let bytes = fs::read(path)?;
+    let parsed = match safetensors::SafeTensors::deserialize(&bytes) {
+        Ok(parsed) => parsed,
+        Err(error) => snafu::whatever!("chunks parse failed: {error}"),
+    };
+    for name in parsed.names() {
+        snafu::ensure_whatever!(
+            name == TENSOR_IDS || name == TENSOR_LOSS_MASK,
+            "pack carries unrecognised tensor {name:?} \
+             (expected {TENSOR_IDS:?} and optionally {TENSOR_LOSS_MASK:?})"
+        );
+    }
+    let Ok(view) = parsed.tensor(TENSOR_IDS) else {
+        snafu::whatever!("the artifact carries no {TENSOR_IDS:?} tensor");
+    };
+    snafu::ensure_whatever!(
+        view.dtype() == safetensors::Dtype::U32,
+        "ids: expected u32, got {:?}",
+        view.dtype()
+    );
+    let shape = view.shape();
+    snafu::ensure_whatever!(shape.len() == 2, "ids: expected rank 2, got {shape:?}");
+    let (row_count, width) = (shape[0], shape[1]);
+    let values: Vec<u32> = view
+        .data()
+        .chunks_exact(4)
+        .map(|quad| u32::from_le_bytes([quad[0], quad[1], quad[2], quad[3]]))
+        .collect();
+    let rows: Vec<Vec<u32>> = (0..row_count)
+        .map(|row| values[row * width..(row + 1) * width].to_vec())
+        .collect();
+
+    let masks = match parsed.tensor(TENSOR_LOSS_MASK) {
+        Ok(mask_view) => {
+            snafu::ensure_whatever!(
+                mask_view.dtype() == safetensors::Dtype::U8,
+                "loss mask: expected u8, got {:?}",
+                mask_view.dtype()
+            );
+            snafu::ensure_whatever!(
+                mask_view.shape() == [row_count, width],
+                "loss mask shape {:?} does not match the ids [{row_count}, {width}]",
+                mask_view.shape()
+            );
+            let flat = mask_view.data().to_vec();
+            Some(
+                (0..row_count)
+                    .map(|row| flat[row * width..(row + 1) * width].to_vec())
+                    .collect(),
+            )
+        }
+        Err(_) => None,
+    };
+    Ok(ChunkPack { rows, masks })
+}
+
+/// `bquest mix tokens`: a pack's rows as one decoded token per line.
+pub(crate) fn mix_tokens(cli: &Cli, args: &MixTokensArgs) -> BquestResult<()> {
+    let started = std::time::Instant::now();
+    let config = llm::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
+    let tokenizer = llm::load_tokenizer(&config.model_dir())?;
+    llm::verify_token_map(&tokenizer)?;
+    let pack = load_chunks(&args.chunks)?;
+
+    let mut values: Vec<harness::nu::Value> = Vec::new();
+    for (row_index, ids) in pack.rows.iter().enumerate() {
+        // The trailing pad run is padding, never content; trim it.
+        let mut effective = ids.len();
+        while effective > 0 && ids[effective - 1] == llm::consts::TOKEN_PAD {
+            effective -= 1;
+        }
+        for (position, id) in ids[..effective].iter().enumerate() {
+            let piece = match tokenizer.decode(&[*id], false) {
+                Ok(piece) => piece,
+                Err(e) => snafu::whatever!("decode failed at {row_index}:{position}: {e}"),
+            };
+            // Line breaks become their visible spellings in the value,
+            // keeping every line single-line for the NUON-lines writer.
+            let piece = piece.replace('\r', "\\r").replace('\n', "\\n");
+            let supervised = pack
+                .masks
+                .as_ref()
+                .map_or(0i64, |masks| masks[row_index][position] as i64);
+            values.push(harness::nu::Value::record(
+                harness::nu::record! {
+                    "row" => v_int(row_index as i64),
+                    "position" => v_int(position as i64),
+                    "id" => v_int(*id as i64),
+                    "piece" => v_str(&piece),
+                    "supervised" => v_int(supervised),
+                },
+                span(),
+            ));
+        }
+    }
+    harness::nu::save_lines(&args.out, &values)?;
+
+    let summary = harness::nu::Value::record(
+        harness::nu::record! {
+            "rows" => v_int(pack.rows.len() as i64),
+            "tokens" => v_int(values.len() as i64),
+            "masked" => v_bool(pack.masks.is_some()),
+            "out" => v_str(&args.out.display().to_string()),
+            "seconds" => v_float(started.elapsed().as_secs_f64()),
+        },
+        span(),
+    );
+    println!("{}", harness::nu::to_nuon_text(&summary)?);
+    Ok(())
+}
+
+/// `bquest mix instruct`: supervised examples, one whole per row.
+pub(crate) fn mix_instruct(cli: &Cli, args: &MixInstructArgs) -> BquestResult<()> {
+    let started = std::time::Instant::now();
+    let config = llm::LibConfig::load_from_dir(cli.dir.as_ref(), cli.config.as_deref())?;
+    let tokenizer = llm::load_tokenizer(&config.model_dir())?;
+    llm::verify_token_map(&tokenizer)?;
+    let examples = load_sft(&args.examples)?;
+    let width = args.seq_len + 1;
+
+    let mut rows = Vec::with_capacity(examples.len());
+    let mut dropped = 0usize;
+    let mut supervised_total = 0usize;
+    for messages in &examples {
+        let (ids, mask) = encode_supervised(&tokenizer, messages)?;
+        let supervised: usize = mask.iter().filter(|slot| **slot != 0).count();
+        snafu::ensure_whatever!(
+            supervised > 0,
+            "an example rendered with no supervised position - its assistant \
+             turn produced no tokens"
+        );
+        match pack_row(ids, mask, width, llm::consts::TOKEN_PAD) {
+            Some(row) => {
+                supervised_total += supervised;
+                rows.push(row);
+            }
+            None => dropped += 1,
+        }
+    }
+    if dropped > 0 {
+        eprintln!(
+            "mix instruct: {dropped} of {} examples exceed the {width}-token \
+             window and were DROPPED (never truncated)",
+            examples.len()
+        );
+    }
+
+    let provenance = harness::nu::record! {
+        "examples" => v_str(&args.examples.display().to_string()),
+        "examples_available" => v_int(examples.len() as i64),
+        "rows" => v_int(rows.len() as i64),
+        "dropped_too_long" => v_int(dropped as i64),
+        "seq_len" => v_int(args.seq_len as i64),
+        "supervised_tokens" => v_int(supervised_total as i64),
+        "bquest_version" => v_str(env!("CARGO_PKG_VERSION")),
+    };
+    write_pack(&args.out, &rows, width, provenance)?;
+
+    let summary = harness::nu::Value::record(
+        harness::nu::record! {
+            "rows" => v_int(rows.len() as i64),
+            "dropped_too_long" => v_int(dropped as i64),
+            "supervised_tokens" => v_int(supervised_total as i64),
+            "out" => v_str(&args.out.display().to_string()),
+            "seconds" => v_float(started.elapsed().as_secs_f64()),
+        },
+        span(),
+    );
+    println!("{}", harness::nu::to_nuon_text(&summary)?);
+    Ok(())
+}
+
+/// The verifier names a prompt may select; every one is mechanical.
+pub(crate) const VERIFIER_NUON: &str = "nuon_equals";
+pub(crate) const VERIFIER_EXACT: &str = "exact";
+pub(crate) const VERIFIER_NU_VALUE: &str = "nu_value_equals";
+
+const KNOWN_VERIFIERS: [&str; 3] = [VERIFIER_NUON, VERIFIER_EXACT, VERIFIER_NU_VALUE];
+
+fn verifier_known(name: &str) -> BquestResult<()> {
+    snafu::ensure_whatever!(
+        KNOWN_VERIFIERS.contains(&name),
+        "unknown verifier {name:?} (known: {})",
+        KNOWN_VERIFIERS.join(", ")
+    );
+    Ok(())
+}
+
+/// Whether a verifier has to execute the answer, needing the sandbox.
+pub(crate) fn verifier_executes(name: &str) -> bool {
+    name == VERIFIER_NU_VALUE
+}
+
+/// Grade one response against its reference: 1.0 pass, 0.0 fail.
+pub(crate) fn verify(verifier: &str, response: &str, reference: &str) -> BquestResult<f32> {
+    verifier_known(verifier)?;
+    Ok(match verifier {
+        VERIFIER_NUON => {
+            let expected = harness::nu::from_nuon_text(reference)?;
+            match harness::nu::from_nuon_text(response.trim()) {
+                Ok(actual) if actual == expected => 1.0,
+                _ => 0.0,
+            }
+        }
+        VERIFIER_NU_VALUE => {
+            let expected = harness::nu::from_nuon_text(reference)?;
+            match nu_sandbox::pipeline_value(response.trim())? {
+                Some(actual) if actual == expected => 1.0,
+                _ => 0.0,
+            }
+        }
+        _ => {
+            if response.trim() == reference.trim() {
+                1.0
+            } else {
+                0.0
+            }
+        }
+    })
+}

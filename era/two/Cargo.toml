@@ -5,6 +5,7 @@ members = [
   "crates/sourcetrait_lib_quest_harness_two",
   "crates/sourcetrait_quest_bridge_two",
   "crates/sourcetrait_bquest_two",
+  "crates/sourcetrait_biquest_two",
   "crates/sourcetrait_refquest_two",
 ]
 

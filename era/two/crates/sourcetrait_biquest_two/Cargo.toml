@@ -1,0 +1,43 @@
+[package]
+name = "sourcetrait_biquest_two"
+version = "0.0.0-1"
+edition = "2024"
+description = "biquest: the QuestImaginary foundation and training tool"
+authors = ["SourceTrait <development@sourcetrait.com>"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/sourcetrait/sourcetrait_quest"
+homepage = "https://sourcetrait.com"
+categories = []
+keywords = ["sourcetrait", "quest", "biquest"]
+
+[[bin]]
+name = "biquest"
+path = "src/main.rs"
+
+[features]
+# The burn oracle's fast grade (comparison-grade bf16; autotune per
+# the era-one oracle posture - training builds gate it off).
+burn-cuda = ["sourcetrait_lib_quest_llm_two/burn-cuda"]
+cuda = ["sourcetrait_lib_quest_llm_two/cuda"]
+flash-attn = ["cuda", "sourcetrait_lib_quest_llm_two/flash-attn"]
+# The trainer stages (burn autodiff over the oracle stack in the llm lib).
+train = ["sourcetrait_lib_quest_llm_two/train"]
+# Training on cuda WITHOUT autotune - the era-one lesson lives with the
+# feature in the llm lib.
+train-cuda = ["train", "sourcetrait_lib_quest_llm_two/train-cuda"]
+
+[dependencies]
+candle-core.workspace = true
+clap.workspace = true
+regex.workspace = true
+safetensors.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+snafu.workspace = true
+sourcetrait_lib_quest_harness_two.workspace = true
+sourcetrait_lib_quest_llm_two = { workspace = true, features = ["oracle"] }
+tokenizers.workspace = true
+unicode-normalization.workspace = true
+unicode-properties.workspace = true
+zstd.workspace = true
