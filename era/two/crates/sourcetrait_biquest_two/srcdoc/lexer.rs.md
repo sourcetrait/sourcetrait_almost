@@ -2,20 +2,51 @@
 
 The Quill content lexer. Lexer-style, never BPE: nothing merges across
 a class edge, every piece is explicit, and the two-level rule is
-absolute - dictionary hit or character split, nothing between. The
-morphology middle a BPE would learn is deliberately absent; the
-expansion loop (a frequent unknown earns a row) replaces it.
+absolute for words - dictionary hit or character split, nothing
+between. The morphology middle a BPE would learn is deliberately
+absent; the expansion loop (a frequent unknown earns a row) replaces
+it.
 
-## const KEYWORD_PAGE_SIZE / CHARACTER_OFFSET
+## const KEYWORD_PAGE_SIZE / CHARACTER_OFFSET / KEYWORD_REPEAT
 
 The id layout, each offset a constant forever: ids 0x00-0xFF are the
 keyword page (reserved whole regardless of how many keywords are
 bound - the page belongs to Quill, not the lexer), the character layer
-starts at 256 indexed by the table's dense order, and the dictionary
-layer starts at 256 + assigned_count in admitted-wordlist order. The
-lexer never emits a keyword id: content tokenization cannot spell
-structure, which is what makes the wire collision-free by
-construction.
+starts at 256 indexed by the table's dense order, the bucket layer
+directly above it, and the dictionary layer above the buckets in
+admitted-wordlist order.
+
+The page allocates from both ends, TheUser's ruling: user bindings
+grow from 0x00 up (the Syntax.nuon draft), hardcoded
+tokenizer-operator aliases grow from 0xFF down. REPEAT sits at 0xFF
+with the authoring alias `<|repeat|>`; it is hardcoded because the
+codec itself interprets it before any binding table exists. This
+supersedes the concept archive's 0xFF-as-generic-closer note, and the
+corruption property survives: a ones-filled buffer decodes as REPEAT
+with no operand, faulting as loudly as NULL-fill.
+
+Content bytes still cannot forge structure: no character sequence
+maps to a keyword id through the character, bucket, or dictionary
+tables - the literal text `<|FF|>` lexes as six characters. The
+encoder's own collapse pass is the one deliberate emitter of a
+keyword inside content, which is the rendering path markers are
+allowed to enter through.
+
+## fn Segmenter::collapse_runs
+
+Token-level run-length encoding, TheUser's design replacing depth
+enumerations: a run of three or more identical non-word tokens
+becomes unit, REPEAT, one count digit (his example: twelve spaces =
+`|    ||REPEAT||3|`). Ties prefer REPEAT (ruled); a run of two stays
+plain because the group costs three. Groups carry at most nine and
+chain greedily, a leftover of one or two staying plain. The count is
+EXACTLY one digit token - that bound is what keeps the wire
+unambiguous when literal digits follow a run (sixteen spaces then
+"2024": the decoder takes one count digit and the year survives as
+content). The count digit is the ordinary character row for 2-9,
+spending no vocabulary. Newline runs, tab runs, and any other
+identical-token run collapse through the same pass with no dedicated
+entries anywhere.
 
 ## fn boundary_pieces
 

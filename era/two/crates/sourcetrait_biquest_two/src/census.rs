@@ -1,6 +1,7 @@
 //! The corpus type census, and the frequency-through-membership gate.
 use crate::*;
 
+use crate::bucket::BucketTable;
 use crate::dictionary::read_words;
 use crate::lexer::PieceKind;
 use crate::lexer::boundary_pieces;
@@ -44,6 +45,7 @@ pub(crate) struct CensusTally {
     pub(crate) text_bytes: usize,
     pub(crate) word_pieces: usize,
     pub(crate) unicode_chars: usize,
+    pub(crate) bucket_tokens: usize,
     /// Files the lexer refused, skipped whole and reported.
     pub(crate) refused: Vec<(PathBuf, String)>,
 }
@@ -53,6 +55,7 @@ pub(crate) struct CensusTally {
 /// file the trainer would refuse.
 pub(crate) fn census_counts(
     table: &CharacterTable,
+    buckets: &BucketTable,
     files: &[PathBuf],
 ) -> BiquestResult<(HashMap<String, u64>, CensusTally)> {
     let mut counts: HashMap<String, u64> = HashMap::new();
@@ -62,7 +65,7 @@ pub(crate) fn census_counts(
             Ok(text) => text,
             Err(e) => snafu::whatever!("read {} failed (corpus is utf-8): {e}", path.display()),
         };
-        let pieces = match boundary_pieces(table, &text) {
+        let pieces = match boundary_pieces(table, buckets, &text) {
             Ok(pieces) => pieces,
             Err(e) => {
                 tally.refused.push((path.clone(), e.to_string()));
@@ -86,6 +89,7 @@ pub(crate) fn census_counts(
                     *counts.entry(folded).or_insert(0) += 1;
                 }
                 PieceKind::Unicode => tally.unicode_chars += 1,
+                PieceKind::Bucket(_) => tally.bucket_tokens += 1,
             }
         }
     }
@@ -122,8 +126,9 @@ fn ordered(counts: &HashMap<String, u64>) -> Vec<(&String, u64)> {
 pub(crate) fn tokenizer_census(args: &TokenizerCensusArgs) -> BiquestResult<()> {
     let started = std::time::Instant::now();
     let table = CharacterTable::embedded()?;
+    let buckets = BucketTable::new();
     let files = corpus_files(&args.roots)?;
-    let (counts, tally) = census_counts(&table, &files)?;
+    let (counts, tally) = census_counts(&table, &buckets, &files)?;
 
     let rows = ordered(&counts);
     let mut payload = String::with_capacity(rows.len() * 16);
@@ -151,6 +156,7 @@ pub(crate) fn tokenizer_census(args: &TokenizerCensusArgs) -> BiquestResult<()> 
             "word_pieces" => v_int(tally.word_pieces as i64),
             "distinct_types" => v_int(rows.len() as i64),
             "unicode_chars" => v_int(tally.unicode_chars as i64),
+            "bucket_tokens" => v_int(tally.bucket_tokens as i64),
             "refused_files" => refused_rows(&tally.refused),
             "biquest_version" => v_str(env!("CARGO_PKG_VERSION")),
             "counted_at" => v_int(epoch_seconds()),
@@ -166,6 +172,7 @@ pub(crate) fn tokenizer_census(args: &TokenizerCensusArgs) -> BiquestResult<()> 
             "word_pieces" => v_int(tally.word_pieces as i64),
             "distinct_types" => v_int(rows.len() as i64),
             "unicode_chars" => v_int(tally.unicode_chars as i64),
+            "bucket_tokens" => v_int(tally.bucket_tokens as i64),
             "out" => v_str(&args.out.display().to_string()),
             "seconds" => v_float(started.elapsed().as_secs_f64()),
         },

@@ -1,6 +1,7 @@
 //! The compression ledger against cl100k, and the encode debug dump.
 use crate::*;
 
+use crate::bucket::BucketTable;
 use crate::census::corpus_files;
 use crate::census::read_admitted;
 use crate::census::refused_rows;
@@ -16,14 +17,17 @@ pub(crate) fn tokenizer_ledger(cli: &Cli, args: &TokenizerLedgerArgs) -> Biquest
     let tokenizer = llm::load_tokenizer(&config.model_dir())?;
     llm::verify_token_map(&tokenizer)?;
     let table = CharacterTable::embedded()?;
+    let buckets = BucketTable::new();
     let admitted = read_admitted(&args.admitted)?;
-    let segmenter = Segmenter::new(&table, &admitted);
+    let segmenter = Segmenter::new(&table, &buckets, &admitted);
     let files = corpus_files(&args.roots)?;
 
     let mut rows: Vec<harness::nu::Value> = Vec::new();
     let mut refused: Vec<(PathBuf, String)> = Vec::new();
     let mut quill_total = 0usize;
     let mut dictionary_total = 0usize;
+    let mut bucket_total = 0usize;
+    let mut repeat_total = 0usize;
     let mut character_total = 0usize;
     let mut cl100k_total = 0usize;
     let mut byte_total = 0usize;
@@ -45,7 +49,12 @@ pub(crate) fn tokenizer_ledger(cli: &Cli, args: &TokenizerLedgerArgs) -> Biquest
         measured_files += 1;
         let dictionary_tokens =
             tokens.iter().filter(|token| token.layer == Layer::Dictionary).count();
-        let character_tokens = tokens.len() - dictionary_tokens;
+        let bucket_tokens =
+            tokens.iter().filter(|token| token.layer == Layer::Bucket).count();
+        let repeat_tokens =
+            tokens.iter().filter(|token| token.layer == Layer::Keyword).count();
+        let character_tokens =
+            tokens.len() - dictionary_tokens - bucket_tokens - repeat_tokens;
         let encoding = match tokenizer.encode(text.as_str(), false) {
             Ok(encoding) => encoding,
             Err(e) => snafu::whatever!("{}: cl100k encode failed: {e}", path.display()),
@@ -53,6 +62,8 @@ pub(crate) fn tokenizer_ledger(cli: &Cli, args: &TokenizerLedgerArgs) -> Biquest
         let cl100k_tokens = encoding.get_ids().len();
         quill_total += tokens.len();
         dictionary_total += dictionary_tokens;
+        bucket_total += bucket_tokens;
+        repeat_total += repeat_tokens;
         character_total += character_tokens;
         cl100k_total += cl100k_tokens;
         byte_total += text.len();
@@ -62,6 +73,8 @@ pub(crate) fn tokenizer_ledger(cli: &Cli, args: &TokenizerLedgerArgs) -> Biquest
                 "text_bytes" => v_int(text.len() as i64),
                 "quill_tokens" => v_int(tokens.len() as i64),
                 "dictionary_tokens" => v_int(dictionary_tokens as i64),
+                "bucket_tokens" => v_int(bucket_tokens as i64),
+                "repeat_tokens" => v_int(repeat_tokens as i64),
                 "character_tokens" => v_int(character_tokens as i64),
                 "cl100k_tokens" => v_int(cl100k_tokens as i64),
             },
@@ -86,6 +99,8 @@ pub(crate) fn tokenizer_ledger(cli: &Cli, args: &TokenizerLedgerArgs) -> Biquest
             "text_bytes" => v_int(byte_total as i64),
             "quill_tokens" => v_int(quill_total as i64),
             "dictionary_tokens" => v_int(dictionary_total as i64),
+            "bucket_tokens" => v_int(bucket_total as i64),
+            "repeat_tokens" => v_int(repeat_total as i64),
             "character_tokens" => v_int(character_total as i64),
             "cl100k_tokens" => v_int(cl100k_total as i64),
             "quill_over_cl100k" => v_float(ratio),
@@ -109,6 +124,11 @@ pub(crate) fn tokenizer_ledger(cli: &Cli, args: &TokenizerLedgerArgs) -> Biquest
             } else {
                 dictionary_total as f64 / quill_total as f64
             }),
+            "bucket_share" => v_float(if quill_total == 0 {
+                0.0
+            } else {
+                bucket_total as f64 / quill_total as f64
+            }),
             "out" => v_str(&args.out.display().to_string()),
             "seconds" => v_float(started.elapsed().as_secs_f64()),
         },
@@ -118,10 +138,11 @@ pub(crate) fn tokenizer_ledger(cli: &Cli, args: &TokenizerLedgerArgs) -> Biquest
     Ok(())
 }
 
-/// `biquest tokenizer ucd`: report the embedded layer's shape.
+/// `biquest tokenizer ucd`: report the embedded layers' shape.
 pub(crate) fn tokenizer_ucd() -> BiquestResult<()> {
     let started = std::time::Instant::now();
     let table = CharacterTable::embedded()?;
+    let buckets = BucketTable::new();
     let mut word_chars = 0usize;
     let mut unicode_chars = 0usize;
     let mut white_space_chars = 0usize;
@@ -151,8 +172,29 @@ pub(crate) fn tokenizer_ucd() -> BiquestResult<()> {
             "lowercase_maps" => v_int(table.simple_lowercase.len() as i64),
             "scripts" => v_int(table.scripts.len() as i64),
             "general_categories" => v_int(table.general_categories.len() as i64),
-            "dictionary_offset" => v_int(
+            "bucket_offset" => v_int(
                 crate::lexer::CHARACTER_OFFSET as i64 + table.assigned_count() as i64
+            ),
+            "bucket_count" => v_int(buckets.count() as i64),
+            "buckets" => {
+                let mut categories: Vec<(&'static str, usize)> = Vec::new();
+                for index in 0..buckets.count() {
+                    let category = buckets.entry(index).1.category();
+                    match categories.iter_mut().find(|(known, _)| *known == category) {
+                        Some((_, count)) => *count += 1,
+                        None => categories.push((category, 1)),
+                    }
+                }
+                let mut record = harness::nu::Record::new();
+                for (category, count) in categories {
+                    record.push(category, v_int(count as i64));
+                }
+                harness::nu::Value::record(record, span())
+            },
+            "dictionary_offset" => v_int(
+                crate::lexer::CHARACTER_OFFSET as i64
+                    + table.assigned_count() as i64
+                    + buckets.count() as i64
             ),
             "seconds" => v_float(started.elapsed().as_secs_f64()),
         },
