@@ -19,8 +19,8 @@ construction.
 
 ## fn boundary_pieces
 
-W+ word runs and single-character symbol pieces (TheUser-ruled: `Dog
-ate. it` lexes Dog, space, ate, period, space, it - symbols never
+W+ word runs and single-character Unicode pieces (TheUser-ruled: `Dog
+ate. it` lexes Dog, space, ate, period, space, it - they never
 merge). Digit runs ride the Word class, so an out-of-dictionary number
 falls to digit-per-character; lexed numeric literals remain an open
 decision recorded in the campaign.
@@ -32,7 +32,7 @@ decision recorded in the campaign.
 A word piece resolves whole: fold, dictionary lookup, else its
 character split. There is no partial or longest-prefix match inside a
 piece - inflected forms are expected to be dictionary entries
-themselves (wiktextract forms ride along). Symbol pieces go straight
+themselves (wiktextract forms ride along). Unicode pieces go straight
 to the character layer; the dictionary can never hit one because
 admission (dictionary.rs) only accepts single word-piece candidates,
 so the lookup is skipped rather than run dead on gigabytes.

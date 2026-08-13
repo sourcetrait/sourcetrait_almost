@@ -18,7 +18,7 @@ tokenizer.
 ## fn tokenizer_ucd
 
 The parse-validation verb over the embedded table. Reading (Unicode
-17.0.0): 159,866 assigned rows, 150,139 Word / 9,498 Symbol / 229
-Other, 1,512 fold pairs, 174 scripts, dictionary offset 160,122. The
-~20 ms parse is why the table has no cached artifact - always fresh
-from the embedded UCD.
+17.0.0): 159,866 assigned rows, 150,139 Word / 9,727 Symbol (25
+White_Space), 1,512 fold pairs, 174 scripts, dictionary offset
+160,122. The ~20 ms parse is why the table has no cached artifact -
+always fresh from the embedded UCD.

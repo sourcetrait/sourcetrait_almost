@@ -16,8 +16,8 @@ pub(crate) const CHARACTER_OFFSET: u32 = KEYWORD_PAGE_SIZE;
 pub(crate) enum PieceKind {
     /// A maximal run of word-constituent characters (W+).
     Word,
-    /// One symbol-class character (S); symbols never merge.
-    Symbol,
+    /// One Unicode-class character; they never merge.
+    Unicode,
 }
 
 /// One lexed piece: a slice of the input plus its kind.
@@ -27,8 +27,8 @@ pub(crate) struct Piece<'a> {
     pub(crate) kind: PieceKind,
 }
 
-/// Split text into W+ word runs and single-character symbol pieces.
-/// An unassigned or Other-classed character refuses.
+/// Split text into W+ word runs and single-character Unicode pieces.
+/// An unassigned code point refuses; every assigned character lexes.
 pub(crate) fn boundary_pieces<'a>(
     table: &CharacterTable,
     text: &'a str,
@@ -36,30 +36,23 @@ pub(crate) fn boundary_pieces<'a>(
     let mut pieces = Vec::new();
     let mut word_start: Option<usize> = None;
     for (offset, c) in text.char_indices() {
-        let class = match table.class_of(c) {
-            Some(class) => class,
-            None => snafu::whatever!(
-                "ingestion refusal: unassigned code point U+{:04X} at byte {offset}",
-                c as u32
-            ),
-        };
-        match class {
+        match table.class_of(c) {
             CharClass::Word => {
                 if word_start.is_none() {
                     word_start = Some(offset);
                 }
             }
-            CharClass::Symbol => {
+            CharClass::Unicode => {
                 if let Some(start) = word_start.take() {
                     pieces.push(Piece { text: &text[start..offset], kind: PieceKind::Word });
                 }
                 pieces.push(Piece {
                     text: &text[offset..offset + c.len_utf8()],
-                    kind: PieceKind::Symbol,
+                    kind: PieceKind::Unicode,
                 });
             }
             CharClass::Other => snafu::whatever!(
-                "ingestion refusal: unlexable character U+{:04X} at byte {offset}",
+                "ingestion refusal: unassigned code point U+{:04X} at byte {offset}",
                 c as u32
             ),
         }
@@ -143,7 +136,7 @@ impl<'a> Segmenter<'a> {
     }
 
     /// Segment content text: a word piece is a case-folded dictionary
-    /// hit or its character split; a symbol piece is its character.
+    /// hit or its character split; a Unicode piece is its character.
     pub(crate) fn segment(&self, text: &str) -> BiquestResult<Vec<Token>> {
         let mut tokens = Vec::new();
         for piece in boundary_pieces(self.table, text)? {

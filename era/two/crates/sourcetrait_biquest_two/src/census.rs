@@ -43,7 +43,7 @@ pub(crate) struct CensusTally {
     pub(crate) files: usize,
     pub(crate) text_bytes: usize,
     pub(crate) word_pieces: usize,
-    pub(crate) symbol_chars: usize,
+    pub(crate) unicode_chars: usize,
     /// Files the lexer refused, skipped whole and reported.
     pub(crate) refused: Vec<(PathBuf, String)>,
 }
@@ -85,7 +85,7 @@ pub(crate) fn census_counts(
                     };
                     *counts.entry(folded).or_insert(0) += 1;
                 }
-                PieceKind::Symbol => tally.symbol_chars += 1,
+                PieceKind::Unicode => tally.unicode_chars += 1,
             }
         }
     }
@@ -150,7 +150,7 @@ pub(crate) fn tokenizer_census(args: &TokenizerCensusArgs) -> BiquestResult<()> 
             "text_bytes" => v_int(tally.text_bytes as i64),
             "word_pieces" => v_int(tally.word_pieces as i64),
             "distinct_types" => v_int(rows.len() as i64),
-            "symbol_chars" => v_int(tally.symbol_chars as i64),
+            "unicode_chars" => v_int(tally.unicode_chars as i64),
             "refused_files" => refused_rows(&tally.refused),
             "biquest_version" => v_str(env!("CARGO_PKG_VERSION")),
             "counted_at" => v_int(epoch_seconds()),
@@ -165,7 +165,7 @@ pub(crate) fn tokenizer_census(args: &TokenizerCensusArgs) -> BiquestResult<()> 
             "refused_files" => v_int(tally.refused.len() as i64),
             "word_pieces" => v_int(tally.word_pieces as i64),
             "distinct_types" => v_int(rows.len() as i64),
-            "symbol_chars" => v_int(tally.symbol_chars as i64),
+            "unicode_chars" => v_int(tally.unicode_chars as i64),
             "out" => v_str(&args.out.display().to_string()),
             "seconds" => v_float(started.elapsed().as_secs_f64()),
         },

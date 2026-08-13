@@ -17,14 +17,18 @@ the whole migration.
 
 ## enum CharClass
 
-TheUser-ruled shape: Word, Symbol, Other. Word is L*/M*/N* (letters,
+TheUser-ruled shape: Word, Unicode, Other - and Word/Unicode
+partition the ASSIGNED set whole. Word is L*/M*/N* (letters,
 combining marks, numbers - marks ride inside words, digits are
-word-constituent). Symbol is White_Space plus P* plus S*: anything
-that bounds a word and stands as one token per character. Other is the
-assigned remainder (mostly Cc controls beyond the whitespace set and
-Cf format chars) and is a lex-time ingestion refusal - rows exist for
-those characters, but corpus text carrying them is refused rather than
-tokenized.
+word-constituent). Unicode is everything else assigned - whitespace,
+punctuation, symbols, controls, format characters - one token per
+character, named for where it resolves (his ruling: it should just
+be called Unicode, because that is what it is). His ruling closing
+the totality loop: an assigned code point is never unlexable (an ESC
+is just a character); that totality is why the Unicode floor exists.
+Other means unassigned - no row - and is the ingestion refusal,
+alongside invalid UTF-8. The White_Space flag is kept as a property
+for the associations work, not as a class discriminator.
 
 ## struct CharacterTable
 

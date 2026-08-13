@@ -122,36 +122,28 @@ pub(crate) fn tokenizer_ledger(cli: &Cli, args: &TokenizerLedgerArgs) -> Biquest
 pub(crate) fn tokenizer_ucd() -> BiquestResult<()> {
     let started = std::time::Instant::now();
     let table = CharacterTable::embedded()?;
-    let mut class_counts: Vec<(crate::ucd::CharClass, usize)> = vec![
-        (crate::ucd::CharClass::Word, 0),
-        (crate::ucd::CharClass::Symbol, 0),
-        (crate::ucd::CharClass::Other, 0),
-    ];
+    let mut word_chars = 0usize;
+    let mut unicode_chars = 0usize;
+    let mut white_space_chars = 0usize;
     let mut folded = 0usize;
     for row in &table.rows {
-        let class = table.class_of_row(row);
-        for (known, count) in class_counts.iter_mut() {
-            if *known == class {
-                *count += 1;
-            }
+        match table.class_of_row(row) {
+            crate::ucd::CharClass::Word => word_chars += 1,
+            _ => unicode_chars += 1,
+        }
+        if row.white_space {
+            white_space_chars += 1;
         }
         if row.fold != row.code_point {
             folded += 1;
         }
     }
-    let class_count = |wanted: crate::ucd::CharClass| -> i64 {
-        class_counts
-            .iter()
-            .find(|(class, _)| *class == wanted)
-            .map(|(_, count)| *count as i64)
-            .unwrap_or(0)
-    };
     let summary = harness::nu::Value::record(
         harness::nu::record! {
             "assigned" => v_int(table.assigned_count() as i64),
-            "word_chars" => v_int(class_count(crate::ucd::CharClass::Word)),
-            "symbol_chars" => v_int(class_count(crate::ucd::CharClass::Symbol)),
-            "other_chars" => v_int(class_count(crate::ucd::CharClass::Other)),
+            "word_chars" => v_int(word_chars as i64),
+            "unicode_chars" => v_int(unicode_chars as i64),
+            "white_space_chars" => v_int(white_space_chars as i64),
             "fold_pairs" => v_int(folded as i64),
             "decompositions" => v_int(table.decompositions.len() as i64),
             "numeric_values" => v_int(table.numeric_values.len() as i64),

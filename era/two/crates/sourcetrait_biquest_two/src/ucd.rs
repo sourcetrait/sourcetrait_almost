@@ -8,15 +8,20 @@ const PROP_LIST: &str = include_str!("../data/ucd/PropList.txt");
 const CASE_FOLDING: &str = include_str!("../data/ucd/CaseFolding.txt");
 const SCRIPTS: &str = include_str!("../data/ucd/Scripts.txt");
 
-/// The lexer's classification of an assigned code point.
+/// The lexer's classification of a code point.
+///
+/// Word and Unicode partition the ASSIGNED set whole - any assigned
+/// character lexes, which is the totality the Unicode floor exists
+/// for. Other is what the table does not hold: unassigned code
+/// points, the ingestion refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CharClass {
     /// Letters, marks, and numbers: word-constituent.
     Word,
-    /// Whitespace, punctuation, and symbols: always a boundary, one
-    /// token per character.
-    Symbol,
-    /// Assigned but outside the classes above; a lex-time refusal.
+    /// Every other assigned character - it resolves at the Unicode
+    /// table: always a boundary, one token per character.
+    Unicode,
+    /// Unassigned: no row exists, and ingestion refuses.
     Other,
 }
 
@@ -293,22 +298,21 @@ impl CharacterTable {
         self.index_of.get(&code_point).copied()
     }
 
+    /// An assigned row is Word or Symbol, never Other.
     pub(crate) fn class_of_row(&self, row: &CharRow) -> CharClass {
-        if row.white_space {
-            return CharClass::Symbol;
-        }
         let category = &self.general_categories[row.category as usize];
         match category.as_bytes().first() {
             Some(b'L') | Some(b'M') | Some(b'N') => CharClass::Word,
-            Some(b'P') | Some(b'S') => CharClass::Symbol,
-            _ => CharClass::Other,
+            _ => CharClass::Unicode,
         }
     }
 
-    /// Class of a character, or None when the code point is unassigned.
-    pub(crate) fn class_of(&self, c: char) -> Option<CharClass> {
-        let index = self.index_of(c as u32)?;
-        Some(self.class_of_row(&self.rows[index as usize]))
+    /// A character's class; Other means unassigned (no row).
+    pub(crate) fn class_of(&self, c: char) -> CharClass {
+        match self.index_of(c as u32) {
+            Some(index) => self.class_of_row(&self.rows[index as usize]),
+            None => CharClass::Other,
+        }
     }
 
     /// Simple case fold, or None when the code point is unassigned.

@@ -42,7 +42,7 @@ fn table() -> CharacterTable {
 }
 
 #[test]
-fn text_splits_into_word_runs_and_single_symbol_pieces() {
+fn text_splits_into_word_runs_and_single_unicode_pieces() {
     let table = table();
     let pieces = boundary_pieces(&table, "Dog ate. it").expect("lexes");
     let shape: Vec<(&str, PieceKind)> =
@@ -51,10 +51,10 @@ fn text_splits_into_word_runs_and_single_symbol_pieces() {
         shape,
         [
             ("Dog", PieceKind::Word),
-            (" ", PieceKind::Symbol),
+            (" ", PieceKind::Unicode),
             ("ate", PieceKind::Word),
-            (".", PieceKind::Symbol),
-            (" ", PieceKind::Symbol),
+            (".", PieceKind::Unicode),
+            (" ", PieceKind::Unicode),
             ("it", PieceKind::Word),
         ]
     );
@@ -117,10 +117,13 @@ fn segment_pieces_carries_folded_words_and_characters() {
 }
 
 #[test]
-fn unassigned_and_other_class_characters_refuse() {
+fn unassigned_refuses_and_assigned_controls_lex_as_unicode() {
     let table = table();
     let unassigned = boundary_pieces(&table, "dog z").expect_err("z is unassigned");
     assert!(unassigned.to_string().contains("ingestion refusal"), "got: {unassigned}");
-    let control = boundary_pieces(&table, "dog \u{0001}").expect_err("control refuses");
-    assert!(control.to_string().contains("ingestion refusal"), "got: {control}");
+    // An assigned control is just a Unicode-class character: the floor
+    // is total over the assigned set.
+    let pieces = boundary_pieces(&table, "dog\u{0001}").expect("control lexes");
+    let last = pieces.last().expect("pieces");
+    assert_eq!((last.text, last.kind), ("\u{0001}", PieceKind::Unicode));
 }
