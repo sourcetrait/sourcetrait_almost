@@ -381,6 +381,119 @@ not a type at all
     assert_eq!(envelope.errors[0].kind, "channel::typedef");
 }
 
+/// A prose payload IS the rendering: raw, multi-line, untyped.
+#[test]
+fn an_md_answer_delivers_its_prose_raw() {
+    let emission = "\
+<|extra_id_2|> md
+A first paragraph.
+
+A second, with a `code span` and a
+soft-wrapped line.
+<|extra_id_6|>";
+    let outcome =
+        interpret(&evaluator(), emission, Aliasing::Strict, false).expect("interprets");
+    let Outcome::Answered(answer) = outcome else {
+        panic!("expected an answer, got {outcome:?}");
+    };
+    assert!(answer.value.is_none(), "prose carries no typed value");
+    assert!(answer.declared.is_none());
+    assert_eq!(
+        answer.rendered,
+        "A first paragraph.\n\nA second, with a `code span` and a\nsoft-wrapped line.",
+        "structural newlines survive untouched"
+    );
+}
+
+/// The MarkerEscape convention: `<\|` is content, and it stays escaped.
+#[test]
+fn an_escaped_marker_inside_md_prose_crosses_with_its_escape() {
+    let emission = "\
+<|extra_id_2|> md
+The closer is spelled <\\|extra_id_6|> on the wire.
+<|extra_id_6|>";
+    let outcome =
+        interpret(&evaluator(), emission, Aliasing::Strict, false).expect("interprets");
+    let Outcome::Answered(answer) = outcome else {
+        panic!("an escaped marker is content, got {outcome:?}");
+    };
+    assert_eq!(
+        answer.rendered,
+        "The closer is spelled <\\|extra_id_6|> on the wire.",
+        "the harness never undoes the escape"
+    );
+}
+
+/// An unescaped closer line inside a prose payload splits the block and
+/// strands what follows, which Strict refuses - the break-early posture.
+#[test]
+fn an_unescaped_closer_inside_md_prose_asks_for_repair() {
+    let emission = "\
+<|extra_id_2|> md
+Prose before a forged
+<|extra_id_6|>
+close, and prose after it.
+<|extra_id_6|>";
+    let outcome =
+        interpret(&evaluator(), emission, Aliasing::Strict, false).expect("interprets");
+    let Outcome::Repair(envelope) = outcome else {
+        panic!("expected a repair, got {outcome:?}");
+    };
+    assert!(envelope.errors.iter().any(|row| row.kind == "channel::parse"));
+}
+
+/// The liquid composition on the output form: data, pass, template.
+#[test]
+fn a_liquid_md_output_renders_against_its_bound_value() {
+    let emission = "\
+<|extra_id_2|> nuon record<name: string>
+{name: Quest}
+<|extra_id_6|>
+<|extra_id_3|>$in<|extra_id_6|>
+<|extra_id_2|> liquid md
+Hello, {{ in.name }}.
+<|extra_id_6|>";
+    let outcome =
+        interpret(&evaluator(), emission, Aliasing::Strict, false).expect("interprets");
+    let Outcome::Answered(answer) = outcome else {
+        panic!("expected an answer, got {outcome:?}");
+    };
+    let value = answer.value.expect("the data block still carries the value");
+    assert_eq!(
+        value
+            .get_data_by_key("name")
+            .and_then(|v| v.coerce_into_string().ok()),
+        Some(String::from("Quest"))
+    );
+    assert_eq!(answer.rendered.trim(), "Hello, Quest.");
+}
+
+/// Input-side prose: an md payload binds as the raw text it is.
+#[test]
+fn an_md_input_binds_as_a_raw_string() {
+    let emission = "\
+<|extra_id_1|> md
+Some doc.
+<|extra_id_6|>
+<|extra_id_3|>$in<|extra_id_6|>
+<|extra_id_4|> def evaluate []: string -> int { $in | str length }
+<|extra_id_6|>";
+    let evaluator = evaluator();
+    let outcome = interpret(&evaluator, emission, Aliasing::Strict, false).expect("interprets");
+    let Outcome::Think {
+        form,
+        signature,
+        bindings,
+    } = outcome
+    else {
+        panic!("expected a think turn, got {outcome:?}");
+    };
+    assert_eq!(bindings[0].value, nu::Value::string("Some doc.", nu::Span::unknown()));
+    let result =
+        run_think(&evaluator, &form, &signature, &bindings).expect("the think turn evaluates");
+    assert_eq!(result.as_int().expect("an int"), 9);
+}
+
 #[test]
 fn a_block_naming_a_format_we_cannot_read_asks_for_repair() {
     let emission = "\

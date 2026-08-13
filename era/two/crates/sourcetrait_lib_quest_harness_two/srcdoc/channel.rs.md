@@ -77,6 +77,35 @@ lines, and the line-anchored form would read that as a boundary. Escaping at
 emission closes the class, and it is safe for a record or a table because the
 only raw newlines a compact render can carry are inside double-quoted strings.
 
+## fn escape_payload_markers
+
+THE MARKERESCAPE CONVENTION, and it closes the arbitrary-text forgery class the
+NUON escape cannot reach. A prose or template payload is raw and multi-line -
+its newlines are structural - so a content line reading exactly the closer
+would end the block early, and a marker spelling anywhere in content would trip
+the stray guard or, worse, TOKENISE: added tokens match on the raw string, so
+an unbroken `<|extra_id_6|>` in content becomes the real closer token however
+it got there, and a backslash in front of the whole spelling would not stop
+that match.
+
+Breaking the introducer itself is what works on every layer at once. `<\|`
+matches no added token (the tokenizer never sees the exact string), no opener
+and no closer (the line predicates compare exact spellings), and no stray-guard
+scan (`carries_marker` is a substring match over unbroken spellings). Markdown
+renders `\|` as a literal pipe, so the displayed text reads back as the marker
+being discussed - the escape is display-honest for md, and a visible wart only
+in txt, which is the rarely-used format by design.
+
+It is deliberately NEVER undone by the harness. Unescaping at parse would put
+unbroken spellings back into rendered prose, where the stray guard cannot tell
+restored content from a carrier-discipline fault; keeping the escape as the
+carried spelling keeps the guard a one-rule scan. The uniform `<|` rule (rather
+than a list of the seven spellings) covers the whole `<|...|>` added-token
+family - turn markers included - in one learnable rewrite. The non-pipe marker
+family (`<functions>` and kin) is deliberately outside it: those rows are
+refused at conversion rather than escaped, because teaching tool-marker tokens
+mid-prose is the trained-attractor hazard rather than a framing one.
+
 ## fn render_block
 
 ## fn render_blocks
@@ -110,14 +139,15 @@ locked examples show `pass` inline and everything else block-shaped, so that is
 what renders; both forms parse, because a model that emits the other one is
 making a formatting choice rather than a protocol error.
 
-THE `liquid` FORGERY HAZARD IS OPEN AND IS NOT SOLVED HERE. Every other block's
-content is constrained - NUON, a nu def, a record - so a line reading exactly
-the closer is vanishingly unlikely, and the escaping rule closes the rest. A
-template is arbitrary text by design and can legitimately contain that line. The
-NUON escape does not transfer, because there the escape is what the parser reads
-back while a template's newlines are structural. This parser takes the first
-closer line and stops, which is the least-committal reading available; resolving
-it properly is owed before liquid emission is trained rather than after.
+THE ARBITRARY-TEXT FORGERY CLASS IS CLOSED BY MARKERESCAPE, not here. A prose
+(md, txt) or template payload is arbitrary text whose newlines are structural,
+so the NUON escape does not transfer; `escape_payload_markers` breaks the `<|`
+introducer at authoring and conversion instead, so no legal content line can
+read as a marker line by construction. This parser stays exactly as it was -
+first closer line wins - because an UNESCAPED marker in an emission is a
+carrier-discipline fault the break-early posture should refuse (a forged close
+strands the trailing content as unmarked, which Strict rejects), not a case to
+parse around.
 
 ## fn opener_at
 
@@ -161,17 +191,36 @@ vocabulary, so the vocabulary and the processing cannot drift apart
 without the compiler noticing, which is the same requirement the `<nu>`
 mode set already carries.
 
+`md` and `txt` are the no-implied-format ruling's landing: there is
+always a data format in an output, and the implied one everywhere in
+current practice is markdown unnamed. Naming it makes prose a formatted
+payload like any other - md the lingua franca, txt the rare
+disambiguation - and an entry using no markup feature is still md,
+because the format designates what the payload IS rather than whether
+its syntax shows. `is_prose` is the processing split those two carry:
+raw, multi-line, untyped - the payloads MarkerEscape exists for.
+
+`liquid` composes WITHIN a format rather than standing alone, which is
+why a bare `liquid` refuses: a template that does not say what it
+renders to would be an implied format one level up. The composition
+costs no tag and no slot - it is a word in a descriptor - and it is the
+direction the SystemChannelRemap debt records for the `<|liquid|>` tag
+itself.
+
 The diagnostic lists every member rather than only reporting the miss,
 because the reader who needs it is a model choosing a word.
 
 ## enum Declared
 
-Three cases rather than an `Option<Type>`, because the absent case splits
-in two and the two mean opposite things. `Untyped` says the content has
+Four cases rather than an `Option<Type>`, because the absent case splits
+and the splits mean different things. `Untyped` says the content has
 no type to check. `Typedef` says the content IS a type - the one place
 the slot names what the payload is rather than what a value conforms to.
-Collapsing them would lose exactly the distinction that lets a typedef be
-validated as a type while text is validated as nothing.
+`Renders` says the content is a template and names its target, so the
+second slot carries a format where every other case carries a type or
+nothing. Collapsing them would lose exactly the distinctions that let a
+typedef be validated as a type, a template be rendered, and text be
+validated as nothing.
 
 ## struct Descriptor
 
@@ -179,9 +228,9 @@ validated as a type while text is validated as nothing.
 
 THE PAIRING IS PART OF THE VOCABULARY, which is why this is not a split
 followed by two independent parses. `nuon` owes a type, `nu` takes the
-word `type` alone, `string` takes nothing. A format word in the wrong
-pairing is refused here rather than surviving to fail somewhere with a
-less legible message.
+word `type` alone, `string`, `md` and `txt` take nothing, and `liquid`
+owes a prose target. A format word in the wrong pairing is refused here
+rather than surviving to fail somewhere with a less legible message.
 
 Splitting on the first whitespace rather than tokenising is deliberate: a
 type can contain spaces (`record<a: int, b: int>`), so only the FIRST

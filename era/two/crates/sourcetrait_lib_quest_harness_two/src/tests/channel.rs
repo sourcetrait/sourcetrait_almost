@@ -13,7 +13,9 @@ use crate::channel::{
     TAGS,
     Tag,
     authoring_to_wire,
+    carries_marker,
     escape_content,
+    escape_payload_markers,
     parse_blocks,
     render_block,
     render_blocks,
@@ -172,6 +174,10 @@ fn every_descriptor_round_trips_through_its_header() {
         ("nuon list<string>", Descriptor::nuon(nu::parse_typedef("list<string>").expect("a type"))),
         ("nu type", Descriptor::typedef()),
         ("string", Descriptor::text()),
+        ("md", Descriptor::md()),
+        ("txt", Descriptor::txt()),
+        ("liquid md", Descriptor::liquid(Format::Md).expect("md is a render target")),
+        ("liquid txt", Descriptor::liquid(Format::Txt).expect("txt is a render target")),
     ];
     for (header, expected) in cases {
         let parsed = Descriptor::parse(header).expect(header);
@@ -196,12 +202,49 @@ fn the_format_vocabulary_is_closed() {
 fn a_descriptors_pairing_is_part_of_the_vocabulary() {
     // Each of these is a legal format word in an illegal pairing, so the
     // refusal has to come from the pairing rather than from the word.
-    for header in ["nuon", "nu", "nu list<string>", "string int", ""] {
+    let illegal = [
+        "nuon",
+        "nu",
+        "nu list<string>",
+        "string int",
+        "",
+        "md int",
+        "txt string",
+        "liquid",
+        "liquid nuon",
+        "liquid string",
+        "liquid liquid",
+    ];
+    for header in illegal {
         assert!(
             Descriptor::parse(header).is_err(),
             "{header:?} pairs a format with the wrong type slot"
         );
     }
+    assert!(
+        Descriptor::liquid(Format::Nuon).is_err(),
+        "the constructor holds the same pairing rule the parser does"
+    );
+}
+
+#[test]
+fn an_escaped_marker_line_cannot_forge_a_prose_payload_boundary() {
+    // A prose payload is raw and multi-line, so the newline escape does
+    // not guard it; breaking the `<|` introducer is what does. The
+    // escaped spelling must match no marker at all - not the closer that
+    // would split the block, and not the spellings the stray guard scans.
+    let content = format!(
+        "A line about the closer:\n{}\nand a mid-line {} mention.",
+        Tag::Close.spelling(),
+        Tag::Output.spelling()
+    );
+    let escaped = escape_payload_markers(&content);
+    assert!(!carries_marker(&escaped), "no marker spelling survives: {escaped}");
+
+    let block = Block::new(Tag::Output, "md", &escaped);
+    let parsed = parse_blocks(&render_block(&block), Aliasing::Strict).expect("parses");
+    assert_eq!(parsed.len(), 1, "the payload must not split the block");
+    assert_eq!(parsed[0].content, escaped, "prose content is carried raw");
 }
 
 #[test]

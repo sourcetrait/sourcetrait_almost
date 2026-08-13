@@ -94,10 +94,20 @@ pub enum Format {
     Nuon,
     Nu,
     String,
+    Md,
+    Txt,
+    Liquid,
 }
 
 /// The formats in the order a diagnostic lists them.
-pub const FORMATS: [Format; 3] = [Format::Nuon, Format::Nu, Format::String];
+pub const FORMATS: [Format; 6] = [
+    Format::Nuon,
+    Format::Nu,
+    Format::String,
+    Format::Md,
+    Format::Txt,
+    Format::Liquid,
+];
 
 impl Format {
     pub fn spelling(&self) -> &'static str {
@@ -105,7 +115,15 @@ impl Format {
             Self::Nuon => "nuon",
             Self::Nu => "nu",
             Self::String => "string",
+            Self::Md => "md",
+            Self::Txt => "txt",
+            Self::Liquid => "liquid",
         }
+    }
+
+    /// Whether this format's content is prose: raw, multi-line, untyped.
+    pub fn is_prose(&self) -> bool {
+        matches!(self, Self::Md | Self::Txt)
     }
 
     /// Read one back; anything outside the vocabulary is refused.
@@ -129,6 +147,8 @@ pub enum Declared {
     Typedef,
     /// Nothing to check, because the content is text.
     Untyped,
+    /// The content is a template rendering to the named prose format.
+    Renders(Format),
 }
 
 /// A data block's opener: the format, then what the type slot says.
@@ -163,6 +183,35 @@ impl Descriptor {
         }
     }
 
+    /// The descriptor markdown prose travels under.
+    pub fn md() -> Self {
+        Self {
+            format: Format::Md,
+            declared: Declared::Untyped,
+        }
+    }
+
+    /// The descriptor plain-text prose travels under.
+    pub fn txt() -> Self {
+        Self {
+            format: Format::Txt,
+            declared: Declared::Untyped,
+        }
+    }
+
+    /// The descriptor a template travels under, naming its render target.
+    pub fn liquid(target: Format) -> HarnessQuestResult<Self> {
+        snafu::ensure_whatever!(
+            target.is_prose(),
+            "`liquid` renders to md or txt; got `{}`",
+            target.spelling()
+        );
+        Ok(Self {
+            format: Format::Liquid,
+            declared: Declared::Renders(target),
+        })
+    }
+
     /// Read an opener's header; the pairing is part of the vocabulary.
     pub fn parse(header: &str) -> HarnessQuestResult<Self> {
         let header = header.trim();
@@ -190,12 +239,25 @@ impl Descriptor {
                 );
                 Declared::Typedef
             }
-            Format::String => {
+            Format::String | Format::Md | Format::Txt => {
                 snafu::ensure_whatever!(
                     rest.is_empty(),
-                    "`string` carries no type; got {rest:?}"
+                    "`{}` carries no type; got {rest:?}",
+                    format.spelling()
                 );
                 Declared::Untyped
+            }
+            Format::Liquid => {
+                snafu::ensure_whatever!(
+                    !rest.is_empty(),
+                    "`liquid` composes within a format: `liquid md` or `liquid txt`"
+                );
+                let target = Format::parse(rest)?;
+                snafu::ensure_whatever!(
+                    target.is_prose(),
+                    "`liquid` renders to md or txt; got {rest:?}"
+                );
+                Declared::Renders(target)
             }
         };
         Ok(Self { format, declared })
@@ -209,6 +271,9 @@ impl Descriptor {
             }
             Declared::Typedef => format!("{} {TYPEDEF_SLOT}", self.format.spelling()),
             Declared::Untyped => self.format.spelling().to_string(),
+            Declared::Renders(target) => {
+                format!("{} {}", self.format.spelling(), target.spelling())
+            }
         }
     }
 }
@@ -244,6 +309,18 @@ impl Block {
 /// Escape the newlines a compact NUON render leaves raw.
 pub fn escape_content(content: &str) -> String {
     content.replace('\\', "\\\\").replace('\r', "\\r").replace('\n', "\\n")
+}
+
+/// Escape the marker introducer inside an arbitrary-text payload.
+///
+/// Prose and template payloads are raw and multi-line, so the NUON
+/// newline escape cannot guard their framing. Breaking `<|` into `<\|`
+/// closes the class: the rewritten spelling matches no added token, no
+/// opener and no closer, and markdown renders the escaped pipe back to
+/// the literal text. The harness never undoes it - the escape IS the
+/// carried spelling.
+pub fn escape_payload_markers(content: &str) -> String {
+    content.replace("<|", "<\\|")
 }
 
 /// The inverse of escape_content, left-to-right so `\\n` survives.

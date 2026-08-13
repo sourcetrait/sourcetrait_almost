@@ -260,45 +260,67 @@ fn sub_turn(
 }
 
 /// The answer path: the typed value, then the prose that renders it.
+///
+/// Output blocks split by descriptor kind: a typed payload carries the
+/// value, a prose payload (md, txt) IS the rendering, and a template
+/// payload (`liquid md`) renders against the bound value exactly as the
+/// `<|liquid|>` tag does. Within a kind the first block wins.
 fn answer(blocks: &[Block]) -> HarnessQuestResult<Outcome> {
     let mut envelope = Envelope::default();
-    let output = blocks.iter().find(|block| block.tag == Tag::Output);
     let mut declared = None;
     let mut value = None;
+    let mut prose: Option<String> = None;
+    let mut template_output: Option<&Block> = None;
+    let mut unmarked: Option<String> = None;
 
-    if let Some(block) = output
-        && !block.header.is_empty()
-    {
-        match typed_payload(&block.header, &block.content) {
-            Ok((parsed_type, parsed_value)) => {
-                declared = Some(parsed_type);
-                value = Some(parsed_value);
+    for block in blocks.iter().filter(|block| block.tag == Tag::Output) {
+        // An untyped block's content is the prose the unmarked sweep
+        // carried; a typed block's bytes are the value, not prose.
+        if block.header.is_empty() {
+            if unmarked.is_none() {
+                unmarked = Some(block.content.clone());
             }
-            Err(diagnostic) => envelope.errors.push(diagnostic),
+            continue;
+        }
+        let descriptor = match channel::Descriptor::parse(&block.header) {
+            Ok(descriptor) => descriptor,
+            Err(error) => {
+                envelope.error(
+                    "channel::descriptor",
+                    Some(Tag::Output.name()),
+                    &error.to_string(),
+                );
+                continue;
+            }
+        };
+        if matches!(descriptor.declared, channel::Declared::Renders(_)) {
+            if template_output.is_none() {
+                template_output = Some(block);
+            }
+        } else if descriptor.format.is_prose() {
+            if prose.is_none() {
+                prose = Some(block.content.clone());
+            }
+        } else if value.is_none() {
+            match typed_payload(descriptor, &block.content) {
+                Ok((parsed_type, parsed_value)) => {
+                    declared = Some(parsed_type);
+                    value = Some(parsed_value);
+                }
+                Err(diagnostic) => envelope.errors.push(diagnostic),
+            }
         }
     }
 
-    let rendered = match blocks.iter().find(|block| block.tag == Tag::Liquid) {
-        Some(block) => {
-            let bindings = liquid_bindings(blocks, value.as_ref());
-            match template::render(&block.content, &bindings) {
-                Ok(text) => text,
-                Err(error) => {
-                    envelope.error(
-                        "channel::liquid_render",
-                        Some(Tag::Liquid.name()),
-                        &error.to_string(),
-                    );
-                    String::new()
-                }
-            }
-        }
-        // An untyped block's content is the prose the unmarked sweep
-        // carried; a typed block's bytes are the value, not prose.
-        None => output
-            .filter(|block| block.header.is_empty())
-            .map(|block| block.content.clone())
-            .unwrap_or_default(),
+    let liquid_tag = blocks.iter().find(|block| block.tag == Tag::Liquid);
+    let rendered = if let Some(block) = liquid_tag {
+        render_template(block, blocks, value.as_ref(), &mut envelope)
+    } else if let Some(block) = template_output {
+        render_template(block, blocks, value.as_ref(), &mut envelope)
+    } else if let Some(prose) = prose {
+        prose
+    } else {
+        unmarked.unwrap_or_default()
     };
 
     if channel::carries_marker(&rendered) {
@@ -340,17 +362,36 @@ fn emitted_config(blocks: &[Block], envelope: &mut Envelope) -> Option<nu::Value
     }
 }
 
-/// Read a block's descriptor and content into a value it can carry.
+/// Render a template payload against the answer's bound value.
+fn render_template(
+    template: &Block,
+    blocks: &[Block],
+    value: Option<&nu::Value>,
+    envelope: &mut Envelope,
+) -> String {
+    let bindings = liquid_bindings(blocks, value);
+    match template::render(&template.content, &bindings) {
+        Ok(text) => text,
+        Err(error) => {
+            envelope.error(
+                "channel::liquid_render",
+                Some(template.tag.name()),
+                &error.to_string(),
+            );
+            String::new()
+        }
+    }
+}
+
+/// Read a typed block's descriptor and content into the value it carries.
 fn typed_payload(
-    header: &str,
+    descriptor: channel::Descriptor,
     content: &str,
 ) -> Result<(nu::Type, nu::Value), channel::Diagnostic> {
     let fault = |kind: &str, error: HarnessQuestError| {
         channel::Diagnostic::new(kind, Some(Tag::Output.name()), &error.to_string())
     };
     let span = nu::Span::unknown();
-    let descriptor = channel::Descriptor::parse(header)
-        .map_err(|error| fault("channel::descriptor", error))?;
     let text = channel::unescape_content(content);
     match descriptor.declared {
         channel::Declared::Conforms(declared) => {
@@ -372,14 +413,32 @@ fn typed_payload(
         channel::Declared::Untyped => {
             Ok((nu::Type::String, nu::Value::string(text, span)))
         }
+        // Prose and template payloads are classified before this path;
+        // one arriving here is a caller defect, reported rather than run.
+        channel::Declared::Renders(_) => Err(channel::Diagnostic::new(
+            "channel::descriptor",
+            Some(Tag::Output.name()),
+            "a template payload carries no value",
+        )),
     }
 }
 
-/// Decode every bound block's NUON into the value its channel carries.
+/// Decode every bound block's payload into the value its channel carries.
 fn decode_bindings(blocks: &[Block], envelope: &mut Envelope) -> Vec<Binding> {
     let mut bindings = Vec::new();
     for (pass, block) in bound_blocks(blocks) {
         let Some(block) = block else { continue };
+        // A prose payload binds as the raw text it is: md and txt carry
+        // structural newlines, so nothing here unescapes them.
+        if let Ok(descriptor) = channel::Descriptor::parse(&block.header)
+            && descriptor.format.is_prose()
+        {
+            bindings.push(Binding::new(
+                &pass,
+                nu::Value::string(block.content.clone(), nu::Span::unknown()),
+            ));
+            continue;
+        }
         let text = channel::unescape_content(&block.content);
         match nu::from_nuon_text(&text) {
             Ok(value) => bindings.push(Binding::new(&pass, value)),

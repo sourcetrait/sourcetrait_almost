@@ -167,19 +167,32 @@ channels worth reporting on.
 
 ## fn answer
 
-A block with an EMPTY header is prose and a block with a header is typed
-NUON, and that single rule is what lets raw-text answers and typed
-answers share one path. It follows from the grammar rather than being
-invented here: data without a definition is legal only on the config
-channel.
+Output blocks classify by DESCRIPTOR KIND rather than by presence: a
+typed payload carries the value, a prose payload (md, txt) IS the
+rendering, a template payload (`liquid md`) renders against the bound
+value, and an empty header is the aliasing sweep's unmarked prose. The
+loop replaced a single `find` because the composition ruling makes two
+output blocks a legal shape - the data block and the template that
+renders it - and first-output-wins would silently drop whichever came
+second.
 
-The rendering falls back to the output block's own content when no
-liquid block follows. So a model that answers with prose gets that
-prose as its rendering, and a model that answers with data and no
-template gets its data rendered as the NUON it wrote. The second is
-arguably wrong and is worth revisiting - it hands the caller a data
-literal where prose was expected - but the alternative is inventing a
-rendering the model did not ask for.
+An md payload lands in `rendered` rather than `value`, and the choice is
+deliberate conservatism while the shape `text` member question is open:
+prose is prose wherever its format is named, so a `[text]` declaration
+is satisfied by an md block and an `[output]` declaration still owes a
+typed value. Collapsing md into the value path would quietly answer the
+open question the other way.
+
+The rendering resolution order - liquid tag, then template output, then
+prose output, then unmarked - keeps the tag path first so nothing
+trained against `<|liquid|>` moves, and the same `render_template`
+serves both so the composition cannot drift from the tag.
+
+The rendering falls back to the unmarked content when nothing else
+renders. A model that answers with data and no template gets an empty
+rendering rather than its NUON re-rendered as prose - the value is the
+value, and inventing a rendering the model did not ask for is what the
+decide delivery rule already declines to do.
 
 The stray-marker guard closes the internal-Thinkspace invariant's last
 hole: a marker mid-line is not an opener, so under tool-marker aliasing
@@ -206,6 +219,14 @@ have - the model wrote something that is not NUON - and a repairing
 model gains nothing from learning which block it was wrong in beyond
 the source the row already names.
 
+## fn render_template
+
+One renderer for the `<|liquid|>` tag and the `liquid md` output form,
+which is the point: the composition is the tag's direction of travel
+(the SystemChannelRemap debt), and two render paths would let the two
+spellings of one capability drift. The diagnostic names the block's own
+tag so a failure says which spelling carried the template.
+
 ## fn typed_payload
 
 Three failure classes with three distinct diagnostic kinds -
@@ -221,7 +242,19 @@ something better to carry it in. The descriptor is not lying about the
 payload; it names what the text MEANS while the type names how it is
 held.
 
+The `Renders` arm is defensive: `answer` classifies template payloads
+before this path, so reaching it is a caller defect, and the arm reports
+rather than panicking because a diagnostic row is this module's shape
+for a wrong thing arriving.
+
 ## fn decode_bindings
+
+A prose payload binds as the raw text it is, and the raw part is
+load-bearing twice over: md and txt newlines are structural so no
+unescape may touch them, and the MarkerEscape spellings must survive
+into the bound string because the harness never undoes that escape. The
+empty-header and malformed-header cases fall through to the NUON path
+unchanged, so nothing trained against nuon bindings moves.
 
 ## fn liquid_bindings
 
@@ -248,12 +281,14 @@ and it is safe because the only raw newlines a compact render can carry
 are inside double-quoted strings, where the escape is what nushell
 reads back.
 
-This is applied to NUON payloads only. A nu body and a liquid template
-are legitimately multi-line and their newlines are structural rather
-than content, so escaping them would corrupt them. The liquid case is
-the genuinely unresolved one: a template is arbitrary text and can
-contain a line that IS the closer, and no escape transfers there
-because a template's newlines have to survive.
+This is applied to NUON payloads only. A nu body, a liquid template and
+a prose payload are legitimately multi-line and their newlines are
+structural rather than content, so escaping them would corrupt them.
+Their framing is guarded the other way: MarkerEscape breaks the `<|`
+introducer inside arbitrary-text content at authoring and conversion
+(the channel mirror carries the mechanics), so no legal content line
+can spell a marker, and an unescaped one in an emission is a
+carrier-discipline fault the break-early posture refuses.
 
 ## fn visible_is_empty
 
