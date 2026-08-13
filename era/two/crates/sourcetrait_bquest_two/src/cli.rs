@@ -316,6 +316,34 @@ pub(crate) enum MixCommand {
     Rip(MixRipArgs),
     /// Render a pack's rows as decoded tokens, one line per position.
     Tokens(MixTokensArgs),
+    /// Convert pool chat rows into quest-native example rows.
+    Theirs(MixTheirsArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct MixTheirsArgs {
+    /// An extracted pool-rows table (.nuon: id / source / messages).
+    #[arg(long)]
+    pub(crate) rows: PathBuf,
+    /// The converted example part (.nuon; a provenance sidecar lands
+    /// beside it).
+    #[arg(long)]
+    pub(crate) out: PathBuf,
+    /// Stop once supervised tokens cross this; the last row overshoots.
+    #[arg(long)]
+    pub(crate) budget_tokens: usize,
+    /// The window a converted example must fit (ids <= seq_len + 1).
+    #[arg(long, default_value_t = 2048)]
+    pub(crate) seq_len: usize,
+    /// The deterministic draw seed.
+    #[arg(long, default_value_t = 299_792_458)]
+    pub(crate) seed: u64,
+    /// Keep only rows that read as English (function-word share).
+    #[arg(long)]
+    pub(crate) english: bool,
+    /// Refuse rows carrying fenced code blocks (subject filter).
+    #[arg(long)]
+    pub(crate) no_code_fences: bool,
 }
 
 #[derive(Debug, clap::Args)]

@@ -17,6 +17,7 @@ pub(crate) mod taskgen;
 pub(crate) mod speculate;
 pub(crate) mod syllabus;
 pub(crate) mod tagger;
+pub(crate) mod theirs;
 #[cfg(feature = "train")]
 pub(crate) mod train;
 pub(crate) mod wordtok;
@@ -102,6 +103,7 @@ pub(crate) use crate::cli::{
     MixRenderArgs,
     MixRipArgs,
     MixSampleArgs,
+    MixTheirsArgs,
     MixTokensArgs,
     RolloutCommand,
     RolloutRunArgs,
@@ -130,6 +132,7 @@ pub(crate) use crate::mix::{
     mix_rip,
     mix_sample,
 };
+pub(crate) use crate::theirs::mix_theirs;
 pub(crate) use crate::doc::doc_cli;
 #[allow(unused_imports)]
 pub(crate) use crate::convert::{
@@ -198,4 +201,5 @@ mod tests {
     mod score;
     mod speculate;
     mod taskgen;
+    mod theirs;
 }
