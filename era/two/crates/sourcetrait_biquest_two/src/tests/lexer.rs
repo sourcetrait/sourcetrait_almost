@@ -84,8 +84,10 @@ fn bucket_sequences_match_longest_first() {
     let table = table();
     let buckets = BucketTable::new();
     // Two-space is bucket index 0, four-space index 1; heading depth
-    // 2 is index 3; the comment entries close the enumeration.
-    let pieces = boundary_pieces(&table, &buckets, "      dog   /**// ##").expect("lexes");
+    // 2 is index 3; ellipsis is 12; the comment entries close the
+    // enumeration.
+    let pieces =
+        boundary_pieces(&table, &buckets, "      dog   /**// ##...").expect("lexes");
     assert_eq!(
         kinds(&pieces),
         [
@@ -94,10 +96,11 @@ fn bucket_sequences_match_longest_first() {
             ("dog", PieceKind::Word),
             ("  ", PieceKind::Bucket(0)),
             (" ", PieceKind::Unicode),
-            ("/**", PieceKind::Bucket(18)),
-            ("//", PieceKind::Bucket(16)),
+            ("/**", PieceKind::Bucket(15)),
+            ("//", PieceKind::Bucket(13)),
             (" ", PieceKind::Unicode),
             ("##", PieceKind::Bucket(3)),
+            ("...", PieceKind::Bucket(12)),
         ]
     );
 }

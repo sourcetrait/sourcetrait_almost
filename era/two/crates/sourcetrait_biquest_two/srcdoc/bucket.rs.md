@@ -10,12 +10,16 @@ Buckets hold only semantic base units. Magnitude - indent depth, line
 length, run width - rides the REPEAT operator (lexer.rs) instead of
 depth enumerations, TheUser's correction of the first cut: enumerated
 depth families are the same disease as BPE's fossil rows, just
-smaller. What stays enumerated is what is semantic rather than
-magnitudinal: heading levels 2-6 are distinct meanings, comment
-openers are distinct constructs. `**` claims one id and serves both
-markdown bold and the comment-star pair; `__` lives in the ascii
-line family though markdown also uses it - one sequence, one id, the
-category records the primary reason.
+smaller. His second calculation, ledger-confirmed: beyond the SS pair
+nothing repetition-shaped earns a row except `    ` and `...` - the
+quads were removed and the corpus measured very slightly BETTER
+(pair-plus-REPEAT covers the 4-8 zone at one extra token, and long
+rule lines are too rare to pay for rows). What stays enumerated is
+what is semantic rather than magnitudinal: heading levels 2-6 are
+distinct meanings, comment openers are distinct constructs. `**`
+claims one id and serves both markdown bold and the comment-star
+pair; `__` lives in the ascii family though markdown also uses it -
+one sequence, one id, the category records the primary reason.
 
 ## fn Bucket::all
 

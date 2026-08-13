@@ -25,14 +25,15 @@ pub(crate) enum MarkdownBucket {
     HeadingDepth(u8),
 }
 
-/// ASCII line-drawing units over `-`, `=`, `_`, and `~`; longer
-/// lines ride REPEAT.
+/// Common ASCII sequences: line-drawing pairs and the ellipsis.
+/// Anything longer rides REPEAT - the pair is the only unit run
+/// frequency earns (TheUser's calculation, ledger-checked).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AsciiBucket {
     /// The two-character pair (`--`, `==`, `__`, `~~`).
     LinePair(char),
-    /// The four-character quad (`----`, `====`, `____`, `~~~~`).
-    LineQuad(char),
+    /// `...` - the prose ellipsis, common enough to earn its row.
+    Ellipsis,
 }
 
 /// Comment openers and closers not covered by the buckets above.
@@ -71,7 +72,7 @@ impl Bucket {
                 "#".repeat(*depth as usize)
             }
             Bucket::Ascii(AsciiBucket::LinePair(c)) => c.to_string().repeat(2),
-            Bucket::Ascii(AsciiBucket::LineQuad(c)) => c.to_string().repeat(4),
+            Bucket::Ascii(AsciiBucket::Ellipsis) => String::from("..."),
             Bucket::Comment(CommentBucket::LineComment) => String::from("//"),
             Bucket::Comment(CommentBucket::BlockOpen) => String::from("/*"),
             Bucket::Comment(CommentBucket::DocBlockOpen) => String::from("/**"),
@@ -101,8 +102,8 @@ impl Bucket {
         }
         for c in LINE_CHARS {
             entries.push(Bucket::Ascii(AsciiBucket::LinePair(c)));
-            entries.push(Bucket::Ascii(AsciiBucket::LineQuad(c)));
         }
+        entries.push(Bucket::Ascii(AsciiBucket::Ellipsis));
         entries.push(Bucket::Comment(CommentBucket::LineComment));
         entries.push(Bucket::Comment(CommentBucket::BlockOpen));
         entries.push(Bucket::Comment(CommentBucket::DocBlockOpen));
