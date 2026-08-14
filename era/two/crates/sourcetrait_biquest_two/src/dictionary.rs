@@ -3,8 +3,7 @@ use crate::*;
 
 use std::io::BufRead;
 
-use crate::lexer::PieceKind;
-use crate::lexer::boundary_pieces;
+use crate::lexer::whole_candidate_folded;
 use crate::ucd::CharacterTable;
 
 /// The vendored English word set (folded, single-piece, sorted),
@@ -50,27 +49,6 @@ struct DictionaryTally {
     refused_characters: usize,
 }
 
-/// Whether a candidate lexes as exactly one MULTI-CHARACTER word
-/// piece, case-folded.
-///
-/// Multiword, hyphenated, and apostrophe-carrying entries fail here by
-/// design: a token can never span a boundary, so such entries decompose
-/// at lex time and get no dictionary row. A single-code-point entry
-/// fails too (TheUser: dictionary entries never match Unicode code
-/// points) - the character layer already holds that row, and a
-/// duplicate would split its training mass.
-pub(crate) fn single_piece_folded(table: &CharacterTable, candidate: &str) -> Option<String> {
-    let pieces = boundary_pieces(table, candidate).ok()?;
-    if pieces.len() != 1 || pieces[0].kind != PieceKind::Word {
-        return None;
-    }
-    let folded = table.fold_str(pieces[0].text).ok()?;
-    if folded.chars().count() == 1 {
-        return None;
-    }
-    Some(folded)
-}
-
 /// `biquest tokenizer dictionary`: dump to the folded word-set artifact.
 pub(crate) fn tokenizer_dictionary(args: &TokenizerDictionaryArgs) -> BiquestResult<()> {
     let started = std::time::Instant::now();
@@ -106,7 +84,7 @@ pub(crate) fn tokenizer_dictionary(args: &TokenizerDictionaryArgs) -> BiquestRes
             }
         }
         for candidate in candidates {
-            match single_piece_folded(&table, candidate) {
+            match whole_candidate_folded(&table, candidate) {
                 Some(folded) => {
                     words.insert(folded);
                 }

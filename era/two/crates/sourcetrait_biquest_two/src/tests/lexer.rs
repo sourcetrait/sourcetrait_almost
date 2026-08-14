@@ -36,6 +36,8 @@ fn table() -> CharacterTable {
         row(0x0009, 4, true, 0x0009), // tab
         row(0x0020, 2, true, 0x0020), // space
         row(0x0023, 3, false, 0x0023), // #
+        row(0x0027, 3, false, 0x0027), // '
+        row(0x002D, 3, false, 0x002D), // -
         row(0x002E, 3, false, 0x002E), // .
         row(0x002F, 3, false, 0x002F), // /
     ];
@@ -49,8 +51,12 @@ fn table() -> CharacterTable {
     rows.push(row(0x0065, 0, false, 0x0065)); // e
     rows.push(row(0x0067, 0, false, 0x0067)); // g
     rows.push(row(0x0069, 0, false, 0x0069)); // i
+    rows.push(row(0x006E, 0, false, 0x006E)); // n
     rows.push(row(0x006F, 0, false, 0x006F)); // o
+    rows.push(row(0x0072, 0, false, 0x0072)); // r
+    rows.push(row(0x0073, 0, false, 0x0073)); // s
     rows.push(row(0x0074, 0, false, 0x0074)); // t
+    rows.push(row(0x2019, 3, false, 0x2019)); // typographic apostrophe
     CharacterTable::from_rows(rows, categories)
 }
 
@@ -231,6 +237,100 @@ fn segment_pieces_carries_folded_words_and_characters() {
             ("a", Layer::Character),
         ]
     );
+}
+
+#[test]
+fn connected_candidates_hit_whole_via_the_dictionary() {
+    let table = table();
+    let buckets = BucketTable::new();
+    let admitted = vec![
+        String::from("don't"),
+        String::from("dog-ear"),
+        String::from("dog"),
+    ];
+    let segmenter = Segmenter::new(&table, &buckets, &admitted);
+    let dictionary_offset =
+        CHARACTER_OFFSET + table.assigned_count() as u32 + buckets.count() as u32;
+    let tokens = segmenter.segment("don't dog-ear").expect("segments");
+    let shape: Vec<(u32, Layer)> = tokens.iter().map(|t| (t.id, t.layer)).collect();
+    assert_eq!(
+        shape,
+        [
+            (dictionary_offset, Layer::Dictionary), // don't, whole
+            (CHARACTER_OFFSET + char_index(&table, ' '), Layer::Character),
+            (dictionary_offset + 1, Layer::Dictionary), // dog-ear, whole
+        ]
+    );
+}
+
+#[test]
+fn edge_apostrophes_ride_the_ladder() {
+    let table = table();
+    let buckets = BucketTable::new();
+    let admitted = vec![String::from("'tis"), String::from("dog")];
+    let segmenter = Segmenter::new(&table, &buckets, &admitted);
+    // The full candidate with its edge hits: one row.
+    let tokens = segmenter.segment("'tis").expect("segments");
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].layer, Layer::Dictionary);
+    // A quoted word misses whole, hits its core: the edges fall to
+    // character tokens around the row.
+    let tokens = segmenter.segment("'dog'").expect("segments");
+    let layers: Vec<Layer> = tokens.iter().map(|t| t.layer).collect();
+    assert_eq!(layers, [Layer::Character, Layer::Dictionary, Layer::Character]);
+}
+
+#[test]
+fn candidate_misses_split_to_parts_with_surfaces_kept() {
+    let table = table();
+    let buckets = BucketTable::new();
+    let admitted = vec![String::from("dog")];
+    let segmenter = Segmenter::new(&table, &buckets, &admitted);
+    // The possessive misses whole and per-part resolution takes over;
+    // the typographic apostrophe keeps its own SURFACE row on a miss.
+    let pairs = segmenter.segment_pieces("Dog\u{2019}s").expect("segments");
+    let texts: Vec<(&str, Layer)> = pairs
+        .iter()
+        .map(|(token, text)| (text.as_str(), token.layer))
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            ("dog", Layer::Dictionary),
+            ("\u{2019}", Layer::Character),
+            ("s", Layer::Character),
+        ]
+    );
+    assert_eq!(
+        pairs[1].0.id,
+        CHARACTER_OFFSET + char_index(&table, '\u{2019}')
+    );
+}
+
+#[test]
+fn typographic_apostrophes_normalize_on_a_hit() {
+    let table = table();
+    let buckets = BucketTable::new();
+    let admitted = vec![String::from("don't")];
+    let segmenter = Segmenter::new(&table, &buckets, &admitted);
+    let pairs = segmenter.segment_pieces("don\u{2019}t").expect("segments");
+    assert_eq!(pairs.len(), 1);
+    assert_eq!(pairs[0].0.layer, Layer::Dictionary);
+    // The row identity is the normalized ASCII form.
+    assert_eq!(pairs[0].1, "don't");
+}
+
+#[test]
+fn leading_hyphens_never_glue_and_still_pair_into_rows() {
+    let table = table();
+    let buckets = BucketTable::new();
+    let admitted = vec![String::from("dog")];
+    let segmenter = Segmenter::new(&table, &buckets, &admitted);
+    // "--dog": hyphens are not edge extenders, so they stay character
+    // tokens - and the run encoder still pairs them into their row.
+    let tokens = segmenter.segment("--dog").expect("segments");
+    let layers: Vec<Layer> = tokens.iter().map(|t| t.layer).collect();
+    assert_eq!(layers, [Layer::Bucket, Layer::Dictionary]);
 }
 
 #[test]

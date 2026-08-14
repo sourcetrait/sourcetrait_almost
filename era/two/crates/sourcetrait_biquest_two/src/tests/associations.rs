@@ -31,8 +31,8 @@ fn table() -> CharacterTable {
         row(0x002D, 3, false, 0x002D), // hyphen
         row(0x0044, 1, false, 0x0064), // D -> d
     ];
-    for lower in [0x0061, 0x0062, 0x0064, 0x0065, 0x0067, 0x006B, 0x006F, 0x0073] {
-        rows.push(row(lower, 0, false, lower)); // a b d e g k o s
+    for lower in [0x0061, 0x0062, 0x0064, 0x0065, 0x0067, 0x006B, 0x006F, 0x0072, 0x0073] {
+        rows.push(row(lower, 0, false, lower)); // a b d e g k o r s
     }
     CharacterTable::from_rows(rows, categories)
 }
@@ -66,14 +66,16 @@ fn absorb_collects_words_definitions_and_form_links() {
             "senses":[{"glosses":["A domesticated canid."]}]}"#,
     ));
     assert!(side.words.contains("dog") && side.words.contains("dogs"));
-    // The hyphenated form is not single-piece: no word, no link.
-    assert!(!side.words.contains("dog-eared"));
+    // The hyphenated form is a connected candidate now: the
+    // dictionary decides, so it earns a row and a link.
+    assert!(side.words.contains("dog-eared"));
     assert_eq!(
         side.definitions[&(String::from("dog"), String::from("noun"))],
         [String::from("A domesticated canid.")]
     );
     assert!(side.links.contains(&(String::from("dogs"), String::from("dog"))));
-    assert_eq!(side.tally.links_from_forms, 1);
+    assert!(side.links.contains(&(String::from("dog-eared"), String::from("dog"))));
+    assert_eq!(side.tally.links_from_forms, 2);
 }
 
 #[test]

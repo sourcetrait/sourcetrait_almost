@@ -62,20 +62,43 @@ explicit tokens. Digit runs ride the Word class, so an
 out-of-dictionary number falls to digit-per-character; lexed numeric
 literals remain an open decision recorded in the campaign.
 
+## fn candidate_items / fn assemble_candidate
+
+TheUser's dictionary-decides design: the walk PROPOSES connected
+candidates and the dictionary disposes. A word run extends across
+internal connectors - hyphen and apostrophe, each with word
+characters on both sides - and takes at most one edge apostrophe per
+side (hyphens never edge-extend, which is what keeps `--flag`
+prefixes on their keyboard rows). U+2019 normalizes to ASCII
+apostrophe in the lookup forms; every part keeps its SURFACE beside
+its folded form, because a miss must fall back to exactly the
+pre-design tokens - the typographic apostrophe keeps its own
+character row when nothing matched it. The internal loop consumes
+every word-flanked apostrophe first, so the trailing-edge check
+cannot steal an internal connector.
+
+`whole_candidate_folded` is the extraction filter the dictionary and
+associations passes share: an entry is admissible when its text is
+exactly one candidate of more than one code point - the
+single-code-point rule is the ONLY removal, and multiword entries
+stay structurally unreachable because a space is never a connector.
+
 ## struct Segmenter
 
-### fn segment / fn segment_pieces
+### fn segment / fn segment_pieces / fn raw_tokens
 
-A word piece resolves whole: fold, dictionary lookup, else its
-character split. There is no partial or longest-prefix match inside a
-piece - inflected forms are expected to be dictionary entries
-themselves (wiktextract forms ride along). Unicode pieces go straight
-to the character layer; the dictionary can never hit one because
-admission (dictionary.rs) only accepts single word-piece candidates,
-so the lookup is skipped rather than run dead on gigabytes.
-segment_pieces is the same walk keeping each token's text (a
-dictionary token's text is the FOLDED row identity, not the surface
-spelling) for display surfaces.
+Resolution is the longest-first ladder of cheap lookups: the full
+candidate as one row; on a miss with edges, the core with the edge
+apostrophes as character tokens; on a core miss, each word part
+resolves whole-or-char-split and connectors take their character
+rows. Nothing regresses on a miss by construction - the parts rung
+IS the pre-design behavior. There is still no partial or
+longest-prefix match inside a word run; inflected forms are entries
+themselves. The segmenter consults whatever word set it was built
+with (admitted in production, the embedded full set on the test
+surface) - the ladder is dictionary-agnostic. segment_pieces keeps
+each token's text: a dictionary token's text is the FOLDED,
+apostrophe-normalized row identity, not the surface spelling.
 
 Case is folded at lookup and the emitted id is the folded row: the
 surface-case round-trip (marker token, renderer rule, or lossy) is an

@@ -195,6 +195,10 @@ pub(crate) struct TokenizerCensusArgs {
     /// Corpus files or trees, walked sorted.
     #[arg(long, required = true, num_args = 1..)]
     pub(crate) roots: Vec<PathBuf>,
+    /// The full dictionary word set: the census counts what would
+    /// tokenize, so it needs the tokenizer's decision surface.
+    #[arg(long)]
+    pub(crate) words: PathBuf,
     /// The type-count artifact: word, tab, count; census order.
     #[arg(long)]
     pub(crate) out: PathBuf,

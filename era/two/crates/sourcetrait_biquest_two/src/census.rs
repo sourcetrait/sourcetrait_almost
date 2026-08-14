@@ -2,8 +2,9 @@
 use crate::*;
 
 use crate::dictionary::read_words;
-use crate::lexer::PieceKind;
-use crate::lexer::boundary_pieces;
+use crate::lexer::CandidateItem;
+use crate::lexer::CorePart;
+use crate::lexer::candidate_items;
 use crate::ucd::CharacterTable;
 
 /// Recursively collect the files under a root, sorted; a file passes
@@ -48,11 +49,15 @@ pub(crate) struct CensusTally {
     pub(crate) refused: Vec<(PathBuf, String)>,
 }
 
-/// Count folded word types across the corpus files. A file the lexer
-/// refuses is skipped whole and recorded; measurement never ingests a
-/// file the trainer would refuse.
+/// Count word types across the corpus files, counting what would
+/// TOKENIZE (TheUser's design): a candidate the full dictionary
+/// holds counts whole; an edged candidate whose core it holds counts
+/// the core; else each word part counts. A file the lexer refuses is
+/// skipped whole and recorded; measurement never ingests a file the
+/// trainer would refuse.
 pub(crate) fn census_counts(
     table: &CharacterTable,
+    words: &HashSet<String>,
     files: &[PathBuf],
 ) -> BiquestResult<(HashMap<String, u64>, CensusTally)> {
     let mut counts: HashMap<String, u64> = HashMap::new();
@@ -62,8 +67,8 @@ pub(crate) fn census_counts(
             Ok(text) => text,
             Err(e) => snafu::whatever!("read {} failed (corpus is utf-8): {e}", path.display()),
         };
-        let pieces = match boundary_pieces(table, &text) {
-            Ok(pieces) => pieces,
+        let items = match candidate_items(table, &text) {
+            Ok(items) => items,
             Err(e) => {
                 tally.refused.push((path.clone(), e.to_string()));
                 continue;
@@ -71,21 +76,34 @@ pub(crate) fn census_counts(
         };
         tally.files += 1;
         tally.text_bytes += text.len();
-        for piece in pieces {
-            match piece.kind {
-                PieceKind::Word => {
-                    tally.word_pieces += 1;
-                    let folded = match table.fold_str(piece.text) {
-                        Ok(folded) => folded,
-                        Err(c) => snafu::whatever!(
-                            "{}: ingestion refusal: unassigned U+{:04X}",
-                            path.display(),
-                            c as u32
-                        ),
-                    };
-                    *counts.entry(folded).or_insert(0) += 1;
+        for item in items {
+            let candidate = match item {
+                CandidateItem::Plain(piece_text) => {
+                    tally.unicode_chars += piece_text.chars().count();
+                    continue;
                 }
-                PieceKind::Unicode => tally.unicode_chars += 1,
+                CandidateItem::Candidate(candidate) => candidate,
+            };
+            let edges = usize::from(candidate.leading.is_some())
+                + usize::from(candidate.trailing.is_some());
+            if words.contains(&candidate.full) {
+                tally.word_pieces += 1;
+                *counts.entry(candidate.full).or_insert(0) += 1;
+            } else if edges > 0 && words.contains(&candidate.core) {
+                tally.word_pieces += 1;
+                tally.unicode_chars += edges;
+                *counts.entry(candidate.core).or_insert(0) += 1;
+            } else {
+                tally.unicode_chars += edges;
+                for part in candidate.parts {
+                    match part {
+                        CorePart::Word { folded, .. } => {
+                            tally.word_pieces += 1;
+                            *counts.entry(folded).or_insert(0) += 1;
+                        }
+                        CorePart::Connector { .. } => tally.unicode_chars += 1,
+                    }
+                }
             }
         }
     }
@@ -122,8 +140,9 @@ fn ordered(counts: &HashMap<String, u64>) -> Vec<(&String, u64)> {
 pub(crate) fn tokenizer_census(args: &TokenizerCensusArgs) -> BiquestResult<()> {
     let started = std::time::Instant::now();
     let table = CharacterTable::embedded()?;
+    let words = read_words(&args.words)?;
     let files = corpus_files(&args.roots)?;
-    let (counts, tally) = census_counts(&table, &files)?;
+    let (counts, tally) = census_counts(&table, &words, &files)?;
 
     let rows = ordered(&counts);
     let mut payload = String::with_capacity(rows.len() * 16);
@@ -146,6 +165,7 @@ pub(crate) fn tokenizer_census(args: &TokenizerCensusArgs) -> BiquestResult<()> 
                 args.roots.iter().map(|p| v_str(&p.display().to_string())).collect(),
                 span(),
             ),
+            "words" => v_str(&args.words.display().to_string()),
             "files" => v_int(tally.files as i64),
             "text_bytes" => v_int(tally.text_bytes as i64),
             "word_pieces" => v_int(tally.word_pieces as i64),

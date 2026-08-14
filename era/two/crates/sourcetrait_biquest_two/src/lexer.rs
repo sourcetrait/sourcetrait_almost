@@ -1,5 +1,6 @@
-//! The Quill content lexer: dictionary hit or character split, nothing
-//! between; repetition rides banded operators and keyboard rows.
+//! The Quill content lexer: connected candidates resolved by the
+//! dictionary - full, then core, then parts - with repetition riding
+//! banded operators and keyboard rows.
 use crate::*;
 
 use crate::bucket::BucketTable;
@@ -88,6 +89,175 @@ pub(crate) fn boundary_pieces<'a>(
         pieces.push(Piece { text: &text[start..], kind: PieceKind::Word });
     }
     Ok(pieces)
+}
+
+/// A connector's normalized form when word characters flank it: the
+/// hyphen, and the apostrophe with U+2019 folding to ASCII.
+fn connector_normalized(c: char) -> Option<char> {
+    match c {
+        '-' => Some('-'),
+        '\'' | '\u{2019}' => Some('\''),
+        _ => None,
+    }
+}
+
+/// An apostrophe surface, edge-extension eligible (U+2019 included).
+fn is_apostrophe(c: char) -> bool {
+    matches!(c, '\'' | '\u{2019}')
+}
+
+/// One core part of a candidate: a word run (folded lookup form
+/// beside its surface) or an internal connector (normalized beside
+/// its surface).
+pub(crate) enum CorePart<'a> {
+    Word { folded: String, surface: &'a str },
+    Connector { normalized: char, surface: char },
+}
+
+/// One connected dictionary-lookup candidate (TheUser's design):
+/// word parts joined by internal connectors, with at most one edge
+/// apostrophe per side. `full` and `core` carry the folded,
+/// apostrophe-normalized lookup forms; surfaces survive for the
+/// miss fallbacks.
+pub(crate) struct ConnectedCandidate<'a> {
+    pub(crate) full: String,
+    pub(crate) core: String,
+    pub(crate) leading: Option<char>,
+    pub(crate) trailing: Option<char>,
+    pub(crate) parts: Vec<CorePart<'a>>,
+}
+
+/// One item of the candidate walk: a candidate, or one plain
+/// Unicode-class character.
+pub(crate) enum CandidateItem<'a> {
+    Candidate(ConnectedCandidate<'a>),
+    Plain(&'a str),
+}
+
+fn fold_word_piece(table: &CharacterTable, piece: &Piece<'_>) -> BiquestResult<String> {
+    match table.fold_str(piece.text) {
+        Ok(folded) => Ok(folded),
+        Err(c) => snafu::whatever!(
+            "ingestion refusal: unassigned code point U+{:04X}",
+            c as u32
+        ),
+    }
+}
+
+/// Assemble one candidate from a piece slice; returns it and how
+/// many pieces it consumed.
+fn assemble_candidate<'a>(
+    table: &CharacterTable,
+    pieces: &[Piece<'a>],
+) -> BiquestResult<(ConnectedCandidate<'a>, usize)> {
+    let mut cursor = 0usize;
+    let mut leading = None;
+    if pieces[0].kind == PieceKind::Unicode {
+        leading = pieces[0].text.chars().next();
+        cursor = 1;
+    }
+    let mut parts: Vec<CorePart<'a>> = vec![CorePart::Word {
+        folded: fold_word_piece(table, &pieces[cursor])?,
+        surface: pieces[cursor].text,
+    }];
+    cursor += 1;
+    loop {
+        let connector = pieces.get(cursor).and_then(|piece| {
+            if piece.kind != PieceKind::Unicode {
+                return None;
+            }
+            let c = piece.text.chars().next()?;
+            connector_normalized(c).map(|normalized| (c, normalized))
+        });
+        let Some((surface, normalized)) = connector else { break };
+        let Some(next) = pieces.get(cursor + 1) else { break };
+        if next.kind != PieceKind::Word {
+            break;
+        }
+        parts.push(CorePart::Connector { normalized, surface });
+        parts.push(CorePart::Word {
+            folded: fold_word_piece(table, next)?,
+            surface: next.text,
+        });
+        cursor += 2;
+    }
+    let mut trailing = None;
+    if let Some(piece) = pieces.get(cursor)
+        && piece.kind == PieceKind::Unicode
+        && piece.text.chars().next().is_some_and(is_apostrophe)
+    {
+        // The internal loop consumed every word-flanked apostrophe,
+        // so this one has no word after it: a trailing edge.
+        trailing = piece.text.chars().next();
+        cursor += 1;
+    }
+    let core: String = parts
+        .iter()
+        .map(|part| match part {
+            CorePart::Word { folded, .. } => folded.clone(),
+            CorePart::Connector { normalized, .. } => normalized.to_string(),
+        })
+        .collect();
+    let mut full = String::new();
+    if leading.is_some() {
+        full.push('\'');
+    }
+    full.push_str(&core);
+    if trailing.is_some() {
+        full.push('\'');
+    }
+    Ok((ConnectedCandidate { full, core, leading, trailing, parts }, cursor))
+}
+
+/// The candidate walk over boundary pieces: word runs extend across
+/// internal connectors and take a single edge apostrophe; everything
+/// else passes as plain characters. The dictionary decides what
+/// stays whole - this walk only proposes.
+pub(crate) fn candidate_items<'a>(
+    table: &CharacterTable,
+    text: &'a str,
+) -> BiquestResult<Vec<CandidateItem<'a>>> {
+    let pieces = boundary_pieces(table, text)?;
+    let mut items = Vec::new();
+    let mut index = 0usize;
+    while index < pieces.len() {
+        let piece = &pieces[index];
+        let leading_here = piece.kind == PieceKind::Unicode
+            && piece.text.chars().next().is_some_and(is_apostrophe)
+            && pieces
+                .get(index + 1)
+                .is_some_and(|next| next.kind == PieceKind::Word);
+        if piece.kind == PieceKind::Word || leading_here {
+            let (candidate, consumed) = assemble_candidate(table, &pieces[index..])?;
+            items.push(CandidateItem::Candidate(candidate));
+            index += consumed;
+        } else {
+            items.push(CandidateItem::Plain(piece.text));
+            index += 1;
+        }
+    }
+    Ok(items)
+}
+
+/// An entry admissible as ONE dictionary row: its text is exactly
+/// one connected candidate of more than one code point. The only
+/// removal beyond reachability is the single-code-point rule
+/// (TheUser); the returned form is the folded, normalized full text.
+pub(crate) fn whole_candidate_folded(
+    table: &CharacterTable,
+    candidate: &str,
+) -> Option<String> {
+    let items = candidate_items(table, candidate).ok()?;
+    let mut iterator = items.into_iter();
+    let (Some(CandidateItem::Candidate(connected)), None) =
+        (iterator.next(), iterator.next())
+    else {
+        return None;
+    };
+    if connected.full.chars().count() == 1 {
+        return None;
+    }
+    Some(connected.full)
 }
 
 /// Which layer resolved a token; the id spells it too, this names it.
@@ -253,27 +423,65 @@ impl<'a> Segmenter<'a> {
         Ok(out)
     }
 
-    /// The raw piece resolution, before the REPEAT collapse.
+    /// The raw resolution, before the REPEAT collapse: the candidate
+    /// ladder - full, then core with edge apostrophes as characters,
+    /// then parts - with cheap dictionary lookups deciding each rung.
     fn raw_tokens(&self, text: &str, keep_text: bool) -> BiquestResult<Vec<(Token, String)>> {
-        let mut tokens = Vec::new();
-        for piece in boundary_pieces(self.table, text)? {
-            if piece.kind == PieceKind::Word {
-                let folded = match self.table.fold_str(piece.text) {
-                    Ok(folded) => folded,
-                    Err(c) => snafu::whatever!(
-                        "ingestion refusal: unassigned code point U+{:04X}",
-                        c as u32
-                    ),
-                };
-                if let Some(&id) = self.word_ids.get(&folded) {
-                    let kept = if keep_text { folded } else { String::new() };
-                    tokens.push((Token { id, layer: Layer::Dictionary }, kept));
+        let mut tokens: Vec<(Token, String)> = Vec::new();
+        let push_char = |tokens: &mut Vec<(Token, String)>, c: char| -> BiquestResult<()> {
+            let kept = if keep_text { c.to_string() } else { String::new() };
+            tokens.push((self.character_token(c)?, kept));
+            Ok(())
+        };
+        for item in candidate_items(self.table, text)? {
+            let candidate = match item {
+                CandidateItem::Plain(piece_text) => {
+                    for c in piece_text.chars() {
+                        push_char(&mut tokens, c)?;
+                    }
                     continue;
                 }
+                CandidateItem::Candidate(candidate) => candidate,
+            };
+            if let Some(&id) = self.word_ids.get(&candidate.full) {
+                let kept = if keep_text { candidate.full } else { String::new() };
+                tokens.push((Token { id, layer: Layer::Dictionary }, kept));
+                continue;
             }
-            for c in piece.text.chars() {
-                let kept = if keep_text { c.to_string() } else { String::new() };
-                tokens.push((self.character_token(c)?, kept));
+            let edged = candidate.leading.is_some() || candidate.trailing.is_some();
+            if edged && let Some(&id) = self.word_ids.get(&candidate.core) {
+                if let Some(c) = candidate.leading {
+                    push_char(&mut tokens, c)?;
+                }
+                let kept = if keep_text { candidate.core } else { String::new() };
+                tokens.push((Token { id, layer: Layer::Dictionary }, kept));
+                if let Some(c) = candidate.trailing {
+                    push_char(&mut tokens, c)?;
+                }
+                continue;
+            }
+            if let Some(c) = candidate.leading {
+                push_char(&mut tokens, c)?;
+            }
+            for part in candidate.parts {
+                match part {
+                    CorePart::Word { folded, surface } => {
+                        if let Some(&id) = self.word_ids.get(&folded) {
+                            let kept = if keep_text { folded } else { String::new() };
+                            tokens.push((Token { id, layer: Layer::Dictionary }, kept));
+                        } else {
+                            for c in surface.chars() {
+                                push_char(&mut tokens, c)?;
+                            }
+                        }
+                    }
+                    CorePart::Connector { surface, .. } => {
+                        push_char(&mut tokens, surface)?;
+                    }
+                }
+            }
+            if let Some(c) = candidate.trailing {
+                push_char(&mut tokens, c)?;
             }
         }
         Ok(tokens)

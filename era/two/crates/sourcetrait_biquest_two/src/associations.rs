@@ -6,7 +6,7 @@ use std::io::BufRead;
 use std::io::Write;
 
 use crate::bucket::BucketTable;
-use crate::dictionary::single_piece_folded;
+use crate::lexer::whole_candidate_folded;
 use crate::lexer::BEGIN_REPEAT_ALIAS;
 use crate::lexer::END_REPEAT_ALIAS;
 use crate::lexer::KEYWORD_BEGIN_REPEAT;
@@ -146,13 +146,13 @@ impl<'a> DumpSide<'a> {
         let headword = entry
             .word
             .as_deref()
-            .and_then(|word| single_piece_folded(self.table, word));
+            .and_then(|word| whole_candidate_folded(self.table, word));
         if let Some(word) = &headword {
             self.words.insert(word.clone());
         }
         for form in &entry.forms {
             let Some(form) = &form.form else { continue };
-            let Some(folded) = single_piece_folded(self.table, form) else {
+            let Some(folded) = whole_candidate_folded(self.table, form) else {
                 continue;
             };
             self.words.insert(folded.clone());
@@ -174,7 +174,7 @@ impl<'a> DumpSide<'a> {
             }
             for form_of in &sense.form_of {
                 let Some(lemma) = &form_of.word else { continue };
-                let Some(lemma) = single_piece_folded(self.table, lemma) else {
+                let Some(lemma) = whole_candidate_folded(self.table, lemma) else {
                     continue;
                 };
                 if lemma != word && self.links.insert((word.clone(), lemma)) {
