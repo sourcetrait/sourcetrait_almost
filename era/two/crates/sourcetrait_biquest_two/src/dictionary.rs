@@ -46,20 +46,29 @@ struct DictionaryTally {
     headwords_seen: usize,
     forms_seen: usize,
     not_single_piece: usize,
+    single_code_point: usize,
     refused_characters: usize,
 }
 
-/// Whether a candidate lexes as exactly one word piece, case-folded.
+/// Whether a candidate lexes as exactly one MULTI-CHARACTER word
+/// piece, case-folded.
 ///
 /// Multiword, hyphenated, and apostrophe-carrying entries fail here by
 /// design: a token can never span a boundary, so such entries decompose
-/// at lex time and get no dictionary row.
+/// at lex time and get no dictionary row. A single-code-point entry
+/// fails too (TheUser: dictionary entries never match Unicode code
+/// points) - the character layer already holds that row, and a
+/// duplicate would split its training mass.
 pub(crate) fn single_piece_folded(table: &CharacterTable, candidate: &str) -> Option<String> {
     let pieces = boundary_pieces(table, candidate).ok()?;
     if pieces.len() != 1 || pieces[0].kind != PieceKind::Word {
         return None;
     }
-    table.fold_str(pieces[0].text).ok()
+    let folded = table.fold_str(pieces[0].text).ok()?;
+    if folded.chars().count() == 1 {
+        return None;
+    }
+    Some(folded)
 }
 
 /// `biquest tokenizer dictionary`: dump to the folded word-set artifact.
@@ -104,6 +113,8 @@ pub(crate) fn tokenizer_dictionary(args: &TokenizerDictionaryArgs) -> BiquestRes
                 None => {
                     if candidate.chars().any(|c| table.index_of(c as u32).is_none()) {
                         tally.refused_characters += 1;
+                    } else if candidate.chars().count() == 1 {
+                        tally.single_code_point += 1;
                     } else {
                         tally.not_single_piece += 1;
                     }
@@ -139,6 +150,7 @@ pub(crate) fn tokenizer_dictionary(args: &TokenizerDictionaryArgs) -> BiquestRes
             "headwords_seen" => v_int(tally.headwords_seen as i64),
             "forms_seen" => v_int(tally.forms_seen as i64),
             "not_single_piece" => v_int(tally.not_single_piece as i64),
+            "single_code_point" => v_int(tally.single_code_point as i64),
             "refused_characters" => v_int(tally.refused_characters as i64),
             "words" => v_int(words.len() as i64),
             "biquest_version" => v_str(env!("CARGO_PKG_VERSION")),

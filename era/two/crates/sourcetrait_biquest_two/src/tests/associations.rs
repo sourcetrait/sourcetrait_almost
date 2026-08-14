@@ -113,6 +113,22 @@ fn headwords_fold_and_multiword_headwords_drop() {
 }
 
 #[test]
+fn single_code_point_entries_are_excluded_whole() {
+    let table = table();
+    let mut side = DumpSide::new(&table);
+    // The character layer already holds "d"; no word, no definition,
+    // and a single-letter form earns no row or link either.
+    side.absorb(&entry(
+        r#"{"word":"d","lang_code":"en","pos":"noun",
+            "senses":[{"glosses":["The letter d."]}],
+            "forms":[{"form":"o"}]}"#,
+    ));
+    assert!(side.words.is_empty());
+    assert!(side.definitions.is_empty());
+    assert!(side.links.is_empty());
+}
+
+#[test]
 fn non_english_entries_are_skipped_whole() {
     let table = table();
     let mut side = DumpSide::new(&table);

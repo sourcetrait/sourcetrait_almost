@@ -12,7 +12,13 @@ candidate must lex as exactly one Word piece under the character
 table, so multiword entries ("give up"), hyphenations ("well-being"),
 and apostrophe forms ("don't") are excluded - the lexer can never
 match a token across a boundary, so a row for one would be
-unreachable. The filter (`single_piece_folded`) is shared with the
+unreachable. A single-code-point entry is excluded too (TheUser's
+ruling: dictionary entries never match Unicode code points) - the
+character layer already holds that row, a duplicate would split its
+training mass, and the token count is identical either way since a
+one-character piece is one token on both paths. This is also what
+keeps numerals like "2" out of the dictionary, so digit pieces
+char-split. The filter (`single_piece_folded`) is shared with the
 associations pass, which is what keeps the store's word set
 identical to this artifact's. Those entries decompose at lex time instead, by design.
 Inflected forms are admitted as their own words ("dogs" beside "dog"),
