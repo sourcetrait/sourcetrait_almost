@@ -573,6 +573,33 @@ fn derived_aliases_and_the_definition_rescue_arms_render() {
 }
 
 #[test]
+fn nested_subsenses_render_with_depth_numbering() {
+    let text = "==English==\n\n===Noun===\n{{en-noun}}\n\n# A [[gentle]] incline.\n## {{lb|en|geomorphology}} A sloping landform.\n## {{lb|en|military}}\n### A fortification incline.\n###: {{syn|en|talus}}\n### An armour plate.\n## {{lb|en|post}} A mail sorter.\n# A second sense.\n";
+    let document = render_word_document(&[page("glacis", text)]).expect("render");
+    let expected = [
+        "1. A [gentle] incline.",
+        "   1. (geomorphology) A sloping landform.",
+        "   2. (military)",
+        "      1. A fortification incline.",
+        "      2. An armour plate.",
+        "   3. (post) A mail sorter.",
+        "2. A second sense.",
+    ];
+    for line in expected {
+        assert!(
+            document.markdown.contains(line),
+            "missing {line:?} in: {}",
+            document.markdown
+        );
+    }
+    assert!(document.markdown.contains("- [talus]"));
+    assert!(document
+        .audit
+        .iter()
+        .all(|row| row.class != "list_line_dropped"));
+}
+
+#[test]
 fn silent_metadata_files_no_audit_anywhere() {
     let text = "==English==\n\n===Etymology===\n{{root|en|ine-pro|*bher-}}\nFrom use.\n\n===Noun===\n{{en-noun}}\n\n# A sense. {{C|en|Dogs}}\n\n{{cln|en|nouns}}\n\n====Synonyms====\n{{topics|en|animals}}\n* {{l|en|hound}}\n";
     let document = render_word_document(&[page("dog", text)]).expect("render");

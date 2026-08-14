@@ -3953,51 +3953,47 @@ fn render_pos(renderer: &mut Renderer<'_>, section: &Section<'_>, level: usize) 
         renderer.lines.push(parenthetical);
         renderer.lines.push(String::new());
     }
-    let mut number = 0usize;
+    // Gloss lines nest: `##`/`###` are subsenses of the sense above
+    // (glacis holds its military senses two deep), so a per-depth
+    // counter stack numbers them and the indentation carries the
+    // nesting. Sense lines (`:`) and quote lines (`*`) attach at any
+    // depth.
+    let mut counters: Vec<usize> = Vec::new();
     let mut synonyms: Vec<String> = Vec::new();
     let mut antonyms: Vec<String> = Vec::new();
     for block in &section.blocks {
         let Block::ListItem { markers, content } = block else { continue };
-        match markers.as_str() {
-            "#" => {
-                number += 1;
-                let text = renderer.inline_text(content);
-                renderer.lines.push(format!("{number}. {text}"));
+        let depth = markers.chars().take_while(|c| *c == '#').count();
+        let suffix = &markers[depth..];
+        if depth == 0 {
+            let text = renderer.inline_text(content);
+            renderer.audit("list_line_dropped", text);
+            continue;
+        }
+        if suffix.is_empty() {
+            counters.truncate(depth);
+            while counters.len() < depth {
+                counters.push(0);
             }
-            "#:" => {
-                for inline in content {
-                    let Inline::Template(template) = inline else { continue };
-                    match template.name.as_str() {
-                        "syn" | "synonyms" => {
-                            collect_sense_items(renderer, template, &mut synonyms)
-                        }
-                        "ant" | "antonyms" => {
-                            collect_sense_items(renderer, template, &mut antonyms)
-                        }
-                        "ux" | "uxi" | "usex" => {
-                            let text = template
-                                .positional
-                                .get(1)
-                                .cloned()
-                                .unwrap_or_default();
-                            let rendered = renderer.argument_text(&text);
-                            if !rendered.is_empty() {
-                                renderer.lines.push(format!("   - \"{rendered}\""));
-                            }
-                        }
-                        name if is_silent_template(name) => {}
-                        other => renderer.audit("sense_line_dropped", other.to_string()),
+            counters[depth - 1] += 1;
+            let number = counters[depth - 1];
+            let indent = "   ".repeat(depth - 1);
+            let text = renderer.inline_text(content);
+            renderer.lines.push(format!("{indent}{number}. {text}"));
+            continue;
+        }
+        let attach_indent = "   ".repeat(depth);
+        if suffix.chars().all(|c| c == ':') {
+            for inline in content {
+                let Inline::Template(template) = inline else { continue };
+                match template.name.as_str() {
+                    "syn" | "synonyms" => {
+                        collect_sense_items(renderer, template, &mut synonyms)
                     }
-                }
-            }
-            "#*" => {
-                for inline in content {
-                    let Inline::Template(template) = inline else { continue };
-                    if template.name.starts_with("quote-") {
-                        if let Some(citation) = renderer.citation_text(template) {
-                            renderer.lines.push(format!("   - {citation}"));
-                        }
-                    } else if matches!(template.name.as_str(), "ux" | "uxi" | "usex") {
+                    "ant" | "antonyms" => {
+                        collect_sense_items(renderer, template, &mut antonyms)
+                    }
+                    "ux" | "uxi" | "usex" => {
                         let text = template
                             .positional
                             .get(1)
@@ -4005,18 +4001,44 @@ fn render_pos(renderer: &mut Renderer<'_>, section: &Section<'_>, level: usize) 
                             .unwrap_or_default();
                         let rendered = renderer.argument_text(&text);
                         if !rendered.is_empty() {
-                            renderer.lines.push(format!("   - \"{rendered}\""));
+                            renderer
+                                .lines
+                                .push(format!("{attach_indent}- \"{rendered}\""));
                         }
-                    } else {
-                        renderer.audit("quote_line_dropped", template.name.clone());
                     }
+                    name if is_silent_template(name) => {}
+                    other => renderer.audit("sense_line_dropped", other.to_string()),
                 }
             }
-            _ => {
-                let text = renderer.inline_text(content);
-                renderer.audit("list_line_dropped", text);
-            }
+            continue;
         }
+        if suffix.contains('*') {
+            for inline in content {
+                let Inline::Template(template) = inline else { continue };
+                if template.name.starts_with("quote-") {
+                    if let Some(citation) = renderer.citation_text(template) {
+                        renderer.lines.push(format!("{attach_indent}- {citation}"));
+                    }
+                } else if matches!(template.name.as_str(), "ux" | "uxi" | "usex") {
+                    let text = template
+                        .positional
+                        .get(1)
+                        .cloned()
+                        .unwrap_or_default();
+                    let rendered = renderer.argument_text(&text);
+                    if !rendered.is_empty() {
+                        renderer
+                            .lines
+                            .push(format!("{attach_indent}- \"{rendered}\""));
+                    }
+                } else {
+                    renderer.audit("quote_line_dropped", template.name.clone());
+                }
+            }
+            continue;
+        }
+        let text = renderer.inline_text(content);
+        renderer.audit("list_line_dropped", text);
     }
     if !synonyms.is_empty() {
         renderer.heading(level + 1, "Synonyms");
