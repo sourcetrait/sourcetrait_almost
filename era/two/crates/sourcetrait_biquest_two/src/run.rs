@@ -25,7 +25,9 @@ pub fn run() {
             TrainerCommand::Train(args) => trainer_train(args),
         },
         Command::Wikimedia { command } => match command {
+            WikimediaCommand::Normalize(args) => wikimedia_normalize(args),
             WikimediaCommand::Page(args) => wikimedia_page(args),
+            WikimediaCommand::Parse(args) => wikimedia_parse(args),
         },
     };
     if let Err(error) = outcome {

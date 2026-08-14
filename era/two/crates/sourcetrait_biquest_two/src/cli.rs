@@ -60,8 +60,36 @@ pub(crate) enum Command {
 
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum WikimediaCommand {
+    /// The ruled typography normalization over text or a file.
+    Normalize(WikimediaNormalizeArgs),
     /// One page's wikitext from an export save or a dump.
     Page(WikimediaPageArgs),
+    /// One page's parsed block tree, as a NUON table.
+    Parse(WikimediaParseArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct WikimediaNormalizeArgs {
+    /// The text to normalize; --file supplies it instead.
+    pub(crate) text: Option<String>,
+    /// Read the text from a file.
+    #[arg(long)]
+    pub(crate) file: Option<PathBuf>,
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct WikimediaParseArgs {
+    /// The exact page title (enwiktionary ns0 is case-sensitive).
+    #[arg(long)]
+    pub(crate) title: String,
+    /// The page source: an export .xml or a pages-articles dump
+    /// (.xml.bz2), streamed; with --index, the multistream dump,
+    /// seeked to the title's block.
+    #[arg(long)]
+    pub(crate) source: PathBuf,
+    /// The multistream index (.txt or .txt.bz2) to seek with.
+    #[arg(long)]
+    pub(crate) index: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
