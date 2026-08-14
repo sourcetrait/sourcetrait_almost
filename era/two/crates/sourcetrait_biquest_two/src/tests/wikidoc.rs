@@ -81,6 +81,16 @@ fn source_italics_flatten_and_bold_survives() {
 }
 
 #[test]
+fn audit_details_are_single_line() {
+    let text = "==English==\n\n===Etymology===\nSee [[File:a\nb.png|x]] here.\n";
+    let document = render_word_document(&[page("x", text)]).expect("render");
+    assert!(!document.audit.is_empty());
+    for row in &document.audit {
+        assert!(!row.detail.contains('\n'), "multi-line detail: {:?}", row.detail);
+    }
+}
+
+#[test]
 fn typography_normalizes_in_rendered_text() {
     let text = "==English==\n\n===Etymology===\nFrom \u{201C}so\u{2014}called\u{201D} use.\n";
     let document = render_word_document(&[page("x", text)]).expect("render");

@@ -60,6 +60,8 @@ pub(crate) enum Command {
 
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum WikimediaCommand {
+    /// The dictionary-side corpus: every vocabulary word's document.
+    Corpus(WikimediaCorpusArgs),
     /// A word's markdown document from its fold-matched page set.
     Document(WikimediaDocumentArgs),
     /// The ruled typography normalization over text or a file.
@@ -68,6 +70,27 @@ pub(crate) enum WikimediaCommand {
     Page(WikimediaPageArgs),
     /// One page's parsed block tree, as a NUON table.
     Parse(WikimediaParseArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct WikimediaCorpusArgs {
+    /// The pages-articles multistream dump (.xml.bz2).
+    #[arg(long)]
+    pub(crate) source: PathBuf,
+    /// The multistream index (.txt or .txt.bz2).
+    #[arg(long)]
+    pub(crate) index: PathBuf,
+    /// The corpus tree: sharded word documents plus audit.nuonl,
+    /// missing_words.txt, and provenance.nuon.
+    #[arg(long)]
+    pub(crate) out: PathBuf,
+    /// A dictionary word file (file order = id order); absent = the
+    /// embedded full English set.
+    #[arg(long)]
+    pub(crate) words: Option<PathBuf>,
+    /// Render at most this many words (a smoke lever).
+    #[arg(long)]
+    pub(crate) limit: Option<usize>,
 }
 
 #[derive(Debug, clap::Args)]

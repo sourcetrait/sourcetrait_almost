@@ -129,11 +129,15 @@ impl<'a> Renderer<'a> {
         Self { page_title, lines: Vec::new(), audit: Vec::new() }
     }
 
+    /// Details sanitize to single NUON-line-safe lines here, the one
+    /// point every consumer shares: raw wikitext rides into details
+    /// (a link target legally spans lines), and the audit files are
+    /// NUON-lines artifacts.
     fn audit(&mut self, class: &str, detail: String) {
         self.audit.push(AuditRow {
             page: self.page_title.to_string(),
             class: class.to_string(),
-            detail,
+            detail: crate::associations::sanitize_gloss(&detail),
         });
     }
 
@@ -771,6 +775,30 @@ fn collect_sense_items(template: &Template, items: &mut Vec<String>) {
             items.push(format!("- [{word}]"));
         }
     }
+}
+
+/// Keep a word's renderable pages (ns0, not redirects) and order
+/// them: the word's own casing first, the capitalized form second,
+/// the rest title-sorted. The first page's title becomes the h1.
+pub(crate) fn order_word_pages(word: &str, pages: &mut Vec<WikiPage>) {
+    pages.retain(|page| page.ns == 0 && page.redirect.is_none());
+    let capitalized: String = {
+        let mut chars = word.chars();
+        match chars.next() {
+            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            None => String::new(),
+        }
+    };
+    pages.sort_by_key(|page| {
+        let rank = if page.title == word {
+            0
+        } else if page.title == capitalized {
+            1
+        } else {
+            2
+        };
+        (rank, page.title.clone())
+    });
 }
 
 /// Render a word's page set into its one markdown document: the

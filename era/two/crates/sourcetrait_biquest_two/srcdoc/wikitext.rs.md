@@ -27,7 +27,12 @@ multibyte character between structural positions - any str-slicing
 pattern operation panics there. `starts_with` and `find` are
 byte-based for exactly that reason; the dump smoke caught it live
 (the IPA stress mark U+02C8 in the Microsoft pronunciation line) and
-`multibyte_content_scans_safely` locks it.
+`multibyte_content_scans_safely` locks it. The second instance of
+the class was the entity scanner's length-capped lookahead
+(`rest[..min(12)]` landing inside an em-dash), caught fourteen
+seconds into the first full corpus run - the rule generalizes: any
+str slice at a COMPUTED length is suspect; only found-ASCII
+positions are boundary-safe.
 
 ## fn parse_blocks
 

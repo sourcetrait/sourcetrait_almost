@@ -282,6 +282,12 @@ fn tables_capture_raw_and_nested() {
 }
 
 #[test]
+fn an_ampersand_before_a_straddling_multibyte_char_stays_literal() {
+    let inlines = parse_inline_text("&0123456789\u{2014}xxxx tail").expect("parse");
+    assert!(text_of(&inlines).starts_with("&0123456789"));
+}
+
+#[test]
 fn multibyte_content_scans_safely() {
     let text = "* {{IPA|en|/\u{02C8}ma\u{026A}k\u{0279}\u{0259}\u{02CC}s\u{0252}ft/|a=RP}}";
     let blocks = parse_blocks(text).expect("parse");

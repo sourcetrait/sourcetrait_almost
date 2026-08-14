@@ -13,6 +13,7 @@ pub mod run;
 pub(crate) mod trainer;
 pub(crate) mod ucd;
 pub(crate) mod value;
+pub(crate) mod wikicorpus;
 pub(crate) mod wikidoc;
 pub(crate) mod wikimedia;
 pub(crate) mod wikitext;
@@ -58,6 +59,7 @@ pub(crate) use crate::cli::{
     TrainerInitArgs,
     TrainerTrainArgs,
     WikimediaCommand,
+    WikimediaCorpusArgs,
     WikimediaDocumentArgs,
     WikimediaNormalizeArgs,
     WikimediaPageArgs,
@@ -75,6 +77,7 @@ pub(crate) use crate::trainer::{
     trainer_init,
     trainer_train,
 };
+pub(crate) use crate::wikicorpus::wikimedia_corpus;
 pub(crate) use crate::wikimedia::{
     wikimedia_document,
     wikimedia_normalize,
@@ -111,6 +114,7 @@ mod tests {
     mod matrix;
     mod trainer;
     mod value;
+    mod wikicorpus;
     mod wikidoc;
     mod wikitext;
     mod wikixml;

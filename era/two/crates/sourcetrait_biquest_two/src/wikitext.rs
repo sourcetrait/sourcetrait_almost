@@ -654,10 +654,15 @@ fn parse_html_tag(cursor: &mut Cursor<'_>) -> Option<Inline> {
 }
 
 /// Resolve `&name;`, `&#nnn;`, or `&#xhh;` at the cursor; an unknown
-/// name stays literal for the audit to see.
+/// name stays literal for the audit to see. The lookahead scans
+/// bytes - a length-capped str slice can land inside a multibyte
+/// character.
 fn parse_entity(cursor: &mut Cursor<'_>) -> Option<char> {
     let rest = &cursor.text[cursor.position + 1..];
-    let semicolon = rest[..rest.len().min(12)].find(';')?;
+    let bytes = rest.as_bytes();
+    let semicolon = bytes[..bytes.len().min(12)]
+        .iter()
+        .position(|&b| b == b';')?;
     let body = &rest[..semicolon];
     let resolved = if let Some(digits) = body.strip_prefix("#x").or(body.strip_prefix("#X")) {
         char::from_u32(u32::from_str_radix(digits, 16).ok()?)?

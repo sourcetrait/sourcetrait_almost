@@ -273,24 +273,7 @@ fn word_pages(
             collected
         }
     };
-    pages.retain(|page| page.ns == 0 && page.redirect.is_none());
-    let capitalized: String = {
-        let mut chars = word.chars();
-        match chars.next() {
-            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-            None => String::new(),
-        }
-    };
-    pages.sort_by_key(|page| {
-        let rank = if page.title == word {
-            0
-        } else if page.title == capitalized {
-            1
-        } else {
-            2
-        };
-        (rank, page.title.clone())
-    });
+    crate::wikidoc::order_word_pages(word, &mut pages);
     Ok(pages)
 }
 
