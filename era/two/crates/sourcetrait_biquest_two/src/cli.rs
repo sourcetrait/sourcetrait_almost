@@ -27,7 +27,7 @@ pub(crate) enum Command {
     },
     /// Tokenize a string and print the token table.
     Tokenize(TokenizeArgs),
-    /// The QuestImaginaryTokenizer: layers, census, admission, ledger.
+    /// The ImagineQuestTokenizer: layers, census, admission, ledger.
     Tokenizer {
         #[command(subcommand)]
         command: TokenizerCommand,

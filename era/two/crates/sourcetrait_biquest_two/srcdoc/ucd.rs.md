@@ -62,7 +62,7 @@ u16::MAX marks the unlisted.
 
 ## fields simple_uppercase / simple_lowercase / decompositions / numeric_values
 
-Parsed now, consumed by the IquestAssociations task (case pairs,
-canonical decompositions, numeric values as association edges). The
-ucd stats verb reports their sizes so the parse is exercised from day
-one.
+Parsed now, consumed by the ImagineQuestAssociations task (case
+pairs, canonical decompositions, numeric values as association
+edges). The ucd stats verb reports their sizes so the parse is
+exercised from day one.

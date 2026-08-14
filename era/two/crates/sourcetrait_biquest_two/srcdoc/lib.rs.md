@@ -6,7 +6,7 @@ conversion, taskgen, speculation probe, adapter train verbs) is removed
 rather than maintained, because the fork tracks nothing and owes no
 compatibility. What survived the cut: the CLI skeleton, the error type,
 the nu-value bridge (`value.rs`), and the self-documentation verb. What
-is new: the QuestImaginaryTokenizer modules (`ucd`, `lexer`,
+is new: the ImagineQuestTokenizer modules (`ucd`, `lexer`,
 `dictionary`, `census`, `ledger`).
 
 The llm and harness deps stay: the harness carries the nu data core the
