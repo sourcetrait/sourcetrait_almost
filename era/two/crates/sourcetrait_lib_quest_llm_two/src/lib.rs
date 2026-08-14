@@ -13,6 +13,8 @@ pub(crate) mod gdn;
 pub(crate) mod generate;
 #[cfg(feature = "cuda")]
 pub(crate) mod graph;
+#[cfg(feature = "train")]
+pub mod imagine_quest_train;
 pub(crate) mod load;
 pub(crate) mod model {
     pub(crate) mod attn_layer;
@@ -224,6 +226,8 @@ mod tests {
     mod generate;
     #[cfg(feature = "cuda")]
     mod graph;
+    #[cfg(feature = "train")]
+    mod imagine_quest_train;
     mod load;
     #[cfg(feature = "oracle")]
     mod lora;

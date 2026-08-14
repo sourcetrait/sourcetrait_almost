@@ -54,6 +54,7 @@ pub(crate) use crate::cli::{
     TokenizerLedgerArgs,
     TrainerCommand,
     TrainerInitArgs,
+    TrainerTrainArgs,
 };
 pub(crate) use crate::dictionary::tokenizer_dictionary;
 pub(crate) use crate::doc::doc_cli;
@@ -63,7 +64,10 @@ pub(crate) use crate::ledger::{
 };
 pub(crate) use crate::lexer::tokenize_text;
 pub(crate) use crate::matrix::matrix_build;
-pub(crate) use crate::trainer::trainer_init;
+pub(crate) use crate::trainer::{
+    trainer_init,
+    trainer_train,
+};
 #[allow(unused_imports)]
 pub(crate) use crate::value::{
     epoch_seconds,

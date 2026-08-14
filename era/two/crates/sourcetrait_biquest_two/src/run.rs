@@ -23,6 +23,7 @@ pub fn run() {
         },
         Command::Trainer { command } => match command {
             TrainerCommand::Init(args) => trainer_init(args),
+            TrainerCommand::Train(args) => trainer_train(args),
         },
     };
     if let Err(error) = outcome {

@@ -11,7 +11,7 @@ is new: the ImagineQuestTokenizer modules (`ucd`, `lexer`,
 store (`associations`).
 
 The llm and harness deps stay: the harness carries the nu data core the
-artifacts ride on, and the llm lib carries the model core the
-BiquestTrainer task will train from scratch. The train features forward
-to the llm lib for that later task; nothing in this crate is gated on
-them yet.
+artifacts ride on, and the llm lib carries the model core plus the
+imagine_quest_train module the trainer train verb drives. The train
+features forward to the llm lib; trainer_train is the one cfg-gated
+dispatch (a non-train build raises the one-sentence rebuild message).

@@ -41,7 +41,7 @@ pub(crate) enum Command {
     },
     /// Tokenize a string and print the token table.
     Tokenize(TokenizeArgs),
-    /// The ImagineQuestTokenizer: layers, census, admission, ledger.
+    /// The ImagineQuestTokenizer: layers, census, ledger.
     Tokenizer {
         #[command(subcommand)]
         command: TokenizerCommand,
@@ -57,6 +57,49 @@ pub(crate) enum Command {
 pub(crate) enum TrainerCommand {
     /// The organism's fresh checkpoint from a matrix artifact.
     Init(TrainerInitArgs),
+    /// Full-parameter training over a text corpus (a train build).
+    Train(TrainerTrainArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct TrainerTrainArgs {
+    /// The organism checkpoint directory to train from.
+    #[arg(long)]
+    pub(crate) organism: PathBuf,
+    /// The trained checkpoint directory (log and provenance beside).
+    #[arg(long)]
+    pub(crate) out: PathBuf,
+    /// Corpus files or trees, tokenized and packed in walk order.
+    #[arg(long, required = true, num_args = 1..)]
+    pub(crate) roots: Vec<PathBuf>,
+    /// A dictionary word file (file order = id order); absent = the
+    /// embedded full English set.
+    #[arg(long)]
+    pub(crate) words: Option<PathBuf>,
+    /// Positions per packed chunk (chunks carry seq_len + 1 ids).
+    #[arg(long, default_value_t = 2048)]
+    pub(crate) seq_len: usize,
+    /// Optimizer steps to run.
+    #[arg(long)]
+    pub(crate) steps: usize,
+    /// Peak learning rate (linear warmup, then constant).
+    #[arg(long, default_value_t = 3e-4)]
+    pub(crate) learning_rate: f64,
+    /// Steps of linear warmup to the peak rate.
+    #[arg(long, default_value_t = 100)]
+    pub(crate) warmup_steps: usize,
+    /// Chunks summed into one optimizer step.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) accumulate: usize,
+    /// Positions per loss chunk (the softmax-transient lever).
+    #[arg(long, default_value_t = 128)]
+    pub(crate) loss_chunk: usize,
+    /// Steps between stderr progress lines.
+    #[arg(long, default_value_t = 10)]
+    pub(crate) log_every: usize,
+    /// Steps between mid-run checkpoints; 0 saves the final one only.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) checkpoint_every: usize,
 }
 
 #[derive(Debug, clap::Args)]
@@ -143,7 +186,7 @@ pub(crate) enum DocCommand {
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum MatrixCommand {
     /// Build the associative embedding matrix from the embedded
-    /// layers plus an admitted wordlist.
+    /// layers plus the dictionary word file.
     Build(MatrixBuildArgs),
 }
 

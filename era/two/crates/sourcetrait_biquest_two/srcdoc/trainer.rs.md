@@ -1,9 +1,8 @@
 # trainer.rs
 
-The BiquestTrainer's init half: the organism's complete fresh
-checkpoint, so the ImagineQuestMatrix artifact becomes a model the
-llm engine can actually load. The training loop is the module's
-other half, not yet landed.
+The BiquestTrainer: the organism's fresh checkpoint (init) and the
+full-parameter training verb (train) over the llm lib's
+imagine_quest_train module.
 
 ## struct OrganismSpec
 
@@ -40,3 +39,30 @@ unconditionally. The acceptance check is the llm loader itself:
 `load_config` parses and policy-validates the written config.json
 before the verb returns, so an organism checkpoint that would refuse
 to load cannot be produced silently.
+
+## fn pack_corpus
+
+Plain LM packing: one id stream in file-walk order, sliced at stride
+seq_len into chunks of seq_len + 1, so the boundary token closes one
+chunk as target and opens the next as input and no position is
+wasted. No separator is injected between files - the stop story and
+any document-boundary convention are undesigned, and inventing one
+here would bake it in silently; the files' own trailing newlines are
+the only seam. A refused file fails the whole pack (census and
+ledger skip-and-report because they are instruments; a trainer that
+skips content trains on a corpus nobody chose). Unconditionally
+compiled so the packing locks run in the default build.
+
+## fn trainer_train
+
+The verb parses in every build; the non-train build raises the
+one-sentence rebuild message (the bquest convention - the parser is
+feature-blind so `doc cli` renders one tree). Backend by cfg:
+train-cuda takes the cuda autodiff pair, plain train the cpu pair.
+The id-space guard (`vocab >= keywords + characters + rows + words`)
+catches a checkpoint/word-file mismatch where the word count shrank;
+a same-size swap is undetectable here and remains the operator's
+alignment to keep. The step log streams as NUON lines through the
+associations module's condensed renderer; mid-run checkpoints land
+under `<out>/steps/step_N/`; the final checkpoint, provenance, and
+log all land in `<out>` itself.

@@ -7923,7 +7923,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_biquest_two"
-version = "0.0.0-9"
+version = "0.0.0-10"
 dependencies = [
  "clap",
  "half",
@@ -7990,7 +7990,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_lib_quest_llm_two"
-version = "0.0.0-7"
+version = "0.0.0-8"
 dependencies = [
  "burn",
  "candle-core 0.11.0",

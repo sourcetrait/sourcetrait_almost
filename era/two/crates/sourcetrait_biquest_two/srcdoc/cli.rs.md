@@ -13,14 +13,17 @@ because the store is its own artifact class - the association
 artifact the matrix build and stage-zero corpus consume - not a
 tokenizer measurement. `matrix` is likewise its own family: the
 embedding artifact is the foundation the trainer consumes, not a
-measurement. `trainer` carries the organism's checkpoint and (later)
+measurement. `trainer` carries the organism's checkpoint and
 training verbs; `assemble`/`disassemble` sit at the top level beside
-`tokenize` as the everyday Quill test surface.
+`tokenize` as the everyday Quill test surface. TrainerTrainArgs
+stays un-gated so the parser is feature-blind (one `doc cli` tree
+per build); only the dispatch is cfg-split.
 
 Artifact paths are explicit flags rather than config fields: the
 tokenizer artifacts live on the tmp home tier and their homes are
 operational knowledge, not product configuration. The character table
 and the default English word set take no path at all - both are
 embedded (ucd.rs, dictionary.rs), so `biquest tokenize "string"` runs
-bare and shows the with-dictionary form; --admitted swaps in a
-census-gated vocabulary's exact rows.
+bare and shows the with-dictionary form; --words swaps in another
+word file (file order = id order - the whole dictionary IS the
+vocabulary).
