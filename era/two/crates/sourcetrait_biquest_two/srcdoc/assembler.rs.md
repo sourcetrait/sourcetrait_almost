@@ -45,10 +45,43 @@ The `repeatable` gate is the character layer minus the Digit class -
 Word-class characters DO run-encode (the uniformity ruling: one rule,
 zero exceptions, everything acts like `$`).
 
-## the smoke finding
+## fn encode_interior / fn find_marker_spelling / escape spans
+
+The mention mechanism (TheUser's rulings): a `<|BODY|>` spelling in
+content is invalid everywhere except inside an ESCAPE..ESCAPED span,
+where it converts to its REAL keyword id - syntax quoted, not used -
+and prose rides along through normal content tokenization; nesting
+faults; spans are legal only inside TRAIN within an INPUT
+serialization, checked on both directions from the same stack
+predicate. ESCAPE/ESCAPED/TRAIN/INPUT resolve by name as OPTIONS: a
+draft table without them simply cannot express spans, which keeps
+the existing hand tables valid. Bodies resolve as bound names first,
+then two-hex page addresses; decode renders bound names (canonical),
+so a hex-spelled mention of a bound id canonicalizes on round trip.
+Inside a span the decoder treats every keyword id as a mention -
+REPETITION included, since mention is exactly what the marker
+exists to deny as USE.
+
+## REIGN
+
+`REIGN <human|ai|auto>` validates and produces no wire (an
+authorship marker for TheUser and the agent). Decode therefore never
+re-emits it: the begin.quill byte-compare runs against the file
+minus its REIGN header.
+
+## the smoke findings
 
 Measured on TheUser's Syntax.md example against his Syntax.nuon:
 byte-exact assembly round trip and wire-exact re-encode, 65 tokens.
 CODE is used in the example but not yet tabled, so the assembler
 rejects it until the draft table binds it - the reject is the
 assembler working, not a defect.
+
+Measured on begin.quill (the genesis document) against the 31-row
+table: 383 wire tokens, 10 escape spans (ESCAPE 29, ESCAPED 30),
+re-encode wire-exact. The decode byte-compare differs ONLY on
+surface case ("You are Quest." decodes "you are quest.") because
+dictionary rows are folded - the standing surface-case decision
+(case marker token, renderer rule, or lossy) made concrete by the
+first real document. Training consumes the encode side, which is
+deterministic and stable regardless.

@@ -21,6 +21,18 @@ const HEAD_CLOSE: &str = "CLOSE";
 const HEAD_BEGIN: &str = "BEGIN";
 const HEAD_END: &str = "END";
 
+/// The REIGN meta line: an authorship marker the assembler validates
+/// and drops - it produces no wire (TheUser's ruling).
+const REIGN_HEAD: &str = "REIGN";
+const REIGN_VALUES: [&str; 3] = ["human", "ai", "auto"];
+
+/// The escape mechanics resolve by name when bound; a table without
+/// them simply cannot express escape spans.
+const NAME_ESCAPE: &str = "ESCAPE";
+const NAME_ESCAPED: &str = "ESCAPED";
+const NAME_TRAIN: &str = "TRAIN";
+const NAME_INPUT: &str = "INPUT";
+
 /// The user-binding half of the keyword page: Syntax.nuon remapped
 /// onto the page in order, NULL at 0x00. Bindings stop below the
 /// hardcoded operator block.
@@ -31,6 +43,10 @@ pub(crate) struct SyntaxTable {
     close: u32,
     begin: u32,
     end: u32,
+    escape: Option<u32>,
+    escaped: Option<u32>,
+    train: Option<u32>,
+    input: Option<u32>,
 }
 
 impl SyntaxTable {
@@ -61,6 +77,10 @@ impl SyntaxTable {
             close: head(HEAD_CLOSE)?,
             begin: head(HEAD_BEGIN)?,
             end: head(HEAD_END)?,
+            escape: ids.get(NAME_ESCAPE).copied(),
+            escaped: ids.get(NAME_ESCAPED).copied(),
+            train: ids.get(NAME_TRAIN).copied(),
+            input: ids.get(NAME_INPUT).copied(),
             names,
             ids,
         })
@@ -148,6 +168,8 @@ pub(crate) struct Assembler<'a> {
 enum AssemblyLine {
     Structural { head: u32, noun: u32 },
     Bare(u32),
+    /// A validated REIGN authorship line; it produces no wire.
+    Reign,
     Blank,
 }
 
@@ -174,6 +196,19 @@ impl<'a> Assembler<'a> {
             words.next().is_none(),
             "line {number}: an assembly line carries at most a head and a noun"
         );
+        if head == REIGN_HEAD {
+            match noun {
+                Some(value) if REIGN_VALUES.contains(&value) => {
+                    return Ok(AssemblyLine::Reign);
+                }
+                Some(value) => snafu::whatever!(
+                    "line {number}: REIGN wants human, ai, or auto, got {value}"
+                ),
+                None => snafu::whatever!(
+                    "line {number}: REIGN wants human, ai, or auto"
+                ),
+            }
+        }
         let Some(head_id) = self.syntax.id_of(head) else {
             snafu::whatever!("line {number}: {head} is not a bound keyword");
         };
@@ -209,7 +244,7 @@ impl<'a> Assembler<'a> {
         while let Some((index, line)) = lines.next() {
             let number = index + 1;
             match self.parse_line(line, number)? {
-                AssemblyLine::Blank => {}
+                AssemblyLine::Blank | AssemblyLine::Reign => {}
                 AssemblyLine::Bare(id) => wire.push(id),
                 AssemblyLine::Structural { head, noun } => {
                     wire.push(head);
@@ -230,9 +265,8 @@ impl<'a> Assembler<'a> {
                         let depth = stack.len() + 1;
                         let interior =
                             self.collect_interior(&mut lines, noun, depth, number)?;
-                        for token in self.segmenter.segment(&interior)? {
-                            wire.push(token.id);
-                        }
+                        let escapes_legal = self.escapes_legal(&stack);
+                        self.encode_interior(&interior, escapes_legal, &mut wire)?;
                         wire.push(self.syntax.end);
                         wire.push(noun);
                     } else {
@@ -311,6 +345,103 @@ impl<'a> Assembler<'a> {
         )
     }
 
+    /// Whether escape spans are legal here: inside TRAIN, within an
+    /// INPUT block's serialization (TheUser's ruling), with both
+    /// keywords bound.
+    fn escapes_legal(&self, stack: &[u32]) -> bool {
+        match (self.syntax.train, self.syntax.input) {
+            (Some(train), Some(input)) => {
+                stack.contains(&train) && stack.last() == Some(&input)
+            }
+            _ => false,
+        }
+    }
+
+    /// Resolve a marker spelling's interior: a bound keyword name, or
+    /// a two-hex-digit page address.
+    fn spelling_id(&self, body: &str) -> Option<u32> {
+        if let Some(id) = self.syntax.id_of(body) {
+            return Some(id);
+        }
+        if body.len() == 2 && body.chars().all(|c| c.is_ascii_hexdigit()) {
+            return u32::from_str_radix(body, 16).ok();
+        }
+        None
+    }
+
+    /// Encode a serialization interior: content tokenizes, and marker
+    /// spellings are invalid except inside an ESCAPE span, where they
+    /// convert to their keyword ids (prose rides along; nesting and
+    /// an unterminated span fault).
+    fn encode_interior(
+        &self,
+        interior: &str,
+        escapes_legal: bool,
+        wire: &mut Vec<u32>,
+    ) -> BiquestResult<()> {
+        let escape = self.syntax.escape;
+        let escaped = self.syntax.escaped;
+        let mut rest = interior;
+        let mut in_span = false;
+        loop {
+            let Some((start, end, body)) = find_marker_spelling(rest) else {
+                snafu::ensure_whatever!(
+                    !in_span,
+                    "an escape span never closes (missing <|ESCAPED|>)"
+                );
+                if !rest.is_empty() {
+                    for token in self.segmenter.segment(rest)? {
+                        wire.push(token.id);
+                    }
+                }
+                return Ok(());
+            };
+            let before = &rest[..start];
+            if !before.is_empty() {
+                for token in self.segmenter.segment(before)? {
+                    wire.push(token.id);
+                }
+            }
+            let Some(id) = self.spelling_id(body) else {
+                snafu::whatever!("<|{body}|> is not a bound keyword or page address");
+            };
+            if !in_span {
+                snafu::ensure_whatever!(
+                    Some(id) == escape,
+                    "a marker spelling (<|{body}|>) outside an escape span is invalid"
+                );
+                snafu::ensure_whatever!(
+                    escapes_legal,
+                    "an escape span is legal only inside TRAIN, within an INPUT \
+                     serialization"
+                );
+                snafu::ensure_whatever!(
+                    escaped.is_some(),
+                    "the syntax table lacks the ESCAPED binding"
+                );
+                wire.push(id);
+                in_span = true;
+            } else if Some(id) == escape {
+                snafu::whatever!("an escape span cannot nest another <|ESCAPE|>");
+            } else {
+                wire.push(id);
+                if Some(id) == escaped {
+                    in_span = false;
+                }
+            }
+            rest = &rest[end..];
+        }
+    }
+
+    /// A keyword id's mention spelling: the bound name, else the
+    /// two-hex page address.
+    fn mention_spelling(&self, id: u32) -> String {
+        match self.syntax.name_of(id) {
+            Some(name) => format!("<|{name}|>"),
+            None => format!("<|{id:02X}|>"),
+        }
+    }
+
     /// One content token id's text, or a positioned fault.
     fn content_text(&self, id: u32, position: usize) -> BiquestResult<String> {
         let character_offset = KEYWORD_PAGE_SIZE;
@@ -371,17 +502,45 @@ impl<'a> Assembler<'a> {
         }
     }
 
-    /// Decode a serialization interior: band expansion lives here, and
-    /// REPETITION's wire illegality faults here. Returns the interior
-    /// text and the position of the END keyword.
+    /// Decode a serialization interior: band expansion lives here,
+    /// REPETITION's wire illegality faults here, and escape spans
+    /// render their keyword ids back as mention spellings. Returns
+    /// the interior text and the position of the END keyword.
     fn decode_interior(
         &self,
         wire: &[u32],
         mut position: usize,
+        escapes_legal: bool,
     ) -> BiquestResult<(String, usize)> {
         let mut interior = String::new();
+        let mut in_span = false;
         while position < wire.len() {
             let id = wire[position];
+            if in_span && id < KEYWORD_PAGE_SIZE {
+                if Some(id) == self.syntax.escape {
+                    snafu::whatever!(
+                        "wire fault at token {position}: an escape span cannot nest \
+                         another <|ESCAPE|>"
+                    );
+                }
+                interior.push_str(&self.mention_spelling(id));
+                if Some(id) == self.syntax.escaped {
+                    in_span = false;
+                }
+                position += 1;
+                continue;
+            }
+            if Some(id) == self.syntax.escape {
+                snafu::ensure_whatever!(
+                    escapes_legal,
+                    "wire fault at token {position}: an escape span is legal only \
+                     inside TRAIN, within an INPUT serialization"
+                );
+                interior.push_str(&self.mention_spelling(id));
+                in_span = true;
+                position += 1;
+                continue;
+            }
             if id == KEYWORD_REPETITION {
                 snafu::whatever!(
                     "wire fault at token {position}: <|repetition|> is an \
@@ -533,8 +692,9 @@ impl<'a> Assembler<'a> {
                     position += 2;
                 } else {
                     out.push_str(&format!("{indent}{HEAD_BEGIN} {noun_name}\n"));
+                    let escapes_legal = self.escapes_legal(&stack);
                     let (interior, end_position) =
-                        self.decode_interior(wire, position + 2)?;
+                        self.decode_interior(wire, position + 2, escapes_legal)?;
                     snafu::ensure_whatever!(
                         wire[end_position] == self.syntax.end,
                         "wire fault at token {end_position}: a serialization interrupted \
@@ -584,6 +744,36 @@ impl<'a> Assembler<'a> {
         );
         Ok(out)
     }
+}
+
+/// The first `<|BODY|>` marker spelling in a text: its byte range and
+/// interior. Bodies are keyword names or page addresses - short runs
+/// of name characters, never crossing a line.
+fn find_marker_spelling(text: &str) -> Option<(usize, usize, &str)> {
+    let bytes = text.as_bytes();
+    let mut index = 0usize;
+    while index + 4 <= bytes.len() {
+        if bytes[index] == b'<' && bytes[index + 1] == b'|' {
+            let body_start = index + 2;
+            let mut cursor = body_start;
+            while cursor < bytes.len()
+                && (bytes[cursor].is_ascii_alphanumeric()
+                    || bytes[cursor] == b'_'
+                    || bytes[cursor] == b'-')
+            {
+                cursor += 1;
+            }
+            if cursor > body_start
+                && cursor + 2 <= bytes.len()
+                && bytes[cursor] == b'|'
+                && bytes[cursor + 1] == b'>'
+            {
+                return Some((index, cursor + 2, &text[body_start..cursor]));
+            }
+        }
+        index += 1;
+    }
+    None
 }
 
 /// Shared verb setup: the embedded layers plus table and dictionary.
