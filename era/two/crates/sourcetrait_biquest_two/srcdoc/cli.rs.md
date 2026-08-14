@@ -14,10 +14,17 @@ artifact the matrix build and stage-zero corpus consume - not a
 tokenizer measurement. `matrix` is likewise its own family: the
 embedding artifact is the foundation the trainer consumes, not a
 measurement. `trainer` carries the organism's checkpoint and
-training verbs; `assemble`/`disassemble` sit at the top level beside
-`tokenize` as the everyday Quill test surface. TrainerTrainArgs
-stays un-gated so the parser is feature-blind (one `doc cli` tree
-per build); only the dispatch is cfg-split.
+training verbs. TrainerTrainArgs stays un-gated so the parser is
+feature-blind (one `doc cli` tree per build); only the dispatch is
+cfg-split.
+
+`assembler` is TheUser's own test surface, split from `assemble` on
+his ruling ("i just want my own"): one file positional, the token
+table out, everything else embedded defaults - no flags to share
+with the product surface. `assemble`/`disassemble` remain the
+machinery pair (wire id lists, override flags); their --syntax is
+optional because the Syntax.nuon draft is vendored and embedded as
+the default table, the dictionary pattern applied to the bindings.
 
 The `wikimedia` noun is the WikimediaDumpTool's family: raw-source
 access over the pinned wikimedia dumps and export saves, feeding the

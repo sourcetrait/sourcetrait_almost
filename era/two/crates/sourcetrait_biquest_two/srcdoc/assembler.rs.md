@@ -8,9 +8,12 @@ an empty interior encode identically, and that is correct, not lossy.
 
 ## struct SyntaxTable
 
-The draft table loads at runtime and binds by ORDER (id = row index,
-NULL at 0x00), because the table is TheUser's work-in-progress and
-code never hardcodes it. The four structural heads resolve BY NAME:
+The draft table binds by ORDER (id = row index, NULL at 0x00) and
+never hardcodes into CODE; the current draft is vendored and
+embedded as the default data (TheUser: the default should be
+hardcoded - the dictionary pattern), with --syntax the override and
+re-vendoring the update path. The four structural heads resolve BY
+NAME:
 renaming OPEN in the draft would break existing assembly TEXT anyway
 (assembly is names), so requiring the four names is not a constraint
 the draft does not already carry. Bindings cap below 0xF6, where the

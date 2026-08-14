@@ -25,12 +25,46 @@ byte-identical to it.
 
 Anchor targets stay verbatim - they are resource addresses the
 resolution layer matches against real titles - while every prose
-string passes normalize_typography. Head templates derive the
-REGULAR inflections only when bare; any argument files an audit row
-and omits the parenthetical, because a wrong derived form is worse
-than a visible gap - the argument grammar grows audit-driven, the
-same policy as the template families and the accent-code map.
-Sense-scoped synonyms strip their angle-bracket inline qualifiers
-(the fixture shows bare anchors); dropped sections, refs, external
-links, plumbing templates, and unknown accent codes all file audit
-rows so nothing disappears silently.
+string passes normalize_typography. Sense-scoped synonyms strip
+their angle-bracket inline qualifiers (the fixture shows bare
+anchors); dropped sections, refs, external links, plumbing
+templates, and unknown accent codes all file audit rows so nothing
+disappears silently.
+
+## The head-argument grammar (fn head_line and the engines)
+
+Designed against the pinned dump's own template documentation
+(Template:en-noun/en-verb/en-adj/en-adv/head documentation pages,
+fetched from the snapshot) plus a measured 100k-word audit
+distribution; the audit details carry full template signatures so
+the families keep growing audit-driven. The dominant class was the
+generic head|en|<pos> form at 79% - non-lemma form pages - which is
+why bare `head` is handled silently rather than audited.
+
+Load-bearing details the doc pages pin:
+
+- The default derivations are the en-verb exact rules: C*VC (the
+  whole lemma consonants + one vowel + one final consonant not in
+  w/x/y/h) doubles before -ed/-ing, -ie becomes -ying, -ue and
+  consonant-e drop the e, vowel-e (toe, see, dye) keeps it. The
+  en-adj doc omits doubling for -er/-est but the module doubles, so
+  graded_form does too.
+- Slot-one special indicators (^ ++ +l +! +' and the * multiword
+  forms) become the defaults for later verb slots; `+` is always
+  equivalent to a blank slot; slot 4 absent or past-equal folds
+  into the combined piece, and an explicit `-` (defective) leaves
+  the past standing alone - absent and defective are different.
+- A lone `~` is the noun countability marker; anywhere else `~`
+  substitutes the lemma - the substitution must skip the marker or
+  countability silently breaks.
+- The angle-bracket verb format is detected by the first `<`'s body
+  NOT being an inline-modifier prefix (l:/ll:/q:/qq:/ref:); only
+  the single-bracket forms are handled and the alternant/multi-
+  bracket residue audits with its signature.
+- Head-family templates are recognized by NAME (head, en-*), not
+  position, because wp precedes the head on many pages and was
+  eating the head slot - the wp family routes to its own
+  wikipedia_pointer audit class, kept as the word-to-article signal
+  for the spidering service.
+- Unknown named arguments audit the whole signature and contribute
+  nothing: a wrong derived form is worse than a visible gap.
