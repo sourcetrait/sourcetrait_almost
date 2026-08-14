@@ -508,13 +508,17 @@ fn form_of_aliases() -> &'static Vec<(String, String)> {
 /// renders under: an alias expansion, or the name itself when it
 /// already ends in " of" (the generic shape; `form of` itself
 /// carries its label as an argument and is handled separately).
+/// The en- prefixed family is excluded: those templates bake their
+/// language, so the lemma sits one slot earlier and the generic
+/// shape mangles them - the handled pair has its own arm and the
+/// rest audit.
 fn form_of_name(name: &str) -> Option<String> {
     if let Some((_, full)) =
         form_of_aliases().iter().find(|(alias, _)| alias == name)
     {
         return Some(full.clone());
     }
-    if name.ends_with(" of") && name != "form of" {
+    if name.ends_with(" of") && name != "form of" && !name.starts_with("en-") {
         return Some(name.to_string());
     }
     None
@@ -1013,6 +1017,28 @@ impl<'a> Renderer<'a> {
             }
             name if name.starts_with("quote-") => {
                 self.citation_text(template).unwrap_or_default()
+            }
+            // The English degree pair bakes lang=en, so the lemma is
+            // the first positional; each renders its own "<degree>
+            // <lemma>" tail, the template's own output shape.
+            "en-superlative of" | "en-comparative of" => {
+                let term = positional.first().copied().unwrap_or_default();
+                if term.is_empty() {
+                    self.audit("template_unhandled", template_signature(template));
+                    return String::new();
+                }
+                let alt = positional
+                    .get(1)
+                    .filter(|d| !d.is_empty())
+                    .copied()
+                    .unwrap_or(term);
+                let anchored = self.form_of_anchor(term, alt);
+                let (label, degree) = if name == "en-superlative of" {
+                    ("Superlative form of", "most")
+                } else {
+                    ("Comparative form of", "more")
+                };
+                format!("{label} {anchored}: {degree} {anchored}")
             }
             "form of" => {
                 let label = positional.get(1).copied().unwrap_or_default();

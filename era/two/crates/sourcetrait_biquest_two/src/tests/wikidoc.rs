@@ -253,6 +253,31 @@ fn numbered_variants_and_pron_pairs_render() {
 }
 
 #[test]
+fn en_degree_forms_render_and_the_en_family_stays_out_of_the_shape_rule() {
+    let text = "==English==\n\n===Adjective===\n{{head|en|superlative adjective}}\n\n# {{en-superlative of|scrungy}}\n";
+    let document = render_word_document(&[page("scrungiest", text)]).expect("render");
+    assert!(
+        document
+            .markdown
+            .contains("1. Superlative form of [scrungy]: most [scrungy]"),
+        "got: {}",
+        document.markdown
+    );
+    let text = "==English==\n\n===Adjective===\n{{head|en|comparative adjective}}\n\n# {{en-comparative of|hard}}\n";
+    let document = render_word_document(&[page("harder", text)]).expect("render");
+    assert!(document.markdown.contains("1. Comparative form of [hard]: more [hard]"));
+    // Any other en-prefixed " of" template audits rather than
+    // rendering through the shifted generic slots.
+    let text = "==English==\n\n===Verb===\n{{head|en|verb form}}\n\n# {{en-archaic second-person singular of|do}}\n";
+    let document = render_word_document(&[page("dost", text)]).expect("render");
+    assert!(!document.markdown.contains("[]"), "got: {}", document.markdown);
+    assert!(document
+        .audit
+        .iter()
+        .any(|row| row.class == "template_unhandled"));
+}
+
+#[test]
 fn form_of_definitions_render() {
     let text = "==English==\n\n===Noun===\n{{en-noun|-}}\n\n# {{synonym of|en|DDR}}\n# {{plural of|en|word}}\n# {{alt form|en|colour}}\n";
     let document = render_word_document(&[page("2DR", text)]).expect("render");

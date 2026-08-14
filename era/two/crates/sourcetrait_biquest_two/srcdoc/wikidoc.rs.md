@@ -99,6 +99,14 @@ English content) are the corpus emitter's .empty.md convention with
 the document_empty audit class - skippable by suffix, existence
 known (TheUser).
 
+The en- prefixed " of" family is excluded from the shape rule:
+those templates bake lang=en, so the lemma sits in the first
+positional and the generic slots read the lemma as a language -
+"En-superlative of []" was the SampleAudit catch. The degree pair
+(en-superlative of, en-comparative of) has its own arm rendering
+the template's own output shape ("Superlative form of [x]: most
+[x]"); the rest of the family audits, the growth signal.
+
 ## The etymology reference family (fn ety_reference and kin)
 
 Designed against the snapshot's own template documentation
