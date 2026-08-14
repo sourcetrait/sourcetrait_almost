@@ -274,6 +274,20 @@ impl CharacterTable {
         Ok(())
     }
 
+    /// Add simple case pairs to a hand-built test table (both maps
+    /// and the fold, so classification and canonicality line up).
+    #[cfg(test)]
+    pub(crate) fn with_simple_case(mut self, pairs: &[(char, char)]) -> Self {
+        for &(lower, upper) in pairs {
+            self.simple_uppercase.insert(lower as u32, upper as u32);
+            self.simple_lowercase.insert(upper as u32, lower as u32);
+            if let Some(&index) = self.index_of.get(&(upper as u32)) {
+                self.rows[index as usize].fold = lower as u32;
+            }
+        }
+        self
+    }
+
     /// A hand-built table for unit tests; rows must be code-point sorted.
     #[cfg(test)]
     pub(crate) fn from_rows(rows: Vec<CharRow>, general_categories: Vec<String>) -> Self {

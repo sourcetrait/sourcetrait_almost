@@ -78,10 +78,11 @@ rejects it until the draft table binds it - the reject is the
 assembler working, not a defect.
 
 Measured on begin.quill (the genesis document) against the 31-row
-table: 383 wire tokens, 10 escape spans (ESCAPE 29, ESCAPED 30),
-re-encode wire-exact. The decode byte-compare differs ONLY on
-surface case ("You are Quest." decodes "you are quest.") because
-dictionary rows are folded - the standing surface-case decision
-(case marker token, renderer rule, or lossy) made concrete by the
-first real document. Training consumes the encode side, which is
-deterministic and stable regardless.
+table: 411 wire tokens, 10 escape spans (ESCAPE 29, ESCAPED 30),
+re-encode wire-exact, and the decode byte-compare EXACT once the
+case family landed (the decoder renders postfix CAPITALIZED /
+UPPERCASED / CASED-overlay forms through the UCD simple maps, and a
+blank interior line stays byte-empty rather than taking the content
+indent). A case token reaching the decoder with no dictionary row
+before it faults, as does an overlay character that does not fold to
+its row's own character - the canonicality the encoder emits.

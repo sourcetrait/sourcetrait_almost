@@ -42,12 +42,16 @@ fn entry(json: &str) -> Entry {
 }
 
 #[test]
-fn repetition_concept_is_backed_by_its_marker() {
-    assert_eq!(AbstractConcept::ALL.len(), 1);
-    let concept = AbstractConcept::Repetition;
-    assert_eq!(concept.name(), "repetition");
-    assert_eq!(concept.marker(), KEYWORD_REPETITION);
-    assert_eq!(concept.spelling(), "<|repetition|>");
+fn concepts_are_backed_by_their_markers() {
+    assert_eq!(AbstractConcept::ALL.len(), 2);
+    let repetition = AbstractConcept::Repetition;
+    assert_eq!(repetition.name(), "repetition");
+    assert_eq!(repetition.marker(), KEYWORD_REPETITION);
+    assert_eq!(repetition.spelling(), "<|repetition|>");
+    let case = AbstractConcept::Case;
+    assert_eq!(case.name(), "case");
+    assert_eq!(case.marker(), crate::lexer::KEYWORD_CASE);
+    assert_eq!(case.spelling(), "<|case|>");
 }
 
 #[test]

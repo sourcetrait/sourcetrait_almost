@@ -8,13 +8,21 @@ use std::io::Write;
 use crate::bucket::BucketTable;
 use crate::lexer::whole_candidate_folded;
 use crate::lexer::BEGIN_REPEAT_ALIAS;
+use crate::lexer::CAPITALIZED_ALIAS;
+use crate::lexer::CASED_ALIAS;
+use crate::lexer::CASE_ALIAS;
 use crate::lexer::END_REPEAT_ALIAS;
 use crate::lexer::KEYWORD_BEGIN_REPEAT;
+use crate::lexer::KEYWORD_CAPITALIZED;
+use crate::lexer::KEYWORD_CASE;
+use crate::lexer::KEYWORD_CASED;
 use crate::lexer::KEYWORD_END_REPEAT;
 use crate::lexer::KEYWORD_REPEAT;
 use crate::lexer::KEYWORD_REPETITION;
+use crate::lexer::KEYWORD_UPPERCASED;
 use crate::lexer::REPEAT_ALIAS;
 use crate::lexer::REPETITION_ALIAS;
+use crate::lexer::UPPERCASED_ALIAS;
 use crate::ucd::CharacterTable;
 
 /// A purely conceptual association target: an embedding-space anchor
@@ -28,16 +36,18 @@ use crate::ucd::CharacterTable;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AbstractConcept {
     Repetition,
+    Case,
 }
 
 impl AbstractConcept {
     /// Every concept, store order.
-    pub(crate) const ALL: [Self; 1] = [Self::Repetition];
+    pub(crate) const ALL: [Self; 2] = [Self::Repetition, Self::Case];
 
     /// The concept's name: the store's join key.
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Repetition => "repetition",
+            Self::Case => "case",
         }
     }
 
@@ -45,6 +55,7 @@ impl AbstractConcept {
     pub(crate) fn marker(self) -> u32 {
         match self {
             Self::Repetition => KEYWORD_REPETITION,
+            Self::Case => KEYWORD_CASE,
         }
     }
 
@@ -52,6 +63,7 @@ impl AbstractConcept {
     pub(crate) fn spelling(self) -> &'static str {
         match self {
             Self::Repetition => REPETITION_ALIAS,
+            Self::Case => CASE_ALIAS,
         }
     }
 }
@@ -335,6 +347,39 @@ fn repetition_value(buckets: &BucketTable) -> harness::nu::Value {
     )
 }
 
+/// The case machinery's associations: the three postfix case
+/// operators to the case AbstractConcept (TheUser's design - the
+/// match first, then the tokenizer token; the wire never forces the
+/// convention, association hints it, the repetition pattern
+/// repeated).
+fn case_value() -> harness::nu::Value {
+    let concept = AbstractConcept::Case;
+    let operators: Vec<harness::nu::Value> = [
+        (KEYWORD_CAPITALIZED, CAPITALIZED_ALIAS, "capitalized"),
+        (KEYWORD_UPPERCASED, UPPERCASED_ALIAS, "uppercased"),
+        (KEYWORD_CASED, CASED_ALIAS, "cased"),
+    ]
+    .iter()
+    .map(|&(keyword, spelling, operator)| {
+        harness::nu::Value::record(
+            harness::nu::record! {
+                "operator" => v_str(operator),
+                "keyword" => v_int(keyword as i64),
+                "spelling" => v_str(spelling),
+                "concept" => v_str(concept.name()),
+            },
+            span(),
+        )
+    })
+    .collect();
+    harness::nu::Value::record(
+        harness::nu::record! {
+            "operators" => harness::nu::Value::list(operators, span()),
+        },
+        span(),
+    )
+}
+
 /// The simple case maps, each direction its own table, ascending.
 fn case_pairs_value(table: &CharacterTable) -> harness::nu::Value {
     let mut uppercase: Vec<harness::nu::Value> = Vec::new();
@@ -452,6 +497,7 @@ pub(crate) fn associations_build(args: &AssociationsBuildArgs) -> BiquestResult<
         &abstract_concepts_value(),
     )?;
     harness::nu::save_value(&args.out.join("repetition.nuon"), &repetition_value(&buckets))?;
+    harness::nu::save_value(&args.out.join("case.nuon"), &case_value())?;
     harness::nu::save_value(&args.out.join("case_pairs.nuon"), &case_pairs_value(&table))?;
     harness::nu::save_value(
         &args.out.join("decompositions.nuon"),
@@ -563,6 +609,7 @@ pub(crate) fn associations_build(args: &AssociationsBuildArgs) -> BiquestResult<
             "category_families" => v_int(table.general_categories.len() as i64),
             "keyboard_rows" => v_int(buckets.count() as i64),
             "operator_rows" => v_int(3),
+            "case_operator_rows" => v_int(3),
             "abstract_concepts" => v_int(AbstractConcept::ALL.len() as i64),
             "biquest_version" => v_str(env!("CARGO_PKG_VERSION")),
             "built_at" => v_int(epoch_seconds()),

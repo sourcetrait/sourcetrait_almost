@@ -45,7 +45,7 @@ fn table() -> CharacterTable {
     for digit in '0'..='9' {
         rows.push(row(digit as u32, 1, false));
     }
-    for letter in ['D', 'E', 'N', 'O', 'U', 'd', 'g', 'n', 'o', 'u'] {
+    for letter in ['D', 'E', 'G', 'N', 'O', 'U', 'd', 'g', 'n', 'o', 'u'] {
         rows.push(row(letter as u32, 0, false));
     }
     rows.sort_by_key(|entry| entry.code_point);
@@ -287,6 +287,104 @@ fn nested_unterminated_and_unknown_spellings_fault() {
         let unknown = format!("{prefix}<|ESCAPE|><|BOGUS|><|ESCAPED|>{suffix}");
         let fault = assembler.encode(&unknown).expect_err("unknown spelling faults");
         assert!(fault.to_string().contains("not a bound keyword"), "got: {fault}");
+    });
+}
+
+/// Case maps over the hand table, plus a run-shaped admitted word.
+fn case_rig() -> Rig {
+    Rig {
+        table: table().with_simple_case(&[
+            ('d', 'D'),
+            ('e', 'E'),
+            ('g', 'G'),
+            ('n', 'N'),
+            ('o', 'O'),
+            ('u', 'U'),
+        ]),
+        buckets: BucketTable::new(),
+        syntax: syntax(),
+        admitted: vec![String::from("dog"), String::from("oooo")],
+    }
+}
+
+#[test]
+fn case_tokens_ride_postfix_and_round_trip() {
+    let rig = case_rig();
+    let text = "OPEN CONFIG\n  BEGIN NUON\n    Dog dog DOG dOg\n  END NUON\nCLOSE CONFIG\n";
+    let (wire, rendered) = rig.with(|assembler| {
+        let wire = assembler.encode(text).expect("encodes");
+        let rendered = assembler.decode(&wire).expect("decodes");
+        (wire, rendered)
+    });
+    assert_eq!(rendered, text);
+    let dictionary_offset =
+        256 + rig.table.assigned_count() as u32 + rig.buckets.count() as u32;
+    let dog = dictionary_offset;
+    // The match first, then the tokenizer token (order matters).
+    let capitalized_at = wire
+        .iter()
+        .position(|&id| id == crate::lexer::KEYWORD_CAPITALIZED)
+        .expect("capitalized token");
+    assert_eq!(wire[capitalized_at - 1], dog);
+    let uppercased_at = wire
+        .iter()
+        .position(|&id| id == crate::lexer::KEYWORD_UPPERCASED)
+        .expect("uppercased token");
+    assert_eq!(wire[uppercased_at - 1], dog);
+    let cased_at = wire
+        .iter()
+        .position(|&id| id == crate::lexer::KEYWORD_CASED)
+        .expect("cased token");
+    assert_eq!(wire[cased_at - 1], dog);
+    let rewire = rig.with(|assembler| assembler.encode(&rendered).expect("re-encodes"));
+    assert_eq!(wire, rewire);
+}
+
+#[test]
+fn cased_overlays_never_run_encode() {
+    let rig = case_rig();
+    let text = "OPEN CONFIG\n  BEGIN NUON\n    OOOo\n  END NUON\nCLOSE CONFIG\n";
+    let (wire, rendered) = rig.with(|assembler| {
+        let wire = assembler.encode(text).expect("encodes");
+        let rendered = assembler.decode(&wire).expect("decodes");
+        (wire, rendered)
+    });
+    assert_eq!(rendered, text);
+    assert!(wire.contains(&crate::lexer::KEYWORD_CASED));
+    assert!(!wire.contains(&crate::lexer::KEYWORD_REPEAT));
+}
+
+#[test]
+fn case_wire_faults_are_loud() {
+    let rig = case_rig();
+    let dictionary_offset =
+        256 + rig.table.assigned_count() as u32 + rig.buckets.count() as u32;
+    let dog = dictionary_offset;
+    let char_o = 256 + rig.table.index_of('O' as u32).expect("O row");
+    let char_g = 256 + rig.table.index_of('g' as u32).expect("g row");
+    rig.with(|assembler| {
+        // A case token with no word before it.
+        let fault = assembler
+            .decode(&[3, 7, crate::lexer::KEYWORD_CASED, 4, 7])
+            .expect_err("standalone cased faults");
+        assert!(fault.to_string().contains("no word before"), "got: {fault}");
+        // A case token after a character token.
+        let fault = assembler
+            .decode(&[3, 7, char_g, crate::lexer::KEYWORD_CAPITALIZED, 4, 7])
+            .expect_err("character-led case faults");
+        assert!(fault.to_string().contains("dictionary word"), "got: {fault}");
+        // An overlay character that does not fold to its row.
+        let fault = assembler
+            .decode(&[
+                3, 7, dog, crate::lexer::KEYWORD_CASED, char_o, char_o, char_g, 4, 7,
+            ])
+            .expect_err("non-folding overlay faults");
+        assert!(fault.to_string().contains("does not fold"), "got: {fault}");
+        // The case AbstractConceptMarker is never legal wire.
+        let fault = assembler
+            .decode(&[3, 7, crate::lexer::KEYWORD_CASE, 4, 7])
+            .expect_err("case marker faults");
+        assert!(fault.to_string().contains("AbstractConceptMarker"), "got: {fault}");
     });
 }
 

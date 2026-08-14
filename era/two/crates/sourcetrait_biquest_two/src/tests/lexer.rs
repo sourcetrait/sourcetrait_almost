@@ -196,17 +196,25 @@ fn ids_stack_keywords_characters_buckets_then_dictionary() {
 }
 
 #[test]
-fn dictionary_hit_is_case_insensitive_and_miss_splits_to_characters() {
+fn dictionary_hit_folds_and_case_rides_the_cased_overlay() {
     let table = table();
     let buckets = BucketTable::new();
     let admitted = vec![String::from("dog"), String::from("it")];
     let segmenter = Segmenter::new(&table, &buckets, &admitted);
+    // This table folds D to d but carries no uppercase maps, so
+    // "Dog" is neither capitalized nor uppercased under the UCD
+    // simple maps: the row rides with a CASED overlay - the match
+    // first, then the tokenizer token, then the surface characters.
     let tokens = segmenter.segment("Dog ate it").expect("segments");
     let layers: Vec<Layer> = tokens.iter().map(|token| token.layer).collect();
     assert_eq!(
         layers,
         [
-            Layer::Dictionary, // Dog (folded to dog)
+            Layer::Dictionary, // dog (the match first)
+            Layer::Keyword,    // <|cased|>
+            Layer::Character,  // D
+            Layer::Character,  // o
+            Layer::Character,  // g
             Layer::Character,  // space
             Layer::Character,  // a
             Layer::Character,  // t
@@ -231,7 +239,11 @@ fn segment_pieces_carries_folded_words_and_characters() {
     assert_eq!(
         texts,
         [
-            ("dog", Layer::Dictionary), // folded row identity, not "Dog"
+            ("dog", Layer::Dictionary), // folded row identity first
+            ("<|cased|>", Layer::Keyword),
+            ("D", Layer::Character),
+            ("o", Layer::Character),
+            ("g", Layer::Character),
             (".", Layer::Character),
             (" ", Layer::Character),
             ("a", Layer::Character),
@@ -297,12 +309,16 @@ fn candidate_misses_split_to_parts_with_surfaces_kept() {
         texts,
         [
             ("dog", Layer::Dictionary),
+            ("<|cased|>", Layer::Keyword),
+            ("D", Layer::Character),
+            ("o", Layer::Character),
+            ("g", Layer::Character),
             ("\u{2019}", Layer::Character),
             ("s", Layer::Character),
         ]
     );
     assert_eq!(
-        pairs[1].0.id,
+        pairs[5].0.id,
         CHARACTER_OFFSET + char_index(&table, '\u{2019}')
     );
 }

@@ -3,11 +3,16 @@ use crate::*;
 
 use crate::bucket::BucketTable;
 use crate::dictionary::read_words_ordered;
+use crate::lexer::HARDCODED_BLOCK_FLOOR;
 use crate::lexer::KEYWORD_BEGIN_REPEAT;
+use crate::lexer::KEYWORD_CAPITALIZED;
+use crate::lexer::KEYWORD_CASE;
+use crate::lexer::KEYWORD_CASED;
 use crate::lexer::KEYWORD_END_REPEAT;
 use crate::lexer::KEYWORD_PAGE_SIZE;
 use crate::lexer::KEYWORD_REPEAT;
 use crate::lexer::KEYWORD_REPETITION;
+use crate::lexer::KEYWORD_UPPERCASED;
 use crate::lexer::Segmenter;
 use crate::ucd::CharClass;
 use crate::ucd::CharacterTable;
@@ -53,11 +58,11 @@ impl SyntaxTable {
     /// Build from the table's name column, in page order.
     pub(crate) fn from_names(names: Vec<String>) -> BiquestResult<Self> {
         snafu::ensure_whatever!(
-            names.len() <= KEYWORD_BEGIN_REPEAT as usize,
+            names.len() <= HARDCODED_BLOCK_FLOOR as usize,
             "the syntax table carries {} bindings; the page holds {} below the \
              hardcoded operator block",
             names.len(),
-            KEYWORD_BEGIN_REPEAT
+            HARDCODED_BLOCK_FLOOR
         );
         let mut ids = HashMap::with_capacity(names.len());
         for (index, name) in names.iter().enumerate() {
@@ -442,6 +447,29 @@ impl<'a> Assembler<'a> {
         }
     }
 
+    /// A case operator's dictionary follower, or a positioned fault.
+    fn dictionary_row_text(&self, id: u32, position: usize) -> BiquestResult<&str> {
+        let dictionary_offset = KEYWORD_PAGE_SIZE
+            + self.table.assigned_count() as u32
+            + self.buckets.count() as u32;
+        let reserve_offset = dictionary_offset + self.admitted.len() as u32;
+        snafu::ensure_whatever!(
+            id >= dictionary_offset && id < reserve_offset,
+            "wire fault at token {position}: a case token follows a dictionary \
+             word only"
+        );
+        Ok(&self.admitted[(id - dictionary_offset) as usize])
+    }
+
+    /// A character's UCD simple uppercase, itself when unmapped.
+    fn upper_char(&self, c: char) -> char {
+        self.table
+            .simple_uppercase
+            .get(&(c as u32))
+            .and_then(|&target| char::from_u32(target))
+            .unwrap_or(c)
+    }
+
     /// One content token id's text, or a positioned fault.
     fn content_text(&self, id: u32, position: usize) -> BiquestResult<String> {
         let character_offset = KEYWORD_PAGE_SIZE;
@@ -547,6 +575,18 @@ impl<'a> Assembler<'a> {
                      AbstractConceptMarker and never legal wire"
                 );
             }
+            if id == KEYWORD_CASE {
+                snafu::whatever!(
+                    "wire fault at token {position}: <|case|> is an \
+                     AbstractConceptMarker and never legal wire"
+                );
+            }
+            if id == KEYWORD_CASED || id == KEYWORD_CAPITALIZED || id == KEYWORD_UPPERCASED {
+                snafu::whatever!(
+                    "wire fault at token {position}: a case operator with no word \
+                     before it"
+                );
+            }
             if id == KEYWORD_REPEAT || id == KEYWORD_BEGIN_REPEAT || id == KEYWORD_END_REPEAT {
                 snafu::whatever!(
                     "wire fault at token {position}: a repetition operator with no unit \
@@ -558,6 +598,62 @@ impl<'a> Assembler<'a> {
             }
             let unit = self.content_text(id, position)?;
             let after = wire.get(position + 1).copied();
+            if after == Some(KEYWORD_CAPITALIZED) || after == Some(KEYWORD_UPPERCASED) {
+                // Postfix (the match first - order matters for the
+                // model): the row, then its case token.
+                let word = self.dictionary_row_text(id, position)?.to_string();
+                if after == Some(KEYWORD_UPPERCASED) {
+                    for c in word.chars() {
+                        interior.push(self.upper_char(c));
+                    }
+                } else {
+                    let mut chars = word.chars();
+                    if let Some(first) = chars.next() {
+                        interior.push(self.upper_char(first));
+                        interior.push_str(chars.as_str());
+                    }
+                }
+                position += 2;
+                continue;
+            }
+            if after == Some(KEYWORD_CASED) {
+                // The overlay is exactly the row's length in
+                // character tokens, each folding to the row's own
+                // character - the canonicality the encoder emits.
+                let word = self.dictionary_row_text(id, position)?.to_string();
+                let mut cursor = position + 2;
+                let character_offset = KEYWORD_PAGE_SIZE;
+                let keyboard_offset =
+                    character_offset + self.table.assigned_count() as u32;
+                for expected in word.chars() {
+                    let Some(&char_id) = wire.get(cursor) else {
+                        snafu::whatever!(
+                            "wire fault at token {cursor}: a cased overlay ends \
+                             before its row's length"
+                        );
+                    };
+                    snafu::ensure_whatever!(
+                        char_id >= character_offset && char_id < keyboard_offset,
+                        "wire fault at token {cursor}: a cased overlay wants \
+                         character tokens"
+                    );
+                    let row = &self.table.rows[(char_id - character_offset) as usize];
+                    let Some(c) = char::from_u32(row.code_point) else {
+                        snafu::whatever!(
+                            "wire fault at token {cursor}: unrenderable code point"
+                        );
+                    };
+                    snafu::ensure_whatever!(
+                        self.table.fold(c) == Some(expected),
+                        "wire fault at token {cursor}: a cased overlay character \
+                         does not fold to its row's character"
+                    );
+                    interior.push(c);
+                    cursor += 1;
+                }
+                position = cursor;
+                continue;
+            }
             if after == Some(KEYWORD_REPEAT) {
                 snafu::ensure_whatever!(
                     self.repeatable(id),
@@ -655,10 +751,10 @@ impl<'a> Assembler<'a> {
                     "wire fault at token {position}: content id {id} outside a serialization"
                 );
             }
-            if id >= KEYWORD_BEGIN_REPEAT {
+            if id >= HARDCODED_BLOCK_FLOOR {
                 snafu::whatever!(
-                    "wire fault at token {position}: a repetition operator outside a \
-                     serialization"
+                    "wire fault at token {position}: a hardcoded operator or marker \
+                     outside a serialization"
                 );
             }
             let indent = INDENT.repeat(stack.len());
@@ -713,16 +809,26 @@ impl<'a> Assembler<'a> {
                         keyword_name(end_noun, end_position + 1)?
                     );
                     let content_indent = INDENT.repeat(stack.len() + 1);
+                    // A blank interior line stays byte-empty: indenting
+                    // it would decode a whitespace line the author
+                    // never wrote.
+                    let indented = |line: &str| -> String {
+                        if line.is_empty() {
+                            String::from("\n")
+                        } else {
+                            format!("{content_indent}{line}\n")
+                        }
+                    };
                     if interior_needs_raw(&interior) {
                         let (opener, closer) = raw_delimiters(&interior);
                         out.push_str(&format!("{content_indent}{opener}\n"));
                         for line in interior.split('\n') {
-                            out.push_str(&format!("{content_indent}{line}\n"));
+                            out.push_str(&indented(line));
                         }
                         out.push_str(&format!("{content_indent}{closer}\n"));
                     } else if !interior.is_empty() {
                         for line in interior.split('\n') {
-                            out.push_str(&format!("{content_indent}{line}\n"));
+                            out.push_str(&indented(line));
                         }
                     }
                     out.push_str(&format!("{indent}{HEAD_END} {noun_name}\n"));

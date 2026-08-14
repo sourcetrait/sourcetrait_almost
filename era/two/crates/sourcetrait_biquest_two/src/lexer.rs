@@ -24,17 +24,40 @@ pub(crate) const KEYWORD_END_REPEAT: u32 = 0xFD;
 pub(crate) const KEYWORD_REPEAT: u32 = 0xFE;
 pub(crate) const KEYWORD_REPETITION: u32 = 0xFF;
 
+/// The case family (TheUser's design), uniformly POSTFIX: the match
+/// first, then the tokenizer token. This = this-row CAPITALIZED;
+/// THIS = this-row UPPERCASED; QuILL = quill-row CASED then exactly
+/// the row's length in character tokens carrying the surface,
+/// length-bounded by the row so no terminator exists. CASE is the
+/// AbstractConceptMarker backing the case AbstractConcept - illegal
+/// in wire - and the three operators associate to it in the store.
+pub(crate) const KEYWORD_CASED: u32 = 0xF8;
+pub(crate) const KEYWORD_CASE: u32 = 0xF9;
+pub(crate) const KEYWORD_CAPITALIZED: u32 = 0xFA;
+pub(crate) const KEYWORD_UPPERCASED: u32 = 0xFB;
+
+/// The lowest hardcoded id: user bindings stop below it.
+pub(crate) const HARDCODED_BLOCK_FLOOR: u32 = KEYWORD_CASED;
+
 pub(crate) const BEGIN_REPEAT_ALIAS: &str = "<|begin_repeat|>";
 pub(crate) const END_REPEAT_ALIAS: &str = "<|end_repeat|>";
 pub(crate) const REPEAT_ALIAS: &str = "<|repeat|>";
 pub(crate) const REPETITION_ALIAS: &str = "<|repetition|>";
+pub(crate) const CASE_ALIAS: &str = "<|case|>";
+pub(crate) const CASED_ALIAS: &str = "<|cased|>";
+pub(crate) const CAPITALIZED_ALIAS: &str = "<|capitalized|>";
+pub(crate) const UPPERCASED_ALIAS: &str = "<|uppercased|>";
 
 /// The hardcoded alias table, id beside spelling.
-pub(crate) const HARDCODED_ALIASES: [(u32, &str); 4] = [
+pub(crate) const HARDCODED_ALIASES: [(u32, &str); 8] = [
     (KEYWORD_BEGIN_REPEAT, BEGIN_REPEAT_ALIAS),
     (KEYWORD_END_REPEAT, END_REPEAT_ALIAS),
     (KEYWORD_REPEAT, REPEAT_ALIAS),
     (KEYWORD_REPETITION, REPETITION_ALIAS),
+    (KEYWORD_CASE, CASE_ALIAS),
+    (KEYWORD_CASED, CASED_ALIAS),
+    (KEYWORD_CAPITALIZED, CAPITALIZED_ALIAS),
+    (KEYWORD_UPPERCASED, UPPERCASED_ALIAS),
 ];
 
 /// What one lexed piece is, before id resolution.
@@ -122,6 +145,11 @@ pub(crate) enum CorePart<'a> {
 pub(crate) struct ConnectedCandidate<'a> {
     pub(crate) full: String,
     pub(crate) core: String,
+    /// The case-preserving twins of full and core: surfaces kept,
+    /// connectors and edge apostrophes normalized - what the case
+    /// classification compares against the folded identity.
+    pub(crate) cased_full: String,
+    pub(crate) cased_core: String,
     pub(crate) leading: Option<char>,
     pub(crate) trailing: Option<char>,
     pub(crate) parts: Vec<CorePart<'a>>,
@@ -198,15 +226,29 @@ fn assemble_candidate<'a>(
             CorePart::Connector { normalized, .. } => normalized.to_string(),
         })
         .collect();
+    let cased_core: String = parts
+        .iter()
+        .map(|part| match part {
+            CorePart::Word { surface, .. } => (*surface).to_string(),
+            CorePart::Connector { normalized, .. } => normalized.to_string(),
+        })
+        .collect();
     let mut full = String::new();
+    let mut cased_full = String::new();
     if leading.is_some() {
         full.push('\'');
+        cased_full.push('\'');
     }
     full.push_str(&core);
+    cased_full.push_str(&cased_core);
     if trailing.is_some() {
         full.push('\'');
+        cased_full.push('\'');
     }
-    Ok((ConnectedCandidate { full, core, leading, trailing, parts }, cursor))
+    Ok((
+        ConnectedCandidate { full, core, cased_full, cased_core, leading, trailing, parts },
+        cursor,
+    ))
 }
 
 /// The candidate walk over boundary pieces: word runs extend across
@@ -286,6 +328,9 @@ pub(crate) struct Segmenter<'a> {
     bucket_offset: u32,
     /// Case-folded admitted word to its dictionary-layer id.
     word_ids: HashMap<String, u32>,
+    /// Per-row character counts, in id order - the CASED overlay's
+    /// length bound.
+    row_lengths: Vec<usize>,
     /// The ten Digit-class character ids, exempt from run encoding.
     digit_ids: HashSet<u32>,
 }
@@ -306,11 +351,20 @@ impl<'a> Segmenter<'a> {
             .enumerate()
             .map(|(index, word)| (word.clone(), dictionary_offset + index as u32))
             .collect();
+        let row_lengths = words.iter().map(|word| word.chars().count()).collect();
         let digit_ids = ('0'..='9')
             .filter_map(|digit| table.index_of(digit as u32))
             .map(|index| CHARACTER_OFFSET + index)
             .collect();
-        Self { table, buckets, bucket_offset, word_ids, digit_ids }
+        Self { table, buckets, bucket_offset, word_ids, row_lengths, digit_ids }
+    }
+
+    /// A dictionary id's character count, the CASED overlay bound.
+    fn row_length(&self, id: u32) -> Option<usize> {
+        let dictionary_offset = self.bucket_offset + self.buckets.count() as u32;
+        self.row_lengths
+            .get(id.checked_sub(dictionary_offset)? as usize)
+            .copied()
     }
 
     /// The character behind a character-layer token id.
@@ -318,6 +372,43 @@ impl<'a> Segmenter<'a> {
         let index = id.checked_sub(CHARACTER_OFFSET)? as usize;
         let row = self.table.rows.get(index)?;
         char::from_u32(row.code_point)
+    }
+
+    /// A character's UCD simple uppercase, itself when unmapped.
+    fn upper_char(&self, c: char) -> char {
+        self.table
+            .simple_uppercase
+            .get(&(c as u32))
+            .and_then(|&target| char::from_u32(target))
+            .unwrap_or(c)
+    }
+
+    /// The case operator a cased surface needs over its folded row
+    /// (TheUser's design): Some(None) bare, Some(op) capitalize or
+    /// uppercase, None for any other mix - the candidate character
+    /// splits instead, keeping totality for the McDonald class.
+    fn case_operator(&self, cased: &str, folded: &str) -> Option<Option<u32>> {
+        if cased == folded {
+            return Some(None);
+        }
+        let mut folded_chars = folded.chars();
+        let capitalized: String = match folded_chars.next() {
+            Some(first) => {
+                let mut out = String::with_capacity(folded.len());
+                out.push(self.upper_char(first));
+                out.push_str(folded_chars.as_str());
+                out
+            }
+            None => String::new(),
+        };
+        if cased == capitalized {
+            return Some(Some(KEYWORD_CAPITALIZED));
+        }
+        let uppercased: String = folded.chars().map(|c| self.upper_char(c)).collect();
+        if cased == uppercased {
+            return Some(Some(KEYWORD_UPPERCASED));
+        }
+        None
     }
 
     fn character_token(&self, c: char) -> BiquestResult<Token> {
@@ -359,6 +450,25 @@ impl<'a> Segmenter<'a> {
         let mut index = 0usize;
         while index < raw.len() {
             let (token, text) = &raw[index];
+            // A CASED overlay is exactly the row's length in
+            // character tokens and never run-encodes: the length
+            // bound IS the decode contract.
+            if token.layer == Layer::Keyword && token.id == KEYWORD_CASED {
+                let overlay_length = out
+                    .last()
+                    .and_then(|(row, _)| self.row_length(row.id))
+                    .unwrap_or(0);
+                out.push((*token, text.clone()));
+                index += 1;
+                for _ in 0..overlay_length {
+                    if index < raw.len() {
+                        let (overlay, overlay_text) = &raw[index];
+                        out.push((*overlay, overlay_text.clone()));
+                        index += 1;
+                    }
+                }
+                continue;
+            }
             let exempt = token.layer != Layer::Character
                 || self.digit_ids.contains(&token.id);
             if exempt {
@@ -434,6 +544,38 @@ impl<'a> Segmenter<'a> {
             tokens.push((self.character_token(c)?, kept));
             Ok(())
         };
+        // POSTFIX, uniformly: the match first, then the tokenizer
+        // token (TheUser's ruling).
+        let push_word = |tokens: &mut Vec<(Token, String)>,
+                         id: u32,
+                         operator: Option<u32>,
+                         folded: &str| {
+            let kept = if keep_text { folded.to_string() } else { String::new() };
+            tokens.push((Token { id, layer: Layer::Dictionary }, kept));
+            if let Some(operator) = operator {
+                let alias = HARDCODED_ALIASES
+                    .iter()
+                    .find(|(op, _)| *op == operator)
+                    .map(|(_, alias)| *alias)
+                    .unwrap_or("");
+                let kept = if keep_text { String::from(alias) } else { String::new() };
+                tokens.push((Token { id: operator, layer: Layer::Keyword }, kept));
+            }
+        };
+        let push_cased = |tokens: &mut Vec<(Token, String)>,
+                          id: u32,
+                          folded: &str,
+                          cased: &str|
+         -> BiquestResult<()> {
+            let kept = if keep_text { folded.to_string() } else { String::new() };
+            tokens.push((Token { id, layer: Layer::Dictionary }, kept));
+            let kept = if keep_text { String::from(CASED_ALIAS) } else { String::new() };
+            tokens.push((Token { id: KEYWORD_CASED, layer: Layer::Keyword }, kept));
+            for c in cased.chars() {
+                push_char(tokens, c)?;
+            }
+            Ok(())
+        };
         for item in candidate_items(self.table, text)? {
             let candidate = match item {
                 CandidateItem::Plain(piece_text) => {
@@ -445,8 +587,17 @@ impl<'a> Segmenter<'a> {
                 CandidateItem::Candidate(candidate) => candidate,
             };
             if let Some(&id) = self.word_ids.get(&candidate.full) {
-                let kept = if keep_text { candidate.full } else { String::new() };
-                tokens.push((Token { id, layer: Layer::Dictionary }, kept));
+                match self.case_operator(&candidate.cased_full, &candidate.full) {
+                    Some(operator) => {
+                        push_word(&mut tokens, id, operator, &candidate.full);
+                    }
+                    None => push_cased(
+                        &mut tokens,
+                        id,
+                        &candidate.full,
+                        &candidate.cased_full,
+                    )?,
+                }
                 continue;
             }
             let edged = candidate.leading.is_some() || candidate.trailing.is_some();
@@ -454,8 +605,17 @@ impl<'a> Segmenter<'a> {
                 if let Some(c) = candidate.leading {
                     push_char(&mut tokens, c)?;
                 }
-                let kept = if keep_text { candidate.core } else { String::new() };
-                tokens.push((Token { id, layer: Layer::Dictionary }, kept));
+                match self.case_operator(&candidate.cased_core, &candidate.core) {
+                    Some(operator) => {
+                        push_word(&mut tokens, id, operator, &candidate.core);
+                    }
+                    None => push_cased(
+                        &mut tokens,
+                        id,
+                        &candidate.core,
+                        &candidate.cased_core,
+                    )?,
+                }
                 if let Some(c) = candidate.trailing {
                     push_char(&mut tokens, c)?;
                 }
@@ -464,20 +624,27 @@ impl<'a> Segmenter<'a> {
             if let Some(c) = candidate.leading {
                 push_char(&mut tokens, c)?;
             }
-            for part in candidate.parts {
+            for part in &candidate.parts {
                 match part {
                     CorePart::Word { folded, surface } => {
-                        if let Some(&id) = self.word_ids.get(&folded) {
-                            let kept = if keep_text { folded } else { String::new() };
-                            tokens.push((Token { id, layer: Layer::Dictionary }, kept));
-                        } else {
-                            for c in surface.chars() {
-                                push_char(&mut tokens, c)?;
+                        match self.word_ids.get(folded) {
+                            Some(&id) => match self.case_operator(surface, folded) {
+                                Some(operator) => {
+                                    push_word(&mut tokens, id, operator, folded);
+                                }
+                                None => {
+                                    push_cased(&mut tokens, id, folded, surface)?;
+                                }
+                            },
+                            None => {
+                                for c in surface.chars() {
+                                    push_char(&mut tokens, c)?;
+                                }
                             }
                         }
                     }
                     CorePart::Connector { surface, .. } => {
-                        push_char(&mut tokens, surface)?;
+                        push_char(&mut tokens, *surface)?;
                     }
                 }
             }

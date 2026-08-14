@@ -18,7 +18,8 @@ admitted-wordlist order.
 The page allocates from both ends (TheUser): user bindings from 0x00
 up (the Syntax.nuon draft), the hardcoded operator block from 0xFF
 down - 0xFC BEGIN_REPEAT, 0xFD END_REPEAT, 0xFE REPEAT, 0xFF
-REPETITION. The first three are legal wire both directions - the
+REPETITION, then the case family at 0xF8 CASED, 0xF9 CASE, 0xFA
+CAPITALIZED, 0xFB UPPERCASED. The first three are legal wire both directions - the
 model may speak them (TheUser). REPETITION is the
 AbstractConceptMarker backing the repetition AbstractConcept
 (associations.rs): illegal in wire, never emitted, never parsed - it
@@ -100,10 +101,21 @@ surface) - the ladder is dictionary-agnostic. segment_pieces keeps
 each token's text: a dictionary token's text is the FOLDED,
 apostrophe-normalized row identity, not the surface spelling.
 
-Case is folded at lookup and the emitted id is the folded row: the
-surface-case round-trip (marker token, renderer rule, or lossy) is an
-open decision; token counts, and therefore the compression ledger, are
-unaffected by whichever lands.
+Case is folded at lookup and the emitted id is always the folded row;
+the surface rides POSTFIX case tokens (TheUser's design - the match
+first, then the tokenizer token, because the word association firing
+immediately is faster for the model). Classification against the UCD
+simple maps: the folded surface is the bare row; the
+first-char-uppercased form takes CAPITALIZED; the all-uppercased form
+takes UPPERCASED; anything else (the QuILL class) takes CASED plus
+exactly the row's length in surface character tokens - length-bounded
+by the row itself, so no terminator exists, and the overlay is exempt
+from run encoding because the length bound IS the decode contract.
+The overlay carries the connector-normalized cased form, so a curly
+apostrophe decodes normalized like every other surface. One row per
+word against OLMo's six fossilized case-and-space variants (this/This/
+THIS each twice, measured); the ours-corpus ledger prices the family
+at 1.689 against the caseless 1.641.
 
 ## fn tokenize_text / fn split_markers
 
