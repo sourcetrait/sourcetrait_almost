@@ -24,6 +24,28 @@ fn typography_normalizes_the_ruled_set() {
 }
 
 #[test]
+fn typography_normalizes_the_extended_set() {
+    assert_eq!(normalize_typography("1\u{2044}2"), "1/2");
+    assert_eq!(normalize_typography("3\u{2212}1"), "3-1");
+    assert_eq!(normalize_typography("so\u{2026}"), "so...");
+    assert_eq!(normalize_typography("\u{2022} item"), "- item");
+    assert_eq!(normalize_typography("\u{00AB}x\u{00BB} \u{201E}y\u{201D}"), "\"x\" \"y\"");
+    assert_eq!(normalize_typography("\u{2039}z\u{203A} \u{201A}w\u{2019}"), "'z' 'w'");
+    assert_eq!(normalize_typography("it\u{00B4}s"), "it's");
+    assert_eq!(normalize_typography("a\u{00A0}b\u{2009}c\u{202F}d"), "a b c d");
+    assert_eq!(normalize_typography("a\u{00AD}b\u{200B}c\u{200E}d"), "abcd");
+    assert_eq!(normalize_typography("a\u{2015}b 5\u{2012}6"), "a - b 5-6");
+}
+
+#[test]
+fn semantic_symbols_keep_their_rows() {
+    assert_eq!(normalize_typography("hy\u{00B7}phen"), "hy\u{00B7}phen");
+    assert_eq!(normalize_typography("2\u{00D7}4"), "2\u{00D7}4");
+    assert_eq!(normalize_typography("Hawai\u{02BC}i"), "Hawai\u{02BC}i");
+    assert_eq!(normalize_typography("5\u{2032} 10\u{2033}"), "5\u{2032} 10\u{2033}");
+}
+
+#[test]
 fn em_dash_carries_its_missing_spacing() {
     assert_eq!(normalize_typography("war\u{2014}peace"), "war - peace");
     assert_eq!(normalize_typography("war \u{2014} peace"), "war - peace");

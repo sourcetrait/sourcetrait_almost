@@ -3,21 +3,28 @@
 use crate::*;
 
 /// Normalize typographic characters to their ASCII equivalents
-/// (TheUser rulings). Single-quote marks become the apostrophe,
-/// double-quote marks the double quote, the en-dash a bare dash, and
-/// the em-dash a single dash carrying the spacing the typographic
-/// form omitted (' - ' between words; no space doubles where spacing
-/// already exists). Applied at document rendering; raw page
-/// extraction stays faithful.
+/// (TheUser rulings). Quote marks collapse to the apostrophe and the
+/// double quote by family; dashes to the bare dash, with the em-dash
+/// and horizontal bar carrying the spacing the typographic form
+/// omitted (' - ' between words; no space doubles where spacing
+/// already exists); the ellipsis to three dots, the fraction slash
+/// to the slash, the typographic spaces to the plain space, and the
+/// invisibles drop. Semantic symbols keep their rows: middle dot,
+/// multiplication sign, the modifier apostrophe (Letter-class), and
+/// the primes. Applied at document rendering; raw page extraction
+/// stays faithful.
 pub(crate) fn normalize_typography(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let chars: Vec<char> = text.chars().collect();
     for (index, &c) in chars.iter().enumerate() {
         match c {
-            '\u{2018}' | '\u{2019}' => out.push('\''),
-            '\u{201C}' | '\u{201D}' => out.push('"'),
-            '\u{2013}' => out.push('-'),
-            '\u{2014}' => {
+            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{2039}' | '\u{203A}'
+            | '\u{00B4}' => out.push('\''),
+            '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{00AB}' | '\u{00BB}' => {
+                out.push('"')
+            }
+            '\u{2013}' | '\u{2012}' | '\u{2212}' | '\u{2022}' => out.push('-'),
+            '\u{2014}' | '\u{2015}' => {
                 let spaced_before =
                     index == 0 || chars[index - 1].is_whitespace();
                 let spaced_after = index + 1 == chars.len()
@@ -30,6 +37,12 @@ pub(crate) fn normalize_typography(text: &str) -> String {
                     out.push(' ');
                 }
             }
+            '\u{2026}' => out.push_str("..."),
+            '\u{2044}' => out.push('/'),
+            '\u{00A0}' | '\u{2002}' | '\u{2003}' | '\u{2009}' | '\u{202F}' => {
+                out.push(' ')
+            }
+            '\u{00AD}' | '\u{200B}' | '\u{200E}' | '\u{200F}' => {}
             other => out.push(other),
         }
     }

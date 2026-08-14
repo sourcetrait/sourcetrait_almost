@@ -266,6 +266,27 @@ pub(crate) fn index_find_title(
     Ok(None)
 }
 
+/// Every index row whose title the matcher keeps - the whole-scan
+/// form behind fold-aware word lookups.
+pub(crate) fn index_matches(
+    path: &Path,
+    matcher: &mut dyn FnMut(&str) -> bool,
+) -> BiquestResult<Vec<IndexRow>> {
+    let source = open_source(path)?;
+    let mut rows = Vec::new();
+    for line in source.lines() {
+        let line = line?;
+        if line.is_empty() {
+            continue;
+        }
+        let row = parse_index_line(&line)?;
+        if matcher(&row.title) {
+            rows.push(row);
+        }
+    }
+    Ok(rows)
+}
+
 /// The pages of one multistream block: seek to the index offset and
 /// decode exactly one bz2 stream (about a hundred pages).
 pub(crate) fn read_block(dump: &Path, offset: u64) -> BiquestResult<Vec<WikiPage>> {

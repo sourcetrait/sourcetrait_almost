@@ -1,12 +1,16 @@
 //! The WikimediaDumpTool verbs: raw-source page access, the parse
-//! test surface, and the ruled typography normalization filter.
+//! test surface, the ruled typography normalization filter, and the
+//! word-document renderer.
 use crate::*;
 
+use crate::ucd::CharacterTable;
+use crate::wikidoc::render_word_document;
 use crate::wikitext::normalize_typography;
 use crate::wikitext::parse_blocks;
 use crate::wikitext::Block;
 use crate::wikitext::Inline;
 use crate::wikixml::index_find_title;
+use crate::wikixml::index_matches;
 use crate::wikixml::open_pages;
 use crate::wikixml::read_block;
 use crate::wikixml::WikiPage;
@@ -222,5 +226,96 @@ pub(crate) fn wikimedia_normalize(args: &WikimediaNormalizeArgs) -> BiquestResul
         },
     };
     print!("{}", normalize_typography(&text));
+    Ok(())
+}
+
+/// The word's ns0 page set, fold-matched on the title, ordered: the
+/// word's own casing first, the capitalized form next, the rest
+/// title-sorted.
+fn word_pages(
+    word: &str,
+    source: &Path,
+    index: Option<&PathBuf>,
+) -> BiquestResult<Vec<WikiPage>> {
+    let table = CharacterTable::embedded()?;
+    let folded = match table.fold_str(word) {
+        Ok(folded) => folded,
+        Err(c) => snafu::whatever!(
+            "the word carries an unassigned code point U+{:04X}",
+            c as u32
+        ),
+    };
+    let matches_word = |title: &str| -> bool {
+        !title.contains(':')
+            && table.fold_str(title).is_ok_and(|title_folded| title_folded == folded)
+    };
+    let mut pages: Vec<WikiPage> = match index {
+        Some(index) => {
+            let mut matcher = |title: &str| matches_word(title);
+            let rows = index_matches(index, &mut matcher)?;
+            let mut collected = Vec::new();
+            for row in &rows {
+                let block = read_block(source, row.offset)?;
+                collected.extend(
+                    block.into_iter().filter(|page| page.title == row.title),
+                );
+            }
+            collected
+        }
+        None => {
+            let mut reader = open_pages(source)?;
+            let mut collected = Vec::new();
+            while let Some(page) = reader.next_page()? {
+                if matches_word(&page.title) {
+                    collected.push(page);
+                }
+            }
+            collected
+        }
+    };
+    pages.retain(|page| page.ns == 0 && page.redirect.is_none());
+    let capitalized: String = {
+        let mut chars = word.chars();
+        match chars.next() {
+            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            None => String::new(),
+        }
+    };
+    pages.sort_by_key(|page| {
+        let rank = if page.title == word {
+            0
+        } else if page.title == capitalized {
+            1
+        } else {
+            2
+        };
+        (rank, page.title.clone())
+    });
+    Ok(pages)
+}
+
+/// `biquest wikimedia document`: the word's one markdown document on
+/// stdout, audit rows as NUON lines on stderr.
+pub(crate) fn wikimedia_document(args: &WikimediaDocumentArgs) -> BiquestResult<()> {
+    let pages = word_pages(&args.word, &args.source, args.index.as_ref())?;
+    snafu::ensure_whatever!(
+        !pages.is_empty(),
+        "no ns0 pages fold-match {:?} in {}",
+        args.word,
+        args.source.display()
+    );
+    let document = render_word_document(&pages)?;
+    print!("{}", document.markdown);
+    for row in &document.audit {
+        let record = harness::nu::Value::record(
+            harness::nu::record! {
+                "page" => v_str(&row.page),
+                "class" => v_str(&row.class),
+                "detail" => v_str(&row.detail),
+            },
+            span(),
+        );
+        eprintln!("{}", harness::nu::to_nuon_text(&record)?);
+    }
     Ok(())
 }
