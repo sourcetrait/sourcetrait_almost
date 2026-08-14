@@ -690,8 +690,35 @@ impl<'a> Renderer<'a> {
                 };
                 format!("[{prefix}] + {}", self.anchored_argument(base))
             }
-            "affix" | "af" | "compound" | "com" | "confix" => {
+            "affix" | "af" | "compound" | "com" => {
                 self.plus_joined(positional.get(1..).unwrap_or(&[]))
+            }
+            "confix" => {
+                // A confix is prefix + ... + suffix: the first part
+                // hyphenates trailing, the last leading.
+                let parts: Vec<&str> = positional
+                    .get(1..)
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter(|part| !part.is_empty())
+                    .copied()
+                    .collect();
+                let last = parts.len().saturating_sub(1);
+                let rendered: Vec<String> = parts
+                    .iter()
+                    .enumerate()
+                    .map(|(index, part)| {
+                        let affixed = if index == 0 && !part.ends_with('-') {
+                            format!("{part}-")
+                        } else if index == last && !part.starts_with('-') {
+                            format!("-{part}")
+                        } else {
+                            (*part).to_string()
+                        };
+                        self.anchored_argument(&affixed)
+                    })
+                    .collect();
+                rendered.join(" + ")
             }
             // Pure metadata: categories, sense ids, dates, and
             // maintenance stubs carry no document meaning.
