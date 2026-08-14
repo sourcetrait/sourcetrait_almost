@@ -3,9 +3,11 @@ use crate::*;
 pub fn run() {
     let cli = <Cli as clap::Parser>::parse();
     let outcome = match &cli.command {
+        Command::Assemble(args) => assemble_text(args),
         Command::Associations { command } => match command {
             AssociationsCommand::Build(args) => associations_build(args),
         },
+        Command::Disassemble(args) => disassemble_wire(args),
         Command::Doc { command } => match command {
             DocCommand::Cli => doc_cli(),
         },

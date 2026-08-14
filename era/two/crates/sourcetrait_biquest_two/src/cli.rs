@@ -20,11 +20,15 @@ pub(crate) struct Cli {
 
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum Command {
+    /// Assemble Quill assembly text into wire token ids.
+    Assemble(AssembleArgs),
     /// The ImagineQuestAssociations store.
     Associations {
         #[command(subcommand)]
         command: AssociationsCommand,
     },
+    /// Disassemble wire token ids back into Quill assembly.
+    Disassemble(DisassembleArgs),
     /// Self-documentation of the always-moving surface.
     Doc {
         #[command(subcommand)]
@@ -48,6 +52,38 @@ pub(crate) enum Command {
 pub(crate) struct TokenizeArgs {
     /// The text to tokenize.
     pub(crate) text: String,
+    /// An admitted wordlist (.nuon) as the dictionary; absent = the
+    /// embedded full English set.
+    #[arg(long)]
+    pub(crate) admitted: Option<PathBuf>,
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct AssembleArgs {
+    /// The assembly text; --file supplies it instead.
+    pub(crate) text: Option<String>,
+    /// Read the assembly from a file.
+    #[arg(long)]
+    pub(crate) file: Option<PathBuf>,
+    /// The keyword-page binding table (Syntax.nuon).
+    #[arg(long)]
+    pub(crate) syntax: PathBuf,
+    /// An admitted wordlist (.nuon) as the dictionary; absent = the
+    /// embedded full English set.
+    #[arg(long)]
+    pub(crate) admitted: Option<PathBuf>,
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct DisassembleArgs {
+    /// The wire as a NUON int list; --file supplies it instead.
+    pub(crate) ids: Option<String>,
+    /// Read the wire (NUON int list) from a file.
+    #[arg(long)]
+    pub(crate) file: Option<PathBuf>,
+    /// The keyword-page binding table (Syntax.nuon).
+    #[arg(long)]
+    pub(crate) syntax: PathBuf,
     /// An admitted wordlist (.nuon) as the dictionary; absent = the
     /// embedded full English set.
     #[arg(long)]
