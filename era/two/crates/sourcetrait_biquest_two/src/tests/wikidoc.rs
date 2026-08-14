@@ -536,6 +536,43 @@ fn quotation_helpers_and_examples_render() {
 }
 
 #[test]
+fn derived_aliases_and_the_definition_rescue_arms_render() {
+    // The 401k catch: nstd sp resolves through the derived alias
+    // table (a template redirect the hand-grown list missed).
+    assert!(sense_doc("# {{nstd sp|en|401(k)}}.", "401k")
+        .contains("1. Nonstandard spelling of [401(k)]."));
+    assert!(sense_doc("# {{obs form|en|word}}.", "worde")
+        .contains("1. Obsolete form of [word]."));
+    assert!(sense_doc("# {{alt case|en|internet}}.", "Internet")
+        .contains("1. Alternative case form of [internet]."));
+    assert!(sense_doc("# {{short for|en|gonna,going to|nocap=1}}.", "gon")
+        .contains("1. short for [gonna], [going to]."));
+    assert!(sense_doc("# {{only used in|en|get the drop on}}.", "drop")
+        .contains("1. Only used in [get the drop on]."));
+    assert!(sense_doc("# {{&lit|en|kick|the bucket}}.", "kick the bucket")
+        .contains("1. Used other than figuratively or idiomatically: see [kick], [the bucket]."));
+    assert!(sense_doc("# {{demonym-noun|en|the <<city:pref/Alexandria>>, <<c/Egypt>>}}.", "Alexandrian")
+        .contains("1. A native or inhabitant of the city of [Alexandria], [Egypt]."));
+    assert!(sense_doc("# {{demonym-adj|en|Arizona}}.", "Arizonan")
+        .contains("1. Of, from, or relating to Arizona."));
+    assert!(sense_doc("# {{SI-unit|en|micro|meter}}.", "micrometer").contains(
+        "1. (metrology) An SI unit of length equal to 10^-6 [meter]s. Symbol: μm."
+    ));
+    assert!(sense_doc("# {{staco|Cleveland|CLE|Ohio}}.", "CLE").contains(
+        "1. (rail transport) The station code of [CLE](Cleveland) in Ohio."
+    ));
+    assert!(sense_doc("# {{tcl|en|Belgium|id=Q31}}.", "Belgien")
+        .contains("1. See [Belgium]."));
+    assert!(
+        sense_doc("# {{name translit|en|ru|Иван|type=male given name}}.", "Ivan")
+            .contains("1. Transliteration of the Russian male given name [Иван]."),
+    );
+    // A label carrying a template renders it rather than leaking it.
+    assert!(sense_doc("# {{lb|en|preceded by {{m|en|the}}}} A topic.", "talk")
+        .contains("1. (preceded by [the]) A topic."));
+}
+
+#[test]
 fn silent_metadata_files_no_audit_anywhere() {
     let text = "==English==\n\n===Etymology===\n{{root|en|ine-pro|*bher-}}\nFrom use.\n\n===Noun===\n{{en-noun}}\n\n# A sense. {{C|en|Dogs}}\n\n{{cln|en|nouns}}\n\n====Synonyms====\n{{topics|en|animals}}\n* {{l|en|hound}}\n";
     let document = render_word_document(&[page("dog", text)]).expect("render");

@@ -99,6 +99,16 @@ English content) are the corpus emitter's .empty.md convention with
 the document_empty audit class - skippable by suffix, existence
 known (TheUser).
 
+The alias table is DERIVED, not hand-grown: the dump's own
+Template-namespace redirects, transitively resolved, filtered to
+" of" targets (146 rows at 20260801). The hand-grown list this
+replaced missed members by construction - nstd sp was TheUser's
+401k catch, and the damage sweep then measured 5,033 files with
+destroyed definition lines, obs form and alt case the biggest
+alias-class causes. The " of" filter's misses get their own arms:
+short for and only used in (form-of siblings whose canonical names
+do not end in " of").
+
 The en- prefixed " of" family is excluded from the shape rule:
 those templates bake lang=en, so the lemma sits in the first
 positional and the generic slots read the lemma as a language -
@@ -219,6 +229,29 @@ because inline rendering trims - the boundary spaces around
 <<markers>> would otherwise fuse. Extra-information tails (capital=,
 caplc=, seat=, ...) render as "; label: [X]" lists. @-directives
 audit with the signature.
+
+## The definition-rescue arms (the damage-sweep fix list)
+
+The corpus-wide damage sweep (empty definition lines joined against
+the audit) named these as destroyed-definition causes, each
+implemented from its fetched source: the name-translit family
+(name translit/respelling/obor - Module:names' entry point; "of the
+<Language> <type> [name]", "of a <Language> <type>" nameless);
+demonym-noun ("A native or inhabitant of X, or of Y") and
+demonym-adj ("Of, from, or relating to"), whose toponyms ride the
+place single-spec renderer; SI-unit from the template's own switch
+tables (prefix exponents and symbols, base quantities and symbols);
+staco/station code (the template body is a plain sentence);
+&lit's fixed wording; short for and only used in as comma-multi
+form-of shapes. transclude/tcl pulls its definition from ANOTHER
+page - unreachable single-page, so it degrades to the honest
+"See [x]." cross-reference. The leak class had two sinks: lb labels
+carrying templates now re-render, and anchored_argument treats a
+{{-carrying argument as markup. anchor() guards empty inputs -
+"[]" is damage, never output. The pref-affix "the" is
+position-gated separately from the name's own the-flag: authors
+write their own "the" before single-spec markers (the state of New
+York shows it, city of Alexandria after "the " does not double).
 
 ## The straggler set
 

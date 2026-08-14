@@ -63,10 +63,12 @@ fn main() {
         date,
     );
     let place = render_place(&pages[PLACE_PLACETYPES], &pages[PLACE_LOCATIONS], date);
+    let form_of = render_form_of_aliases(dump, index, date);
 
     for (family, file, payload) in [
         ("languages", "languages.nuon", languages),
         ("form_of", "tags.nuon", tags),
+        ("form_of", "form_of.nuon", form_of),
         ("place", "place.nuon", place),
     ] {
         let dir = out_dir.join(family).join(date);
@@ -218,6 +220,159 @@ fn provenance_header(subject: &str, sources: &str, date: &str) -> String {
          # repository's docs/licenses/wiktionary/). Re-derive on a dump\n\
          # bump via `cargo run --release --example derive_vendored`.\n"
     )
+}
+
+// ------------------------------------------------------------ form-of aliases
+
+/// The complete form-of alias vocabulary, from the dump's own
+/// Template-namespace redirects: every redirect whose transitively
+/// resolved target ends in " of". This is the whole alias surface -
+/// the hand-grown list this replaces missed members by construction.
+fn render_form_of_aliases(dump: &std::path::Path, index: &std::path::Path, date: &str) -> String {
+    // Index pass: the blocks holding Template-namespace pages.
+    let index_file = std::fs::File::open(index).expect("open index");
+    let index_reader: Box<dyn BufRead> = if index.extension().is_some_and(|e| e == "bz2") {
+        Box::new(std::io::BufReader::with_capacity(
+            1 << 20,
+            bzip2::read::MultiBzDecoder::new(std::io::BufReader::with_capacity(
+                1 << 20,
+                index_file,
+            )),
+        ))
+    } else {
+        Box::new(std::io::BufReader::with_capacity(1 << 20, index_file))
+    };
+    let mut offsets: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+    for line in index_reader.lines() {
+        let line = line.expect("index line");
+        let mut parts = line.splitn(3, ':');
+        let (Some(offset), Some(_), Some(title)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        if title.starts_with("Template:") {
+            offsets.insert(offset.parse().expect("index offset"));
+        }
+    }
+
+    // Block pass: template redirect pairs, source -> target, both
+    // without the namespace prefix.
+    let mut redirects: HashMap<String, String> = HashMap::new();
+    for offset in offsets {
+        for (title, target) in block_template_redirects(dump, offset) {
+            redirects.insert(title, target);
+        }
+    }
+
+    // Transitive resolution, then the " of" filter. Targets in the
+    // en- prefixed family stay out: those templates bake their
+    // language and have their own arms.
+    let mut aliases: Vec<(String, String)> = Vec::new();
+    for source in redirects.keys() {
+        let mut target = source.clone();
+        for _ in 0..4 {
+            match redirects.get(&target) {
+                Some(next) => target = next.clone(),
+                None => break,
+            }
+        }
+        if target.ends_with(" of")
+            && target != "form of"
+            && !target.starts_with("en-")
+            && source != &target
+        {
+            aliases.push((source.clone(), target));
+        }
+    }
+    aliases.sort();
+    aliases.dedup();
+
+    let mut out = provenance_header(
+        "form-of alias vocabulary",
+        "the Template-namespace redirects whose resolved targets\n\
+         # end in \" of\"",
+        date,
+    );
+    out.push_str("{\n    aliases: [\n        [ name full ];\n");
+    for (name, full) in &aliases {
+        out.push_str(&format!(
+            "        [ {} {} ]\n",
+            nuon_str(name),
+            nuon_str(full)
+        ));
+    }
+    out.push_str("    ]\n}\n");
+    out
+}
+
+/// One multistream block's Template-namespace redirect pairs.
+fn block_template_redirects(dump: &std::path::Path, offset: u64) -> Vec<(String, String)> {
+    let mut file = std::fs::File::open(dump).expect("open dump");
+    file.seek(std::io::SeekFrom::Start(offset)).expect("seek");
+    let decoder = bzip2::read::BzDecoder::new(std::io::BufReader::with_capacity(1 << 20, file));
+    let mut reader =
+        quick_xml::Reader::from_reader(std::io::BufReader::with_capacity(1 << 20, decoder));
+    reader.config_mut().check_end_names = false;
+    let mut buf = Vec::new();
+    let mut path: Vec<Vec<u8>> = Vec::new();
+    let mut title = String::new();
+    let mut redirect: Option<String> = None;
+    let mut pairs = Vec::new();
+    loop {
+        buf.clear();
+        let event = match reader.read_event_into(&mut buf) {
+            Ok(event) => event,
+            Err(e) => panic!("xml parse failed at offset {offset}: {e}"),
+        };
+        use quick_xml::events::Event;
+        match event {
+            Event::Eof => break,
+            Event::Start(start) => {
+                let name = start.name().as_ref().to_vec();
+                if name == b"page" {
+                    title.clear();
+                    redirect = None;
+                    path.clear();
+                }
+                path.push(name);
+            }
+            Event::Empty(empty) => {
+                if empty.name().as_ref() == b"redirect" {
+                    for attribute in empty.attributes().flatten() {
+                        if attribute.key.as_ref() == b"title"
+                            && let Ok(value) = attribute.decoded_and_normalized_value(
+                                quick_xml::XmlVersion::Explicit1_0,
+                                reader.decoder(),
+                            )
+                        {
+                            redirect = Some(value.into_owned());
+                        }
+                    }
+                }
+            }
+            Event::Text(data) => {
+                if let [page, field] = path.as_slice()
+                    && page == b"page"
+                    && field == b"title"
+                {
+                    title.push_str(&data.decode().expect("xml text"));
+                }
+            }
+            Event::End(end) => {
+                if end.name().as_ref() == b"page"
+                    && let (Some(source), Some(target)) = (
+                        title.strip_prefix("Template:"),
+                        redirect.as_deref().and_then(|t| t.strip_prefix("Template:")),
+                    )
+                {
+                    pairs.push((source.to_string(), target.to_string()));
+                }
+                path.pop();
+            }
+            _ => {}
+        }
+    }
+    pairs
 }
 
 // ---------------------------------------------------------------- languages

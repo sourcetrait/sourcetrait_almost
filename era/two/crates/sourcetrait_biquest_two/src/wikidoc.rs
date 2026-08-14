@@ -562,10 +562,17 @@ fn plain_anchor_text(text: &str) -> String {
 }
 
 /// An anchor per the display/resource rule: bare when the display IS
-/// the resource name, display form otherwise.
+/// the resource name, display form otherwise. Empty inputs produce
+/// no anchor - "[]" is damage, never output.
 fn anchor(display: &str, target: &str) -> String {
-    if display == target {
-        format!("[{target}]")
+    if display.is_empty() && target.is_empty() {
+        return String::new();
+    }
+    if display.is_empty() {
+        return format!("[{target}]");
+    }
+    if display == target || target.is_empty() {
+        format!("[{display}]")
     } else {
         format!("[{display}]({target})")
     }
@@ -627,8 +634,15 @@ impl<'a> Renderer<'a> {
                 Inline::Link(link) => {
                     let target = link.target.trim();
                     if let Some(rest) = target.strip_prefix("w:") {
-                        let display = link.display.as_deref().unwrap_or(rest);
-                        out.push_str(&anchor(display, rest));
+                        let display = match link.display.as_deref() {
+                            Some(raw) if raw.contains("{{") => {
+                                let raw = raw.to_string();
+                                self.argument_text(&raw)
+                            }
+                            Some(raw) => raw.to_string(),
+                            None => rest.to_string(),
+                        };
+                        out.push_str(&anchor(&display, rest));
                         continue;
                     }
                     // A same-page section link carries no
@@ -644,17 +658,32 @@ impl<'a> Renderer<'a> {
                         continue;
                     }
                     // A section suffix addresses within the page; the
-                    // page name is the resource.
+                    // page name is the resource. A display half can
+                    // itself carry templates - re-render, never leak.
                     let page = match target.split_once('#') {
                         Some((page, _)) if !page.is_empty() => page,
                         _ => target,
                     };
-                    let base = link.display.as_deref().unwrap_or(page);
+                    let base = match link.display.as_deref() {
+                        Some(raw) if raw.contains("{{") => {
+                            let raw = raw.to_string();
+                            self.argument_text(&raw)
+                        }
+                        Some(raw) => raw.to_string(),
+                        None => page.to_string(),
+                    };
                     let display = format!("{base}{}", link.trail);
                     out.push_str(&anchor(&display, page));
                 }
-                Inline::ExternalLink { url, .. } => {
-                    self.audit("external_link_dropped", url.clone());
+                Inline::ExternalLink { url, label } => {
+                    // A labeled external link keeps its label as
+                    // plain prose (the printed form); a bare URL
+                    // drops. The label-less drop inside literal
+                    // brackets was the "[]" damage class.
+                    match label {
+                        Some(label) => out.push_str(&normalize_typography(label)),
+                        None => self.audit("external_link_dropped", url.clone()),
+                    }
                 }
                 Inline::Template(template) => {
                     let rendered = self.template_text(template);
@@ -686,11 +715,11 @@ impl<'a> Renderer<'a> {
         }
     }
 
-    /// An anchored word argument: already-linked text renders as it
-    /// is; a bare word bare-anchors.
+    /// An anchored word argument: text carrying links or templates
+    /// renders as it is; a bare word bare-anchors.
     fn anchored_argument(&mut self, raw: &str) -> String {
         let trimmed = raw.trim();
-        if trimmed.contains("[[") {
+        if trimmed.contains("[[") || trimmed.contains("{{") {
             self.argument_text(trimmed)
         } else if trimmed.is_empty() {
             String::new()
@@ -715,11 +744,20 @@ impl<'a> Renderer<'a> {
         };
         match name {
             "lb" | "lbl" | "label" => {
+                // A label can itself carry a template or link (the
+                // leak class); rendered ones pass through the inline
+                // renderer, plain vocabulary stays verbatim.
                 let qualifiers: Vec<String> = positional
                     .iter()
                     .skip(1)
                     .filter(|q| !q.is_empty() && **q != "_")
-                    .map(|q| q.to_string())
+                    .map(|q| {
+                        if q.contains("{{") || q.contains("[[") {
+                            self.argument_text(q)
+                        } else {
+                            q.to_string()
+                        }
+                    })
                     .collect();
                 if qualifiers.is_empty() {
                     String::new()
@@ -818,6 +856,68 @@ impl<'a> Renderer<'a> {
                     })
                     .collect();
                 rendered.join(" + ")
+            }
+            // The page-title magic word, not a template.
+            "PAGENAME" => self.page_title.to_string(),
+            "short for" => self.multi_term_form_of(template, "Short for"),
+            "only used in" | "only in" => {
+                self.multi_term_form_of(template, "Only used in")
+            }
+            "&lit" => {
+                let terms: Vec<String> = positional
+                    .iter()
+                    .skip(1)
+                    .filter(|part| !part.is_empty())
+                    .map(|part| self.anchored_argument(part))
+                    .collect();
+                format!(
+                    "Used other than figuratively or idiomatically: see {}.",
+                    terms.join(", ")
+                )
+            }
+            "demonym-noun" | "demonym-adj" => {
+                self.demonym_text(template, name == "demonym-noun")
+            }
+            "SI-unit" => self.si_unit_text(template),
+            "staco" | "station code" => {
+                let article = positional.first().copied().unwrap_or_default();
+                let display = positional
+                    .get(1)
+                    .filter(|part| !part.is_empty())
+                    .copied()
+                    .unwrap_or(article);
+                let place = positional.get(2).copied().unwrap_or_default();
+                if article.is_empty() {
+                    self.audit("template_unhandled", template_signature(template));
+                    String::new()
+                } else {
+                    let place = self.argument_text(place);
+                    let tail = if place.is_empty() {
+                        String::from(".")
+                    } else {
+                        format!(" in {place}.")
+                    };
+                    format!(
+                        "(rail transport) The station code of {}{tail}",
+                        anchor(display, article)
+                    )
+                }
+            }
+            // A transcluded definition lives on another page; the
+            // honest single-page rendering is the cross-reference.
+            "tcl" | "transclude" | "transclude sense" => {
+                let target = positional.get(1).copied().unwrap_or_default();
+                if target.is_empty() {
+                    self.audit("template_unhandled", template_signature(template));
+                    String::new()
+                } else {
+                    format!("See {}.", self.anchored_argument(target))
+                }
+            }
+            "name translit" => self.name_translit_text(template, "transliteration"),
+            "name respelling" => self.name_translit_text(template, "respelling"),
+            "name obor" => {
+                self.name_translit_text(template, "orthographic borrowing")
             }
             // Pure metadata: categories, sense ids, dates, and
             // maintenance stubs carry no document meaning.
@@ -1126,13 +1226,13 @@ impl<'a> Renderer<'a> {
     /// modifiers strip first.
     fn ety_term_anchor(&mut self, term: &str, alt: &str) -> String {
         let (base, _) = term_modifiers(term);
-        if base.contains("[[") {
+        if base.contains("[[") || base.contains("{{") {
             return self.argument_text(&base);
         }
         let (alt_base, _) = term_modifiers(alt);
         if alt_base.is_empty() {
             anchor(&base, &base)
-        } else if alt_base.contains("[[") {
+        } else if alt_base.contains("[[") || alt_base.contains("{{") {
             self.argument_text(&alt_base)
         } else {
             anchor(&alt_base, &base)
@@ -1478,6 +1578,226 @@ impl<'a> Renderer<'a> {
         if let Some(gloss) = named("t").or(named("gloss")) {
             let gloss = gloss.to_string();
             out.push_str(&self.gloss_text(&gloss));
+        }
+        if named("nocap").is_some() { out } else { ucfirst(&out) }
+    }
+
+    /// The comma-multi form-of shape shared by short for and only
+    /// used in: "<Label> [a], [b]" with inline modifiers and the
+    /// template-level gloss.
+    fn multi_term_form_of(&mut self, template: &Template, label: &str) -> String {
+        let template = normalize_numbered(template);
+        let named = |key: &str| -> Option<&str> {
+            template
+                .named
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+        let terms_raw = template
+            .positional
+            .get(1)
+            .cloned()
+            .unwrap_or_default();
+        let mut rendered: Vec<String> = Vec::new();
+        for piece in split_modifier_commas(&terms_raw) {
+            let (base, modifiers) = term_modifiers(piece.trim());
+            if base.is_empty() {
+                continue;
+            }
+            let alt = modifiers
+                .iter()
+                .find(|(name, _)| name == "alt")
+                .map(|(_, value)| value.clone())
+                .unwrap_or_default();
+            let mut text = self.ety_term_anchor(&base, &alt);
+            if let Some((_, gloss)) = modifiers.iter().find(|(name, _)| name == "t") {
+                let gloss = gloss.clone();
+                text.push_str(&self.gloss_text(&gloss));
+            }
+            rendered.push(text);
+        }
+        if rendered.is_empty() {
+            self.audit("template_unhandled", template_signature(&template));
+            return String::new();
+        }
+        let mut out = format!("{label} {}", rendered.join(", "));
+        if let Some(gloss) = named("t").or(named("gloss")) {
+            let gloss = gloss.to_string();
+            out.push_str(&self.gloss_text(&gloss));
+        }
+        if named("nocap").is_some() { lcfirst(&out) } else { out }
+    }
+
+    /// The demonym definitions: toponyms may embed place single-spec
+    /// markers; a w:-led toponym anchors its article name.
+    fn demonym_text(&mut self, template: &Template, noun: bool) -> String {
+        let template = normalize_numbered(template);
+        let toponyms: Vec<String> = template
+            .positional
+            .iter()
+            .skip(1)
+            .filter(|part| !part.trim().is_empty())
+            .map(|part| match part.trim().strip_prefix("w:") {
+                Some(rest) => anchor(rest, rest),
+                None => self.place_single_spec(part.trim()),
+            })
+            .collect();
+        if toponyms.is_empty() {
+            self.audit("template_unhandled", template_signature(&template));
+            return String::new();
+        }
+        if noun {
+            format!(
+                "A native or inhabitant of {}",
+                toponyms.join(", or of ")
+            )
+        } else {
+            format!("Of, from, or relating to {}", toponyms.join(", or "))
+        }
+    }
+
+    /// The SI-unit definition, the template's own switch tables:
+    /// "(metrology) An SI unit of <quantity> equal to 10^<n>
+    /// [<base>]s. Symbol: <prefix><base symbol>".
+    fn si_unit_text(&mut self, template: &Template) -> String {
+        const PREFIXES: [(&str, &str, &str); 24] = [
+            ("quecto", "-30", "q"),
+            ("ronto", "-27", "r"),
+            ("yocto", "-24", "y"),
+            ("zepto", "-21", "z"),
+            ("atto", "-18", "a"),
+            ("femto", "-15", "f"),
+            ("pico", "-12", "p"),
+            ("nano", "-9", "n"),
+            ("micro", "-6", "μ"),
+            ("milli", "-3", "m"),
+            ("centi", "-2", "c"),
+            ("deci", "-1", "d"),
+            ("deca", "1", "da"),
+            ("hecto", "2", "h"),
+            ("kilo", "3", "k"),
+            ("mega", "6", "M"),
+            ("giga", "9", "G"),
+            ("tera", "12", "T"),
+            ("peta", "15", "P"),
+            ("exa", "18", "E"),
+            ("zetta", "21", "Z"),
+            ("yotta", "24", "Y"),
+            ("ronna", "27", "R"),
+            ("quetta", "30", "Q"),
+        ];
+        const BASES: [(&str, &str, &str); 17] = [
+            ("ampere", "current", "A"),
+            ("candela", "luminous intensity", "cd"),
+            ("kelvin", "temperature", "K"),
+            ("gram", "mass", "g"),
+            ("gramme", "mass", "g"),
+            ("meter", "length", "m"),
+            ("metre", "length", "m"),
+            ("mole", "amount of substance", "mol"),
+            ("second", "time", "s"),
+            ("coulomb", "charge", "C"),
+            ("farad", "capacitance", "F"),
+            ("hertz", "frequency", "Hz"),
+            ("joule", "energy", "J"),
+            ("newton", "force", "N"),
+            ("ohm", "resistance", "Ω"),
+            ("pascal", "pressure", "Pa"),
+            ("watt", "power", "W"),
+        ];
+        let template = normalize_numbered(template);
+        let prefix = template.positional.get(1).cloned().unwrap_or_default();
+        let base = template.positional.get(2).cloned().unwrap_or_default();
+        let quantity_override = template
+            .positional
+            .get(3)
+            .filter(|value| !value.is_empty())
+            .cloned();
+        let Some(&(_, exponent, prefix_symbol)) =
+            PREFIXES.iter().find(|(name, _, _)| *name == prefix)
+        else {
+            self.audit("template_unhandled", template_signature(&template));
+            return String::new();
+        };
+        let known_base = BASES.iter().find(|(name, _, _)| *name == base);
+        let quantity = match (&quantity_override, known_base) {
+            (Some(quantity), _) => quantity.clone(),
+            (None, Some(&(_, quantity, _))) => quantity.to_string(),
+            (None, None) => {
+                self.audit("template_unhandled", template_signature(&template));
+                return String::new();
+            }
+        };
+        let base_symbol = known_base.map(|&(_, _, symbol)| symbol).unwrap_or_default();
+        format!(
+            "(metrology) An SI unit of {quantity} equal to 10^{exponent} \
+             [{base}]s. Symbol: {prefix_symbol}{base_symbol}"
+        )
+    }
+
+    /// The name-translit family (Module:names' entry point): a
+    /// transliterated, respelled, or orthographically borrowed name,
+    /// "of the <Language> <type> [name]" or "of a <Language> <type>"
+    /// when no name is given.
+    fn name_translit_text(&mut self, template: &Template, desctext: &str) -> String {
+        let template = normalize_numbered(template);
+        let named = |key: &str| -> Option<&str> {
+            template
+                .named
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+        let sources = template.positional.get(1).cloned().unwrap_or_default();
+        let language_names = self.ety_language_names(&sources, "or");
+        let types = named("type").unwrap_or("patronymic").to_string();
+        let mut type_text = types.split(',').map(str::trim).collect::<Vec<&str>>().join(", ");
+        if named("dim").is_some() {
+            type_text.push_str(" diminutive");
+        } else if named("aug").is_some() {
+            type_text.push_str(" augmentative");
+        }
+        let mut names: Vec<String> = Vec::new();
+        for raw in template.positional.iter().skip(2) {
+            let (base, modifiers) = term_modifiers(raw.trim());
+            if base.is_empty() {
+                continue;
+            }
+            let mut text = self.ety_term_anchor(&base, "");
+            for (key, value) in &modifiers {
+                match key.as_str() {
+                    "t" => {
+                        let gloss = value.clone();
+                        text.push_str(&self.gloss_text(&gloss));
+                    }
+                    "xlit" => text.push_str(&format!(", {}", anchor(value, value))),
+                    "eq" => {
+                        text.push_str(&format!(", equivalent to {}", anchor(value, value)));
+                    }
+                    _ => {}
+                }
+            }
+            names.push(text);
+        }
+        let mut out = format!("{desctext} of ");
+        if names.is_empty() {
+            out.push_str(&format!(
+                "{} {language_names} {type_text}",
+                indefinite_article(&language_names)
+            ));
+        } else {
+            out.push_str(&format!(
+                "the {language_names} {type_text} {}",
+                names.join(" or ")
+            ));
+        }
+        if let Some(addl) = named("addl") {
+            let addl = addl.to_string();
+            let rendered = self.argument_text(&addl);
+            if !rendered.is_empty() {
+                out.push_str(&format!(", {rendered}"));
+            }
         }
         if named("nocap").is_some() { out } else { ucfirst(&out) }
     }
@@ -2121,8 +2441,12 @@ impl<'a> Renderer<'a> {
                 }
                 _ => name.clone(),
             };
-            let takes_the = allow_the || index > 0 || modifiers.contains(&"the");
-            let the = takes_the && table.holonym_takes_the(&full_type, &name);
+            // Position gates whether an article may appear at all;
+            // the name's own the-flag decides the plain and suffix
+            // forms, while a prefix affix carries its position-gated
+            // "the" regardless of the name (the state of New York).
+            let position_the = allow_the || index > 0 || modifiers.contains(&"the");
+            let the = position_the && table.holonym_takes_the(&full_type, &name);
             let mut text = String::new();
             let anchored = if no_anchor || display_name.contains("[[") {
                 self.argument_text(&display_name)
@@ -2165,8 +2489,11 @@ impl<'a> Renderer<'a> {
                     } else {
                         affix_word.clone()
                     };
-                    text.push_str(&format!("the {word} of "));
-                    if the {
+                    if position_the {
+                        text.push_str("the ");
+                    }
+                    text.push_str(&format!("{word} of "));
+                    if table.holonym_takes_the(&full_type, &name) {
                         text.push_str("the ");
                     }
                     text.push_str(&anchored);
@@ -3641,8 +3968,12 @@ fn render_pos(renderer: &mut Renderer<'_>, section: &Section<'_>, level: usize) 
                 for inline in content {
                     let Inline::Template(template) = inline else { continue };
                     match template.name.as_str() {
-                        "syn" | "synonyms" => collect_sense_items(template, &mut synonyms),
-                        "ant" | "antonyms" => collect_sense_items(template, &mut antonyms),
+                        "syn" | "synonyms" => {
+                            collect_sense_items(renderer, template, &mut synonyms)
+                        }
+                        "ant" | "antonyms" => {
+                            collect_sense_items(renderer, template, &mut antonyms)
+                        }
                         "ux" | "uxi" | "usex" => {
                             let text = template
                                 .positional
@@ -3698,16 +4029,25 @@ fn render_pos(renderer: &mut Renderer<'_>, section: &Section<'_>, level: usize) 
 }
 
 /// The sense-relational items: word positionals past the language,
-/// their angle-bracket inline qualifiers stripped.
-fn collect_sense_items(template: &Template, items: &mut Vec<String>) {
+/// their angle-bracket inline qualifiers stripped; a markup-bearing
+/// item re-renders rather than leaking.
+fn collect_sense_items(
+    renderer: &mut Renderer<'_>,
+    template: &Template,
+    items: &mut Vec<String>,
+) {
     for raw in template.positional.iter().skip(1) {
         let word = match raw.find('<') {
             Some(cut) => &raw[..cut],
             None => raw.as_str(),
         };
         let word = word.trim();
-        if !word.is_empty() {
-            items.push(format!("- [{word}]"));
+        if word.is_empty() {
+            continue;
+        }
+        let anchored = renderer.anchored_argument(word);
+        if !anchored.is_empty() {
+            items.push(format!("- {anchored}"));
         }
     }
 }
