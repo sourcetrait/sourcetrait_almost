@@ -158,10 +158,13 @@ impl<'a> Renderer<'a> {
             match inline {
                 Inline::Text(text) => out.push_str(&normalize_typography(text)),
                 Inline::Nowiki(text) => out.push_str(&normalize_typography(text)),
+                // Emphasis is reserved (TheUser's cleanup is the
+                // ruling): source italics flatten - the renderer's
+                // own citation titles are the only italics - and
+                // source bold survives (the quote target).
                 Inline::Emphasis(emphasis) => out.push_str(match emphasis {
-                    Emphasis::Italic => "*",
-                    Emphasis::Bold => "**",
-                    Emphasis::BoldItalic => "***",
+                    Emphasis::Italic => "",
+                    Emphasis::Bold | Emphasis::BoldItalic => "**",
                 }),
                 Inline::Link(link) => {
                     let target = link.target.trim();
@@ -495,13 +498,17 @@ fn is_pos(name: &str) -> bool {
     POS_NAMES.contains(&name)
 }
 
-/// Render one page's English subtree into the renderer.
+/// Render one page's English subtree into the renderer. Output
+/// levels are fixed by section KIND, not source depth (TheUser's
+/// cleanup is the ruling): every top section is h2 - Etymology N
+/// included - POS headwords h3, and POS subsections h3, so single-
+/// and multi-etymology pages read uniformly.
 fn render_page(renderer: &mut Renderer<'_>, blocks: &[Block]) -> BiquestResult<()> {
     let sections = english_sections(blocks);
     let mut index = 0usize;
     while index < sections.len() {
         let section = &sections[index];
-        let out_level = section.level.saturating_sub(1).max(2);
+        let out_level = 2usize;
         let name = section.name.as_str();
         if DROP_SECTIONS.contains(&name) {
             renderer.audit("section_dropped", name.to_string());
@@ -530,7 +537,7 @@ fn render_page(renderer: &mut Renderer<'_>, blocks: &[Block]) -> BiquestResult<(
             // walk; list sections render, Translations drops.
             while index < sections.len() && sections[index].level > section.level {
                 let sub = &sections[index];
-                let sub_level = sub.level.saturating_sub(1).max(2);
+                let sub_level = 3usize;
                 let sub_name = sub.name.as_str();
                 if DROP_SECTIONS.contains(&sub_name) {
                     renderer.audit("section_dropped", sub_name.to_string());

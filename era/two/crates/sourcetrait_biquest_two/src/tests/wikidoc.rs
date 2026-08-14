@@ -50,6 +50,37 @@ fn only_the_english_subtree_renders() {
 }
 
 #[test]
+fn multi_etymology_pages_render_the_uniform_levels() {
+    let text = "==English==\n\n===Etymology 1===\nOne origin.\n\n====Noun====\n{{en-noun}}\n\n# A sense.\n\n=====Derived terms=====\n{{col|en|term}}\n\n===Etymology 2===\nAnother origin.\n\n====Verb====\n{{en-verb}}\n\n# To sense.\n";
+    let document = render_word_document(&[page("bank", text)]).expect("render");
+    let headings: Vec<&str> = document
+        .markdown
+        .lines()
+        .filter(|line| line.starts_with('#'))
+        .collect();
+    assert_eq!(
+        headings,
+        vec![
+            "# bank",
+            "## Etymology 1",
+            "## Noun",
+            "### bank",
+            "### Derived terms",
+            "## Etymology 2",
+            "## Verb",
+            "### bank",
+        ]
+    );
+}
+
+#[test]
+fn source_italics_flatten_and_bold_survives() {
+    let text = "==English==\n\n===Etymology===\nFrom ''italic'' and '''bold''' use.\n";
+    let document = render_word_document(&[page("x", text)]).expect("render");
+    assert!(document.markdown.contains("From italic and **bold** use."));
+}
+
+#[test]
 fn typography_normalizes_in_rendered_text() {
     let text = "==English==\n\n===Etymology===\nFrom \u{201C}so\u{2014}called\u{201D} use.\n";
     let document = render_word_document(&[page("x", text)]).expect("render");
