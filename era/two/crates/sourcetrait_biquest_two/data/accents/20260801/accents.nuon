@@ -1,0 +1,94 @@
+# Third-party data: English Wiktionary's IPA accent-code
+# vocabulary, derived from Module:labels/data/lang/en at the
+# 20260801 dump (CC BY-SA; attribution at the repository's
+# docs/licenses/wiktionary/). Audit-grown against the measured
+# corpus distribution. `names` maps codes whose display differs;
+# `verbatim` lists labels that name themselves (rendered as
+# written, no audit). Unlisted codes render verbatim and audit as
+# accent_code_unknown - the growth signal. Re-derive on a dump
+# bump.
+{
+    names: [
+        [ code               display ];
+        [ 'RP'               'Received Pronunciation' ]
+        [ 'GA'               'General American' ]
+        [ 'GenAm'            'General American' ]
+        [ 'CA'               'Canada' ]
+        [ 'CanE'             'Canada' ]
+        [ 'AU'               'Australia' ]
+        [ 'AuE'              'Australia' ]
+        [ 'Aus'              'Australia' ]
+        [ 'NZ'               'New Zealand' ]
+        [ 'NZE'              'New Zealand' ]
+        [ 'SSB'              'Standard Southern British' ]
+        [ 'SSBE'             'Standard Southern British' ]
+        [ 'ScE'              'Scotland' ]
+        [ 'InE'              'India' ]
+        [ 'IE'               'Ireland' ]
+        [ 'ZA'               'South Africa' ]
+        [ 'Indic'            'South Asia' ]
+        [ 'NI'               'Northern Ireland' ]
+        [ 'NYC'              'New York City' ]
+        [ 'SG'               'Singapore' ]
+        [ 'Scouse'           'Liverpool' ]
+        [ 'Northumbrian'     'Northumbria' ]
+        [ 'AAVE'             'African-American Vernacular' ]
+        [ 'cot-caught'       'cot-caught merger' ]
+        [ 'Mmmm'             'Mary-marry-merry merger' ]
+        [ 'nMmmm'            'without the Mary-marry-merry merger' ]
+        [ 'Mary-marry-merry' 'Mary-marry-merry merger' ]
+        [ 'square-nurse'     'fair-fur merger' ]
+        [ 'near-square'      'cheer-chair merger' ]
+        [ 'pin-pen'          'pin-pen merger' ]
+        [ 'wine-whine'       'wine-whine merger' ]
+        [ 'horse-hoarse'     'horse-hoarse merger' ]
+        [ 'toe-tow'          'toe-tow merger' ]
+        [ 'weak vowel'       'weak vowel merger' ]
+        [ 'weak form'        'weak form' ]
+        [ 'æ-tensing'        'æ-raising' ]
+    ],
+    verbatim: [
+        'UK'
+        'US'
+        'Scotland'
+        'Northern England'
+        'Wales'
+        'Canada'
+        'Philippines'
+        'Ireland'
+        'Southern US'
+        'Australia'
+        'India'
+        'Lancashire'
+        'rhotic'
+        'non-rhotic'
+        'Atlantic Canada'
+        'Northumbria'
+        'Teesside'
+        'Northern Ireland'
+        'Humberside'
+        'South Africa'
+        'Upper Midwestern US'
+        'Pacific Northwest'
+        'dialectal'
+        'strong form'
+        'MLE'
+        'Boston'
+        'New England'
+        'Norfolk'
+        'Yorkshire'
+        'Received Pronunciation'
+        'Estuary English'
+        'Tasmania'
+        'Dublin'
+        'Cork'
+        'London'
+        'Multicultural London English'
+        'Geordie'
+        'Cumbria'
+        'West Country'
+        'East Anglia'
+        'Midlands'
+        'obsolete'
+    ]
+}

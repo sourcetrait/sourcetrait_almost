@@ -48,61 +48,51 @@ const LIST_SECTIONS: [&str; 6] = [
     "Collocations", "Coordinate terms",
 ];
 
-/// The IPA accent-code map, audit-grown from the measured corpus
-/// distribution against the snapshot's own label data
-/// (Module:labels/data/lang/en): codes whose display differs.
-const ACCENT_NAMES: [(&str, &str); 36] = [
-    ("æ-tensing", "æ-raising"),
-    ("SSBE", "Standard Southern British"),
-    ("IE", "Ireland"),
-    ("ZA", "South Africa"),
-    ("Aus", "Australia"),
-    ("toe-tow", "toe-tow merger"),
-    ("weak form", "weak form"),
-    ("RP", "Received Pronunciation"),
-    ("GA", "General American"),
-    ("GenAm", "General American"),
-    ("CA", "Canada"),
-    ("CanE", "Canada"),
-    ("AU", "Australia"),
-    ("AuE", "Australia"),
-    ("NZ", "New Zealand"),
-    ("NZE", "New Zealand"),
-    ("SSB", "Standard Southern British"),
-    ("ScE", "Scotland"),
-    ("InE", "India"),
-    ("Indic", "South Asia"),
-    ("NI", "Northern Ireland"),
-    ("NYC", "New York City"),
-    ("SG", "Singapore"),
-    ("Scouse", "Liverpool"),
-    ("Northumbrian", "Northumbria"),
-    ("AAVE", "African-American Vernacular"),
-    ("cot-caught", "cot-caught merger"),
-    ("Mmmm", "Mary-marry-merry merger"),
-    ("nMmmm", "without the Mary-marry-merry merger"),
-    ("Mary-marry-merry", "Mary-marry-merry merger"),
-    ("square-nurse", "fair-fur merger"),
-    ("near-square", "cheer-chair merger"),
-    ("pin-pen", "pin-pen merger"),
-    ("wine-whine", "wine-whine merger"),
-    ("horse-hoarse", "horse-hoarse merger"),
-    ("weak vowel", "weak vowel merger"),
-];
+/// Third-party data carried in, never hardcoded (TheUser's ruling):
+/// English Wiktionary's accent-code vocabulary, vendored under a
+/// dump-date version directory and re-derived on a dump bump.
+const ACCENTS_DATA: &str = include_str!("../data/accents/20260801/accents.nuon");
 
-/// Accent codes the label data names for themselves: render
-/// verbatim, no audit row.
-const ACCENT_VERBATIM: [&str; 42] = [
-    "UK", "US", "Scotland", "Northern England", "Wales", "Canada",
-    "Philippines", "Ireland", "Southern US", "Australia", "India",
-    "Lancashire", "rhotic", "non-rhotic", "Atlantic Canada", "Northumbria",
-    "Teesside", "Northern Ireland", "Humberside", "South Africa",
-    "Upper Midwestern US", "Pacific Northwest", "dialectal", "strong form",
-    "MLE", "Boston", "New England", "Norfolk", "Yorkshire",
-    "Received Pronunciation", "Estuary English", "Tasmania", "Dublin",
-    "Cork", "London", "Multicultural London English", "Geordie", "Cumbria",
-    "West Country", "East Anglia", "Midlands", "obsolete",
-];
+/// The parsed accent map: codes whose display differs, and labels
+/// that name themselves.
+struct AccentTable {
+    names: Vec<(String, String)>,
+    verbatim: Vec<String>,
+}
+
+/// The embedded accent map, parsed once; the vendored file is
+/// gate-locked, so a malformed edit fails every accent test.
+fn accent_table() -> &'static AccentTable {
+    static TABLE: std::sync::OnceLock<AccentTable> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let value = harness::nu::from_nuon_text(ACCENTS_DATA)
+            .expect("the vendored accents.nuon parses");
+        let record = value.as_record().expect("accents.nuon is a record");
+        let names = record
+            .get("names")
+            .expect("accents.nuon carries names")
+            .as_list()
+            .expect("names is a table")
+            .iter()
+            .map(|row| {
+                let row = row.as_record().expect("names row is a record");
+                (
+                    field_str(row, "code").expect("names row carries code"),
+                    field_str(row, "display").expect("names row carries display"),
+                )
+            })
+            .collect();
+        let verbatim = record
+            .get("verbatim")
+            .expect("accents.nuon carries verbatim")
+            .as_list()
+            .expect("verbatim is a list")
+            .iter()
+            .map(|item| item.as_str().expect("verbatim code is a string").to_string())
+            .collect();
+        AccentTable { names, verbatim }
+    })
+}
 
 /// The regular English plural (and third-person singular): +es after
 /// a sibilant ending, consonant-y to -ies, else +s.
@@ -678,13 +668,14 @@ impl<'a> Renderer<'a> {
             .find(|(name, _)| name == "a")
             .map(|(_, value)| value.as_str())
             .unwrap_or_default();
+        let table = accent_table();
         let accent_display = |code: &str| -> Option<String> {
-            if let Some(&(_, name)) =
-                ACCENT_NAMES.iter().find(|(known, _)| *known == code)
+            if let Some((_, name)) =
+                table.names.iter().find(|(known, _)| known == code)
             {
-                return Some(name.to_string());
+                return Some(name.clone());
             }
-            if ACCENT_VERBATIM.contains(&code) {
+            if table.verbatim.iter().any(|known| known == code) {
                 return Some(code.to_string());
             }
             None

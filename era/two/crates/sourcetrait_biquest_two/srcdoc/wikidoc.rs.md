@@ -84,6 +84,11 @@ Load-bearing details the doc pages pin:
 
 ## The accent-code map
 
+Third-party data we do not control, so it is carried, never
+hardcoded (TheUser's ruling): vendored NUON under a dump-date
+version directory (data/accents/20260801/), embedded and parsed
+once through a OnceLock - the Syntax.nuon pattern applied to a
+foreign vocabulary, with CC BY-SA provenance in the file header.
 Grown from the measured corpus distribution (49,067 unknown rows,
 the top 40 codes ~86% of volume) against the snapshot's own label
 data, Module:labels/data/lang/en - Module:accent qualifier/data is
