@@ -2,12 +2,30 @@
 use crate::*;
 
 use crate::bucket::BucketTable;
-use crate::census::corpus_files;
-use crate::census::refused_rows;
+use crate::corpus::corpus_files;
 use crate::dictionary::read_words_ordered;
 use crate::lexer::Layer;
 use crate::lexer::Segmenter;
 use crate::ucd::CharacterTable;
+
+/// Refusal rows for the report.
+fn refused_rows(refused: &[(PathBuf, String)]) -> harness::nu::Value {
+    harness::nu::Value::list(
+        refused
+            .iter()
+            .map(|(path, reason)| {
+                harness::nu::Value::record(
+                    harness::nu::record! {
+                        "file" => v_str(&path.display().to_string()),
+                        "reason" => v_str(reason),
+                    },
+                    span(),
+                )
+            })
+            .collect(),
+        span(),
+    )
+}
 
 /// `biquest tokenizer ledger`: Quill tokens against the checkpoint's
 /// cl100k-family tokenizer, per file and in total.

@@ -7,8 +7,8 @@ rather than maintained, because the fork tracks nothing and owes no
 compatibility. What survived the cut: the CLI skeleton, the error type,
 the nu-value bridge (`value.rs`), and the self-documentation verb. What
 is new: the ImagineQuestTokenizer modules (`ucd`, `lexer`,
-`dictionary`, `census`, `ledger`) and the ImagineQuestAssociations
-store (`associations`).
+`dictionary`, `ledger`, with `corpus` as the shared file walker) and
+the ImagineQuestAssociations store (`associations`).
 
 The llm and harness deps stay: the harness carries the nu data core the
 artifacts ride on, and the llm lib carries the model core plus the

@@ -26,9 +26,9 @@ which is what lets the segmenter resolve whole pieces with no
 morphology layer.
 
 The artifact is plain sorted lines rather than NUON: a millions-scale
-word set is a bulk intermediate on the tmp tier, and line format loads
-in either language at full speed. The admitted wordlist that census
-admission produces from it is the real, NUON artifact.
+word set is bulk on the tmp tier, line format loads in either
+language at full speed, and with the whole dictionary as the
+vocabulary its line order IS the dictionary layer's id order.
 
 ## const ENGLISH_WORDS / fn embedded_words
 
@@ -36,10 +36,10 @@ The extracted set is also vendored at `data/words/english.txt`
 (10.7 MB, CC BY-SA; attribution at the repository's
 docs/licenses/wiktionary/) and embedded, as the bare `tokenize`
 command's default dictionary - TheUser's ruling that the test surface
-must show text as it WOULD tokenize with a dictionary. Its ids (alphabetical order above the character layer)
-are the test surface's own; a trained vocabulary's ids come from an
---admitted artifact instead. Re-vendor by rerunning `tokenizer
-dictionary` over a fresh dump.
+must show text as it WOULD tokenize with a dictionary. The embedded
+set IS the vocabulary; --words swaps in another word file, file
+order as id order. Re-vendor by rerunning `tokenizer dictionary`
+over a fresh dump.
 
 ## fn read_words
 

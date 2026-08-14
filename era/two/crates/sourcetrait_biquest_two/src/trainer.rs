@@ -4,7 +4,7 @@ use crate::*;
 #[cfg(feature = "train")]
 use crate::bucket::BucketTable;
 #[cfg(feature = "train")]
-use crate::census::corpus_files;
+use crate::corpus::corpus_files;
 #[cfg(feature = "train")]
 use crate::dictionary::read_words_ordered;
 use crate::lexer::Segmenter;

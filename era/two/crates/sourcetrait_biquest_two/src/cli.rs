@@ -41,7 +41,7 @@ pub(crate) enum Command {
     },
     /// Tokenize a string and print the token table.
     Tokenize(TokenizeArgs),
-    /// The ImagineQuestTokenizer: layers, census, ledger.
+    /// The ImagineQuestTokenizer: layers and the ledger.
     Tokenizer {
         #[command(subcommand)]
         command: TokenizerCommand,
@@ -215,9 +215,6 @@ pub(crate) enum TokenizerCommand {
     Ucd,
     /// Extract the folded connected-word set from a wiktextract dump.
     Dictionary(TokenizerDictionaryArgs),
-    /// Count word types across corpus trees (an instrument; the
-    /// vocabulary is the whole dictionary).
-    Census(TokenizerCensusArgs),
     /// Measure Quill tokens against the checkpoint tokenizer.
     Ledger(TokenizerLedgerArgs),
 }
@@ -228,20 +225,6 @@ pub(crate) struct TokenizerDictionaryArgs {
     #[arg(long)]
     pub(crate) dump: PathBuf,
     /// The word-set artifact: one folded word per line, sorted.
-    #[arg(long)]
-    pub(crate) out: PathBuf,
-}
-
-#[derive(Debug, clap::Args)]
-pub(crate) struct TokenizerCensusArgs {
-    /// Corpus files or trees, walked sorted.
-    #[arg(long, required = true, num_args = 1..)]
-    pub(crate) roots: Vec<PathBuf>,
-    /// The full dictionary word set: the census counts what would
-    /// tokenize, so it needs the tokenizer's decision surface.
-    #[arg(long)]
-    pub(crate) words: PathBuf,
-    /// The type-count artifact: word, tab, count; census order.
     #[arg(long)]
     pub(crate) out: PathBuf,
 }

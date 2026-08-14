@@ -1,8 +1,8 @@
 pub(crate) mod assembler;
 pub(crate) mod associations;
 pub(crate) mod bucket;
-pub(crate) mod census;
 pub(crate) mod cli;
+pub(crate) mod corpus;
 pub(crate) mod dictionary;
 pub(crate) mod doc;
 pub(crate) mod error;
@@ -36,7 +36,6 @@ pub(crate) use crate::assembler::{
     disassemble_wire,
 };
 pub(crate) use crate::associations::associations_build;
-pub(crate) use crate::census::tokenizer_census;
 pub(crate) use crate::cli::{
     AssembleArgs,
     AssociationsBuildArgs,
@@ -48,7 +47,6 @@ pub(crate) use crate::cli::{
     MatrixBuildArgs,
     MatrixCommand,
     TokenizeArgs,
-    TokenizerCensusArgs,
     TokenizerCommand,
     TokenizerDictionaryArgs,
     TokenizerLedgerArgs,

@@ -48,10 +48,10 @@ chunk as target and opens the next as input and no position is
 wasted. No separator is injected between files - the stop story and
 any document-boundary convention are undesigned, and inventing one
 here would bake it in silently; the files' own trailing newlines are
-the only seam. A refused file fails the whole pack (census and
-ledger skip-and-report because they are instruments; a trainer that
-skips content trains on a corpus nobody chose). Unconditionally
-compiled so the packing locks run in the default build.
+the only seam. A refused file fails the whole pack (the ledger
+skips-and-reports because it is an instrument; a trainer that skips
+content trains on a corpus nobody chose). Unconditionally compiled
+so the packing locks run in the default build.
 
 ## fn trainer_train
 

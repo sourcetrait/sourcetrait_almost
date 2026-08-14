@@ -28,7 +28,6 @@ fn cli_tree_lists_categories_and_actions_with_summaries() {
         " cli # ",
         " ucd # ",
         " dictionary # ",
-        " census # ",
         " ledger # ",
         " build # ",
         " init # ",

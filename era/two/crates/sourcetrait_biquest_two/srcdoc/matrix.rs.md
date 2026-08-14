@@ -10,8 +10,8 @@ MATRIX_HEADS is 32 by TheUser's ruling (hidden dimension is
 associative capacity, heads are correlation channels; the hybrid's 30
 is ai2's comparison artifact). Width is arithmetic and settled at the
 organism default head_dim 32, hidden 1024. The vocabulary is the
-WHOLE dictionary (TheUser: census admission can never work off a
-corpus as small as ours) - the word file's line order is the
+WHOLE dictionary (TheUser: frequency-gated admission can never work
+off a small corpus) - the word file's line order is the
 dictionary layer's id order, ~1.24M rows total with the reserve, so
 the embedding is ~1.27B parameters and the model is a lookup
 structure by weight to a degree the admitted-subset design never
