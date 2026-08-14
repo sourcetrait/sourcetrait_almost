@@ -554,6 +554,24 @@ impl<'a> Assembler<'a> {
         }
     }
 
+    /// Escape control characters for the debugging table's value
+    /// column - a visual representation, one row per token (TheUser).
+    fn visual_text(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        for c in text.chars() {
+            match c {
+                '\n' => out.push_str("\\n"),
+                '\t' => out.push_str("\\t"),
+                '\r' => out.push_str("\\r"),
+                c if (c as u32) < 0x20 || c == '\u{7F}' => {
+                    out.push_str(&format!("\\u{{{:02X}}}", c as u32));
+                }
+                c => out.push(c),
+            }
+        }
+        out
+    }
+
     /// The wire as tokenize-style rows: keyword ids as their mention
     /// spellings, character tokens with their U+ column, rows and
     /// words with their text - the assembler's test surface.
@@ -584,7 +602,7 @@ impl<'a> Assembler<'a> {
                 harness::nu::record! {
                     "token" => v_int(id as i64),
                     "unicode" => unicode,
-                    "value" => v_str(&value),
+                    "value" => v_str(&Self::visual_text(&value)),
                 },
                 span(),
             ));
