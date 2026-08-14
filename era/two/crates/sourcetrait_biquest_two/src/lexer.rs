@@ -690,7 +690,7 @@ impl<'a> Segmenter<'a> {
 }
 
 /// One stretch of the test string: a keyword-page marker or content.
-enum TestPart<'a> {
+pub(crate) enum TestPart<'a> {
     /// A `<|XX|>` spelling: the keyword id and the spelling itself.
     Marker(u8, &'a str),
     Text(&'a str),
@@ -700,8 +700,10 @@ enum TestPart<'a> {
 ///
 /// Test-surface rendering only: corpus ingestion never reads a marker
 /// out of content - markers enter through deliberate rendering, and
-/// this is that path for the CLI.
-fn split_markers(text: &str) -> Vec<TestPart<'_>> {
+/// this is that path for the CLI. The scan is byte-wise: the cursor
+/// walks byte offsets, so every comparison is on bytes - a str slice
+/// at the cursor would panic mid-multibyte-character.
+pub(crate) fn split_markers(text: &str) -> Vec<TestPart<'_>> {
     let bytes = text.as_bytes();
     let mut parts = Vec::new();
     let mut rest_start = 0usize;
@@ -709,7 +711,7 @@ fn split_markers(text: &str) -> Vec<TestPart<'_>> {
     'scan: while i < bytes.len() {
         // The hardcoded aliases spell like markers and mean their id.
         for (id, alias) in HARDCODED_ALIASES {
-            if text[i..].starts_with(alias) {
+            if bytes[i..].starts_with(alias.as_bytes()) {
                 if rest_start < i {
                     parts.push(TestPart::Text(&text[rest_start..i]));
                 }

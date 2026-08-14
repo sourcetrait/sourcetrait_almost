@@ -82,6 +82,23 @@ Load-bearing details the doc pages pin:
 - SpecForm::rendered flattens embedded wikilinks to display text -
   the whole inflected form is the anchor.
 
+## The form-of family (fn form_of_name and the shape rule)
+
+The definitional templates render by NAME SHAPE, not enumeration:
+any "<label> of" name becomes "<Label> of [target]" - the rule that
+absorbs plural of (278k), the alternative form/spelling family, and
+every sibling without a case list, the build-for-an-LLM freeze-form
+posture. Aliases expand from vendored data (the same dump-versioned
+carriage as the accent map); `form of` itself carries its label as
+an argument and is special-cased; t= glosses parenthesize; nocap=
+suppresses the capitalization. confix is split from the plain affix
+join because its semantics hyphenate the ends (prefix + suffix).
+Headword overrides pass through plain_anchor_text - heading lines
+carry no anchors. Empty documents (fold-matched page sets with no
+English content) are the corpus emitter's .empty.md convention with
+the document_empty audit class - skippable by suffix, existence
+known (TheUser).
+
 ## The accent-code map
 
 Third-party data we do not control, so it is carried, never

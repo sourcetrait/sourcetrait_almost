@@ -360,3 +360,18 @@ fn unassigned_refuses_and_assigned_controls_lex_as_unicode() {
     let last = pieces.last().expect("pieces");
     assert_eq!((last.text, last.kind), ("\u{0001}", PieceKind::Unicode));
 }
+
+#[test]
+fn marker_scan_survives_multibyte_content() {
+    // The alias scan walks byte offsets; a str slice at the cursor
+    // panicked inside a multibyte character (TheUser's fixture).
+    let parts = crate::lexer::split_markers("Some \u{03bc}-scope <|00|> \u{00e6}nd <|repeat|>");
+    let mut markers = 0usize;
+    for part in &parts {
+        if let crate::lexer::TestPart::Marker(id, _) = part {
+            markers += 1;
+            assert!(*id == 0 || *id as u32 == crate::lexer::KEYWORD_REPEAT);
+        }
+    }
+    assert_eq!(markers, 2);
+}
