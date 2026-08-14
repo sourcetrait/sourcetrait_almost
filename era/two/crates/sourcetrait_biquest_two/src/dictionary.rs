@@ -152,17 +152,6 @@ pub(crate) fn tokenizer_dictionary(args: &TokenizerDictionaryArgs) -> BiquestRes
     Ok(())
 }
 
-/// Read a words artifact back: one folded word per line.
-pub(crate) fn read_words(path: &Path) -> BiquestResult<HashSet<String>> {
-    let words: HashSet<String> = fs::read_to_string(path)?
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
-        .collect();
-    snafu::ensure_whatever!(!words.is_empty(), "{}: no words", path.display());
-    Ok(words)
-}
-
 /// Read a words artifact in FILE ORDER: with the whole dictionary as
 /// the vocabulary (TheUser), line position IS the dictionary-layer
 /// id order.

@@ -19,6 +19,12 @@ training verbs; `assemble`/`disassemble` sit at the top level beside
 stays un-gated so the parser is feature-blind (one `doc cli` tree
 per build); only the dispatch is cfg-split.
 
+The `wikimedia` noun is the WikimediaDumpTool's family: raw-source
+access over the pinned wikimedia dumps and export saves, feeding the
+document pipeline that replaces wiktextract. Its `page` verb takes
+the source and index as explicit paths for the same reason the other
+artifact paths are flags - the dumps live on the tmp home tier.
+
 Artifact paths are explicit flags rather than config fields: the
 tokenizer artifacts live on the tmp home tier and their homes are
 operational knowledge, not product configuration. The character table

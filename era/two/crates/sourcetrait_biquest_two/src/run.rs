@@ -24,6 +24,9 @@ pub fn run() {
             TrainerCommand::Init(args) => trainer_init(args),
             TrainerCommand::Train(args) => trainer_train(args),
         },
+        Command::Wikimedia { command } => match command {
+            WikimediaCommand::Page(args) => wikimedia_page(args),
+        },
     };
     if let Err(error) = outcome {
         eprintln!("biquest: {error}");

@@ -51,6 +51,35 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: TrainerCommand,
     },
+    /// The WikimediaDumpTool: raw dump and export page access.
+    Wikimedia {
+        #[command(subcommand)]
+        command: WikimediaCommand,
+    },
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub(crate) enum WikimediaCommand {
+    /// One page's wikitext from an export save or a dump.
+    Page(WikimediaPageArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct WikimediaPageArgs {
+    /// The exact page title (enwiktionary ns0 is case-sensitive).
+    #[arg(long)]
+    pub(crate) title: String,
+    /// The page source: an export .xml or a pages-articles dump
+    /// (.xml.bz2), streamed; with --index, the multistream dump,
+    /// seeked to the title's block.
+    #[arg(long)]
+    pub(crate) source: PathBuf,
+    /// The multistream index (.txt or .txt.bz2) to seek with.
+    #[arg(long)]
+    pub(crate) index: Option<PathBuf>,
+    /// Print the page record (text_bytes in place of text).
+    #[arg(long)]
+    pub(crate) meta: bool,
 }
 
 #[derive(Debug, clap::Subcommand)]

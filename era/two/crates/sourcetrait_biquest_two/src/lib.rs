@@ -13,6 +13,8 @@ pub mod run;
 pub(crate) mod trainer;
 pub(crate) mod ucd;
 pub(crate) mod value;
+pub(crate) mod wikimedia;
+pub(crate) mod wikixml;
 
 #[allow(unused_imports)]
 pub(crate) use std::{
@@ -53,6 +55,8 @@ pub(crate) use crate::cli::{
     TrainerCommand,
     TrainerInitArgs,
     TrainerTrainArgs,
+    WikimediaCommand,
+    WikimediaPageArgs,
 };
 pub(crate) use crate::dictionary::tokenizer_dictionary;
 pub(crate) use crate::doc::doc_cli;
@@ -66,6 +70,7 @@ pub(crate) use crate::trainer::{
     trainer_init,
     trainer_train,
 };
+pub(crate) use crate::wikimedia::wikimedia_page;
 #[allow(unused_imports)]
 pub(crate) use crate::value::{
     epoch_seconds,
@@ -96,4 +101,5 @@ mod tests {
     mod matrix;
     mod trainer;
     mod value;
+    mod wikixml;
 }
