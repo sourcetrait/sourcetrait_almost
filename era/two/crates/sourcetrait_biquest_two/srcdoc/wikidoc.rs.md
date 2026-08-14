@@ -68,3 +68,32 @@ Load-bearing details the doc pages pin:
   for the spidering service.
 - Unknown named arguments audit the whole signature and contribute
   nothing: a wrong derived form is worse than a visible gap.
+- Numbered mechanics: |1=x| named-numeric arguments fold into their
+  positional slots (the MediaWiki equivalence) before anything else
+  reads the template, and trailing-digit named keys collect into
+  their base families - past2=/pres_ptc2=/pres_3sg2=/past_ptc2= as
+  additional verb-slot forms, sg2=/attr2= and sup2= likewise.
+- The pairs engine is shared: `head` skips its language and POS
+  positionals; en-pron/en-pronoun pair from the start and append
+  desc= as a trailing note; en-head is pairless (its doc: positional
+  1 is the POS, nothing derives), so bare en-head|<pos> is handled
+  silently and extra positionals audit. A head= of `?` (the
+  no-good-headword sentinel) is ignored rather than rendered.
+- SpecForm::rendered flattens embedded wikilinks to display text -
+  the whole inflected form is the anchor.
+
+## The accent-code map
+
+Grown from the measured corpus distribution (49,067 unknown rows,
+the top 40 codes ~86% of volume) against the snapshot's own label
+data, Module:labels/data/lang/en - Module:accent qualifier/data is
+gone from the snapshot, deprecated into the labels system. Three
+mechanisms: ACCENT_NAMES maps codes whose display differs
+(abbreviation expansions like GenAm/SSB/CanE, merger displays -
+square-nurse IS the fair-fur merger and Mmmm the Mary-marry-merry
+merger in the module's own naming, æ-tensing is æ-raising);
+ACCENT_VERBATIM lists labels the module names for themselves
+(render verbatim, no audit - non-rhotic is its own label, not a
+negation); and a non- prefix negates any resolvable base ("without
+the X merger" / "without X"). The unresolved tail keeps auditing -
+the map stays audit-grown.

@@ -205,6 +205,53 @@ fn head_template_pairs_and_pointers_render() {
 }
 
 #[test]
+fn accent_codes_resolve_against_the_label_data() {
+    let text = "==English==\n\n===Pronunciation===\n* {{IPA|en|/x/|a=GenAm,SSB,Scotland,square-nurse,non-rhotic,nMmmm}}\n\n===Noun===\n{{en-noun}}\n\n# A sense.\n";
+    let document = render_word_document(&[page("x", text)]).expect("render");
+    assert!(
+        document.markdown.contains(
+            "IPA (General American, Standard Southern British, Scotland, \
+             fair-fur merger, non-rhotic, without the Mary-marry-merry merger): /x/"
+        ),
+        "got: {}",
+        document.markdown
+    );
+    assert!(document.audit.iter().all(|row| row.class != "accent_code_unknown"));
+}
+
+#[test]
+fn numbered_variants_and_pron_pairs_render() {
+    let flied = pos_doc("Verb", "{{en-verb|flies|flying|flied|past2=flyed}}", "fly");
+    assert!(
+        flied.contains("simple past and past participle [flied] or [flyed]"),
+        "got: {flied}"
+    );
+    let munchies = pos_doc("Noun", "{{en-noun|p|sg=munchie|sg2=munchy}}", "munchies");
+    assert!(
+        munchies.contains("(plural only, singular [munchie] or [munchy])"),
+        "got: {munchies}"
+    );
+    let numbered = pos_doc("Noun", "{{en-noun|1=-}}", "awe");
+    assert!(numbered.contains("(uncountable)"), "got: {numbered}");
+    let pron = pos_doc(
+        "Pronoun",
+        "{{en-pron|nominative|thou|reflexive|thyself|desc=second-person singular}}",
+        "thee",
+    );
+    assert!(
+        pron.contains("(nominative [thou], reflexive [thyself], second-person singular)"),
+        "got: {pron}"
+    );
+    let text = "==English==\n\n===Preposition===\n{{en-head|prep}}\n\n# A sense.\n";
+    let document = render_word_document(&[page("at", text)]).expect("render");
+    assert!(
+        document.audit.iter().all(|row| !row.class.starts_with("head_")),
+        "audit: {:?}",
+        document.audit
+    );
+}
+
+#[test]
 fn typography_normalizes_in_rendered_text() {
     let text = "==English==\n\n===Etymology===\nFrom \u{201C}so\u{2014}called\u{201D} use.\n";
     let document = render_word_document(&[page("x", text)]).expect("render");

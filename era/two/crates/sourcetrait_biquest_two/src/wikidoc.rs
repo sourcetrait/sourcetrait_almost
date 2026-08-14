@@ -48,15 +48,52 @@ const LIST_SECTIONS: [&str; 6] = [
     "Collocations", "Coordinate terms",
 ];
 
-/// The IPA accent-code map, audit-grown from the observed samples.
-const ACCENT_NAMES: [(&str, &str); 7] = [
+/// The IPA accent-code map, audit-grown from the measured corpus
+/// distribution against the snapshot's own label data
+/// (Module:labels/data/lang/en): codes whose display differs.
+const ACCENT_NAMES: [(&str, &str); 29] = [
     ("RP", "Received Pronunciation"),
     ("GA", "General American"),
+    ("GenAm", "General American"),
     ("CA", "Canada"),
+    ("CanE", "Canada"),
     ("AU", "Australia"),
+    ("AuE", "Australia"),
     ("NZ", "New Zealand"),
+    ("NZE", "New Zealand"),
+    ("SSB", "Standard Southern British"),
+    ("ScE", "Scotland"),
+    ("InE", "India"),
+    ("Indic", "South Asia"),
+    ("NI", "Northern Ireland"),
+    ("NYC", "New York City"),
+    ("SG", "Singapore"),
+    ("Scouse", "Liverpool"),
+    ("Northumbrian", "Northumbria"),
+    ("AAVE", "African-American Vernacular"),
     ("cot-caught", "cot-caught merger"),
-    ("non-cot-caught", "without the cot-caught merger"),
+    ("Mmmm", "Mary-marry-merry merger"),
+    ("nMmmm", "without the Mary-marry-merry merger"),
+    ("Mary-marry-merry", "Mary-marry-merry merger"),
+    ("square-nurse", "fair-fur merger"),
+    ("near-square", "cheer-chair merger"),
+    ("pin-pen", "pin-pen merger"),
+    ("wine-whine", "wine-whine merger"),
+    ("horse-hoarse", "horse-hoarse merger"),
+    ("weak vowel", "weak vowel merger"),
+];
+
+/// Accent codes the label data names for themselves: render
+/// verbatim, no audit row.
+const ACCENT_VERBATIM: [&str; 35] = [
+    "UK", "US", "Scotland", "Northern England", "Wales", "Canada",
+    "Philippines", "Ireland", "Southern US", "Australia", "India",
+    "Lancashire", "rhotic", "non-rhotic", "Atlantic Canada", "Northumbria",
+    "Teesside",
+    "MLE", "Boston", "New England", "Norfolk", "Yorkshire",
+    "Received Pronunciation", "Estuary English", "Tasmania", "Dublin",
+    "Cork", "London", "Multicultural London English", "Geordie", "Cumbria",
+    "West Country", "East Anglia", "Midlands", "obsolete",
 ];
 
 /// The regular English plural (and third-person singular): +es after
@@ -187,12 +224,25 @@ impl SpecForm {
     }
 
     /// The document rendering: an anchored form plus its label
-    /// parenthetical.
+    /// parenthetical. Embedded wikilinks flatten to their display
+    /// text - the whole form is the anchor.
     fn rendered(&self) -> String {
+        let mut text = self.text.clone();
+        while let Some(open) = text.find("[[") {
+            let Some(close) = text[open..].find("]]").map(|c| open + c) else {
+                break;
+            };
+            let inner = &text[open + 2..close];
+            let display = match inner.rsplit_once('|') {
+                Some((_, display)) => display,
+                None => inner,
+            };
+            text = format!("{}{display}{}", &text[..open], &text[close + 2..]);
+        }
         if self.labels.is_empty() {
-            format!("[{}]", self.text)
+            format!("[{text}]")
         } else {
-            format!("[{}] ({})", self.text, self.labels.join(", "))
+            format!("[{text}] ({})", self.labels.join(", "))
         }
     }
 }
@@ -278,6 +328,36 @@ pub(crate) struct HeadLine {
 /// Whether a template is an English headword-line template.
 fn is_head_family(name: &str) -> bool {
     name == "head" || name.starts_with("en-")
+}
+
+/// A named key's base with trailing digits split off ("past2" to
+/// "past"); an all-digit key stays whole.
+fn key_base(key: &str) -> &str {
+    let trimmed = key.trim_end_matches(|c: char| c.is_ascii_digit());
+    if trimmed.is_empty() { key } else { trimmed }
+}
+
+/// Fold numeric named arguments into their positional slots - the
+/// MediaWiki |1=x| equivalence - so the engines see one shape.
+fn normalize_numbered(template: &Template) -> Template {
+    let mut normalized = Template {
+        name: template.name.clone(),
+        positional: template.positional.clone(),
+        named: Vec::new(),
+    };
+    for (key, value) in &template.named {
+        if let Ok(position) = key.parse::<usize>()
+            && position >= 1
+        {
+            while normalized.positional.len() < position {
+                normalized.positional.push(String::new());
+            }
+            normalized.positional[position - 1] = value.clone();
+            continue;
+        }
+        normalized.named.push((key.clone(), value.clone()));
+    }
+    normalized
 }
 
 /// A template's compact call signature for the audit: name, then
@@ -590,21 +670,41 @@ impl<'a> Renderer<'a> {
             .find(|(name, _)| name == "a")
             .map(|(_, value)| value.as_str())
             .unwrap_or_default();
+        let accent_display = |code: &str| -> Option<String> {
+            if let Some(&(_, name)) =
+                ACCENT_NAMES.iter().find(|(known, _)| *known == code)
+            {
+                return Some(name.to_string());
+            }
+            if ACCENT_VERBATIM.contains(&code) {
+                return Some(code.to_string());
+            }
+            None
+        };
         let mut names: Vec<String> = Vec::new();
         for code in accents.split(',').filter(|code| !code.is_empty()) {
-            let mapped = ACCENT_NAMES
-                .iter()
-                .find(|(known, _)| *known == code)
-                .map(|(_, name)| name.to_string());
-            match mapped {
-                Some(name) => names.push(name),
-                None => match code.strip_prefix("dialects of ") {
-                    Some(place) => names.push(format!("also of {place}")),
-                    None => {
-                        self.audit("accent_code_unknown", code.to_string());
-                        names.push(code.to_string());
-                    }
-                },
+            if let Some(name) = accent_display(code) {
+                names.push(name);
+                continue;
+            }
+            // The non- prefix negates a resolvable base: "without
+            // the X merger" / "without X".
+            if let Some(base) = code.strip_prefix("non-")
+                && let Some(resolved) = accent_display(base)
+            {
+                if resolved.ends_with("merger") {
+                    names.push(format!("without the {resolved}"));
+                } else {
+                    names.push(format!("without {resolved}"));
+                }
+                continue;
+            }
+            match code.strip_prefix("dialects of ") {
+                Some(place) => names.push(format!("also of {place}")),
+                None => {
+                    self.audit("accent_code_unknown", code.to_string());
+                    names.push(code.to_string());
+                }
             }
         }
         let joined = transcriptions.join(", ");
@@ -620,13 +720,6 @@ impl<'a> Renderer<'a> {
     /// slots, and plurale tantum adds sg=/attr=.
     fn noun_parenthetical(&mut self, template: &Template, proper: bool) -> Option<String> {
         let title = self.page_title.to_string();
-        let named = |key: &str| -> Option<&str> {
-            template
-                .named
-                .iter()
-                .find(|(name, _)| name == key)
-                .map(|(_, value)| value.as_str())
-        };
         let mut uncountable = false;
         let mut both = false;
         let mut plural_only = false;
@@ -670,17 +763,30 @@ impl<'a> Renderer<'a> {
                 plurals.iter().map(SpecForm::rendered).collect();
             format!("plural {}", rendered.join(" or "))
         };
+        // sg=/attr= plus their numbered variants (sg2=, ...) collect
+        // as additional forms.
+        let collect_family = |base: &str| -> Vec<SpecForm> {
+            let mut forms = Vec::new();
+            for (key, value) in &template.named {
+                if key_base(key) == base {
+                    forms.extend(spec_forms(value, &title));
+                }
+            }
+            forms
+        };
         let mut pieces: Vec<String> = Vec::new();
         if plural_only {
             pieces.push(String::from("plural only"));
-            if let Some(sg) = named("sg") {
+            let singulars = collect_family("sg");
+            if !singulars.is_empty() {
                 let rendered: Vec<String> =
-                    spec_forms(sg, &title).iter().map(SpecForm::rendered).collect();
+                    singulars.iter().map(SpecForm::rendered).collect();
                 pieces.push(format!("singular {}", rendered.join(" or ")));
             }
-            if let Some(attr) = named("attr") {
+            let attributives = collect_family("attr");
+            if !attributives.is_empty() {
                 let rendered: Vec<String> =
-                    spec_forms(attr, &title).iter().map(SpecForm::rendered).collect();
+                    attributives.iter().map(SpecForm::rendered).collect();
                 pieces.push(format!("attributive {}", rendered.join(" or ")));
             }
         } else if uncountable && plurals.is_empty() {
@@ -932,6 +1038,46 @@ impl<'a> Renderer<'a> {
                 slots.push(forms);
             }
         }
+        // The legacy numbered named args append additional forms to
+        // their slots (pres_3sg2=, pres_ptc2=, past2=, past_ptc2=).
+        for (key, value) in &template.named {
+            let slot = match key_base(key) {
+                "pres_3sg" => 0usize,
+                "pres_ptc" => 1,
+                "past" => 2,
+                "past_ptc" => 3,
+                _ => continue,
+            };
+            for form in spec_forms(value, &title) {
+                let text = form.text.as_str();
+                if text == "-" {
+                    continue;
+                }
+                if INDICATORS.contains(&text) {
+                    if text == "+" && !slot_one_indicators.is_empty() {
+                        for (indicator, labels) in slot_one_indicators.clone() {
+                            let mut labels = labels;
+                            labels.extend(form.labels.clone());
+                            slots[slot].extend(
+                                self.verb_indicator_forms(&indicator, slot, &labels),
+                            );
+                        }
+                    } else {
+                        slots[slot]
+                            .extend(self.verb_indicator_forms(text, slot, &form.labels));
+                    }
+                    continue;
+                }
+                if text == "~" {
+                    slots[slot].push(SpecForm {
+                        text: title.clone(),
+                        labels: form.labels.clone(),
+                    });
+                    continue;
+                }
+                slots[slot].push(form);
+            }
+        }
         Some(self.verb_pieces(slots, participle_defective))
     }
 
@@ -1108,14 +1254,21 @@ impl<'a> Renderer<'a> {
                 }
             }
         }
-        if comparatives.is_empty() && !not_comparable && named("sup").is_none() {
+        let sup_specs: Vec<String> = template
+            .named
+            .iter()
+            .filter(|(key, _)| key_base(key) == "sup")
+            .map(|(_, value)| value.clone())
+            .collect();
+        if comparatives.is_empty() && !not_comparable && sup_specs.is_empty() {
             comparatives.push(SpecForm::plain(format!("more {title}")));
             default_sups.push(SpecForm::plain(format!("most {title}")));
         }
         let mut superlatives: Vec<SpecForm> = Vec::new();
-        match named("sup") {
-            None => superlatives = default_sups,
-            Some(sup) => {
+        if sup_specs.is_empty() {
+            superlatives = default_sups;
+        } else {
+            for sup in &sup_specs {
                 for form in spec_forms(sup, &title) {
                     let labels = form.labels.clone();
                     match form.text.as_str() {
@@ -1173,7 +1326,9 @@ impl<'a> Renderer<'a> {
         if !comparatives.is_empty() {
             pieces.push(format!("comparative {}", join(&comparatives)));
         }
-        if !superlatives.is_empty() && (!not_comparable || !comparatives.is_empty() || named("sup").is_some()) {
+        if !superlatives.is_empty()
+            && (!not_comparable || !comparatives.is_empty() || !sup_specs.is_empty())
+        {
             pieces.push(format!("superlative {}", join(&superlatives)));
         }
         if pieces.is_empty() {
@@ -1182,11 +1337,17 @@ impl<'a> Renderer<'a> {
         Some(format!("({})", pieces.join(", ")))
     }
 
-    /// The generic head template's pairwise inflections: (name, form)
-    /// pairs after the language and part of speech, `or` continuing
-    /// the previous name, a formless name riding as a note.
-    fn head_pairs_parenthetical(&mut self, template: &Template) -> Option<String> {
-        let rest = template.positional.get(2..).unwrap_or(&[]);
+    /// Pairwise (name, form) inflections: `head` skips its language
+    /// and part-of-speech positionals, en-pron/en-pronoun pair from
+    /// the start and append desc= as a trailing note; `or` continues
+    /// the previous name and a formless name rides as a note.
+    fn pairs_parenthetical(
+        &mut self,
+        template: &Template,
+        skip: usize,
+        note: Option<String>,
+    ) -> Option<String> {
+        let rest = template.positional.get(skip..).unwrap_or(&[]);
         let mut pieces: Vec<(String, Vec<String>)> = Vec::new();
         let mut index = 0usize;
         while index < rest.len() {
@@ -1211,10 +1372,7 @@ impl<'a> Renderer<'a> {
             }
             index += 2;
         }
-        if pieces.is_empty() {
-            return None;
-        }
-        let rendered: Vec<String> = pieces
+        let mut rendered: Vec<String> = pieces
             .into_iter()
             .map(|(name, forms)| {
                 if forms.is_empty() {
@@ -1224,6 +1382,15 @@ impl<'a> Renderer<'a> {
                 }
             })
             .collect();
+        if let Some(note) = note {
+            let text = self.argument_text(&note);
+            if !text.is_empty() {
+                rendered.push(text);
+            }
+        }
+        if rendered.is_empty() {
+            return None;
+        }
         Some(format!("({})", rendered.join(", ")))
     }
 
@@ -1231,25 +1398,26 @@ impl<'a> Renderer<'a> {
     /// families grow audit-driven: arguments outside a family's
     /// grammar audit with the full signature and contribute nothing.
     fn head_line(&mut self, template: &Template) -> HeadLine {
-        const IGNORED_NAMED: [&str; 26] = [
-            "id", "sort", "pagename", "sc", "sccat", "g", "g2", "g3", "tr", "ts",
+        const IGNORED_BASES: [&str; 22] = [
+            "id", "sort", "pagename", "sc", "sccat", "g", "tr", "ts",
             "autotrinfl", "nolink", "nolinkhead", "splithyph", "nosplithyph",
             "hyphspace", "nosuffix", "nomultiwordcat", "nopalindromecat",
-            "noposcat", "nogendercat", "cat2", "cat3", "cat4", "angle_bracket",
-            "plqual",
+            "noposcat", "nogendercat", "cat", "angle_bracket", "plqual",
         ];
-        const FAMILY_NAMED: [&str; 10] = [
-            "head", "head2", "head3", "def", "the", "abbr", "sg", "attr", "sup",
-            "componly",
+        const FAMILY_BASES: [&str; 14] = [
+            "head", "def", "the", "abbr", "sg", "attr", "sup", "componly",
+            "suponly", "pres_3sg", "pres_ptc", "past", "past_ptc", "desc",
         ];
         let title = self.page_title.to_string();
+        let normalized = normalize_numbered(template);
+        let template = &normalized;
         for (key, _) in &template.named {
             let key = key.as_str();
+            let base = key_base(key);
             let form_meta = key.starts_with('f')
                 && key.chars().nth(1).is_some_and(|c| c.is_ascii_digit());
-            if !IGNORED_NAMED.contains(&key)
-                && !FAMILY_NAMED.contains(&key)
-                && key != "suponly"
+            if !IGNORED_BASES.contains(&base)
+                && !FAMILY_BASES.contains(&base)
                 && !form_meta
             {
                 self.audit("head_arguments_unhandled", template_signature(template));
@@ -1264,6 +1432,7 @@ impl<'a> Renderer<'a> {
                 .map(|(_, value)| value.as_str())
         };
         let mut headword = named("head")
+            .filter(|raw| *raw != "?")
             .map(|raw| self.argument_text(&raw.replace("\\,", ",")))
             .filter(|text| !text.is_empty());
         match named("def").or(named("the")) {
@@ -1286,7 +1455,20 @@ impl<'a> Renderer<'a> {
             "en-adj" | "en-adjective" | "en-adv" | "en-adverb" => {
                 self.graded_parenthetical(template)
             }
-            "head" => self.head_pairs_parenthetical(template),
+            "head" => self.pairs_parenthetical(template, 2, None),
+            "en-pron" | "en-pronoun" => {
+                let desc = named("desc").map(str::to_string);
+                self.pairs_parenthetical(template, 0, desc)
+            }
+            "en-head" => {
+                // Positional 1 is the part of speech; nothing derives.
+                if template.positional.len() <= 1 {
+                    None
+                } else {
+                    self.audit("head_template_unhandled", template_signature(template));
+                    None
+                }
+            }
             _ => {
                 // Any other en-* head: the bare and head=-only forms
                 // carry no inflections; positionals are the residue.
