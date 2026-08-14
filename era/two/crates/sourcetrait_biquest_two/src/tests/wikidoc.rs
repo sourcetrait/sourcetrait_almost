@@ -253,6 +253,46 @@ fn numbered_variants_and_pron_pairs_render() {
 }
 
 #[test]
+fn form_of_definitions_render() {
+    let text = "==English==\n\n===Noun===\n{{en-noun|-}}\n\n# {{synonym of|en|DDR}}\n# {{plural of|en|word}}\n# {{alt form|en|colour}}\n";
+    let document = render_word_document(&[page("2DR", text)]).expect("render");
+    assert!(
+        document.markdown.contains("1. Synonym of [DDR]"),
+        "got: {}",
+        document.markdown
+    );
+    assert!(document.markdown.contains("2. Plural of [word]"));
+    assert!(document.markdown.contains("3. Alternative form of [colour]"));
+    // The headword override renders plain: no anchors in headings.
+    let text =
+        "==English==\n\n===Noun===\n{{en-noun|head=[[μ]]-[[scope]]|s}}\n\n# A sense.\n";
+    let document = render_word_document(&[page("μ-scope", text)]).expect("render");
+    assert!(
+        document.markdown.contains("### μ-scope"),
+        "got: {}",
+        document.markdown
+    );
+}
+
+#[test]
+fn ipa_separators_and_label_connectors_render_clean() {
+    let text = "==English==\n\n===Pronunciation===\n* {{IPA|en|/a/|;|/b/|~|a=<<GA>> <<Scotland>>,AU!Australia}}\n\n===Noun===\n{{en-noun|+|sheeps<l:nonstandard,humorous,or,childish>}}\n\n# A sense.\n";
+    let document = render_word_document(&[page("x", text)]).expect("render");
+    assert!(
+        document
+            .markdown
+            .contains("IPA (General American, Scotland, Australia): /a/, /b/"),
+        "got: {}",
+        document.markdown
+    );
+    assert!(
+        document.markdown.contains("(nonstandard, humorous or childish)"),
+        "got: {}",
+        document.markdown
+    );
+}
+
+#[test]
 fn typography_normalizes_in_rendered_text() {
     let text = "==English==\n\n===Etymology===\nFrom \u{201C}so\u{2014}called\u{201D} use.\n";
     let document = render_word_document(&[page("x", text)]).expect("render");

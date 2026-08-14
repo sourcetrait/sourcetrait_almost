@@ -265,7 +265,24 @@ fn label_text(body: &str) -> Option<String> {
     if parts.is_empty() {
         return None;
     }
-    Some(parts.join(", ").replace("<<", "").replace(">>", ""))
+    // `or` and `and` are label-list connectors, joined inline
+    // rather than as list elements.
+    let mut out = String::new();
+    let mut connector: Option<&str> = None;
+    for part in parts {
+        if part == "or" || part == "and" {
+            connector = Some(part);
+            continue;
+        }
+        if out.is_empty() {
+            out.push_str(part);
+        } else if let Some(word) = connector.take() {
+            out.push_str(&format!(" {word} {part}"));
+        } else {
+            out.push_str(&format!(", {part}"));
+        }
+    }
+    Some(out.replace("<<", "").replace(">>", ""))
 }
 
 /// Split a spec on top-level commas (inline `<...>` modifiers shield
@@ -379,6 +396,83 @@ fn template_signature(template: &Template) -> String {
         capped.push_str("...");
         return capped;
     }
+    out
+}
+
+/// Third-party data carried in: the form-of template alias
+/// vocabulary, vendored under a dump-date version directory.
+const FORM_OF_DATA: &str = include_str!("../data/form_of/20260801/form_of.nuon");
+
+/// The parsed form-of aliases, loaded once like the accent map.
+fn form_of_aliases() -> &'static Vec<(String, String)> {
+    static TABLE: std::sync::OnceLock<Vec<(String, String)>> =
+        std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let value = harness::nu::from_nuon_text(FORM_OF_DATA)
+            .expect("the vendored form_of.nuon parses");
+        let record = value.as_record().expect("form_of.nuon is a record");
+        record
+            .get("aliases")
+            .expect("form_of.nuon carries aliases")
+            .as_list()
+            .expect("aliases is a table")
+            .iter()
+            .map(|row| {
+                let row = row.as_record().expect("aliases row is a record");
+                (
+                    field_str(row, "name").expect("aliases row carries name"),
+                    field_str(row, "full").expect("aliases row carries full"),
+                )
+            })
+            .collect()
+    })
+}
+
+/// The full "<label> of" name a definitional form-of template
+/// renders under: an alias expansion, or the name itself when it
+/// already ends in " of" (the generic shape; `form of` itself
+/// carries its label as an argument and is handled separately).
+fn form_of_name(name: &str) -> Option<String> {
+    if let Some((_, full)) =
+        form_of_aliases().iter().find(|(alias, _)| alias == name)
+    {
+        return Some(full.clone());
+    }
+    if name.ends_with(" of") && name != "form of" {
+        return Some(name.to_string());
+    }
+    None
+}
+
+/// The first letter capitalized, the form-of display convention.
+fn capitalize_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Anchored text flattened to plain display: `[d](t)` and `[x]`
+/// lose their markup - headword lines carry no anchors.
+fn plain_anchor_text(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        out.push_str(&rest[..open]);
+        let Some(close) = rest[open..].find(']').map(|c| open + c) else {
+            out.push_str(&rest[open..]);
+            return out;
+        };
+        out.push_str(&rest[open + 1..close]);
+        rest = &rest[close + 1..];
+        if rest.starts_with('(')
+            && let Some(paren) = rest.find(')')
+        {
+            rest = &rest[paren + 1..];
+        }
+    }
+    out.push_str(rest);
     out
 }
 
@@ -596,8 +690,42 @@ impl<'a> Renderer<'a> {
                 };
                 format!("[{prefix}] + {}", self.anchored_argument(base))
             }
-            "affix" | "af" | "compound" | "com" => {
+            "affix" | "af" | "compound" | "com" | "confix" => {
                 self.plus_joined(positional.get(1..).unwrap_or(&[]))
+            }
+            // Pure metadata: categories, sense ids, dates, and
+            // maintenance stubs carry no document meaning.
+            "C" | "c" | "cln" | "senseid" | "defdate" | "rfe" | "rfd" | "rfv"
+            | "attention" | "anchor" => String::new(),
+            "form of" => {
+                let label = positional.get(1).copied().unwrap_or_default();
+                let target = positional.get(2).copied().unwrap_or_default();
+                let display = positional
+                    .get(3)
+                    .filter(|d| !d.is_empty())
+                    .copied()
+                    .unwrap_or(target);
+                format!("{} of {}", capitalize_first(label), anchor(display, target))
+            }
+            name if form_of_name(name).is_some() => {
+                let label = form_of_name(name).expect("checked above");
+                let target = positional.get(1).copied().unwrap_or_default();
+                let display = positional
+                    .get(2)
+                    .filter(|d| !d.is_empty())
+                    .copied()
+                    .unwrap_or(target);
+                let mut text = format!("{label} {}", anchor(display, target));
+                if named("nocap").is_none() {
+                    text = capitalize_first(&text);
+                }
+                if let Some(gloss) = named("t") {
+                    let gloss = self.argument_text(gloss);
+                    if !gloss.is_empty() {
+                        text.push_str(&format!(" ({gloss})"));
+                    }
+                }
+                text
             }
             _ => {
                 self.audit("template_unhandled", template.name.clone());
@@ -655,11 +783,13 @@ impl<'a> Renderer<'a> {
     /// The IPA pronunciation line: mapped accent names, the
     /// transcriptions joined; unknown codes stay verbatim, audited.
     fn ipa_text(&mut self, template: &Template) -> String {
+        // `;` and `~` positionals are the IPA template's visual
+        // separators, not transcriptions.
         let transcriptions: Vec<String> = template
             .positional
             .iter()
             .skip(1)
-            .filter(|part| !part.is_empty())
+            .filter(|part| !part.is_empty() && *part != ";" && *part != "~")
             .map(|part| normalize_typography(part))
             .collect();
         let accents = template
@@ -680,8 +810,31 @@ impl<'a> Renderer<'a> {
             }
             None
         };
+        // A piece may carry `<<X>>` label markers (each its own code)
+        // and the `alias!display` bang form (the display side wins).
+        let mut codes: Vec<String> = Vec::new();
+        for piece in accents.split(',').filter(|piece| !piece.is_empty()) {
+            if piece.contains("<<") {
+                let mut rest = piece;
+                while let Some(open) = rest.find("<<") {
+                    let Some(close) = rest[open..].find(">>").map(|c| open + c)
+                    else {
+                        break;
+                    };
+                    codes.push(rest[open + 2..close].to_string());
+                    rest = &rest[close + 2..];
+                }
+                continue;
+            }
+            codes.push(piece.to_string());
+        }
         let mut names: Vec<String> = Vec::new();
-        for code in accents.split(',').filter(|code| !code.is_empty()) {
+        for code in &codes {
+            let code = match code.split_once('!') {
+                Some((_, right)) if !right.is_empty() => right,
+                Some((left, _)) => left,
+                None => code.as_str(),
+            };
             if let Some(name) = accent_display(code) {
                 names.push(name);
                 continue;
@@ -1432,7 +1585,11 @@ impl<'a> Renderer<'a> {
         };
         let mut headword = named("head")
             .filter(|raw| *raw != "?")
-            .map(|raw| self.argument_text(&raw.replace("\\,", ",")))
+            .map(|raw| {
+                // Headword lines carry no anchors: flatten to plain
+                // display text.
+                plain_anchor_text(&self.argument_text(&raw.replace("\\,", ",")))
+            })
             .filter(|text| !text.is_empty());
         match named("def").or(named("the")) {
             Some("1") => {

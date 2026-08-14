@@ -116,6 +116,7 @@ pub(crate) fn wikimedia_corpus(args: &WikimediaCorpusArgs) -> BiquestResult<()> 
     let mut cache = BlockCache::new(16);
     let mut blocks_read = 0usize;
     let mut words_rendered = 0usize;
+    let mut words_empty = 0usize;
     let mut pages_rendered = 0usize;
     let mut render_failures = 0usize;
     let mut audit_rows = 0usize;
@@ -158,9 +159,38 @@ pub(crate) fn wikimedia_corpus(args: &WikimediaCorpusArgs) -> BiquestResult<()> 
                 continue;
             }
         };
+        // A document with nothing beyond its h1 (a fold-matched page
+        // set with no English content) writes as <word>.empty.md -
+        // skippable by suffix, existence still known (TheUser).
+        let has_content = document
+            .markdown
+            .lines()
+            .skip(1)
+            .any(|line| !line.trim().is_empty());
+        let filename = if has_content {
+            format!("{word}.md")
+        } else {
+            words_empty += 1;
+            let row = harness::nu::Value::record(
+                harness::nu::record! {
+                    "word" => v_str(word),
+                    "page" => v_str(word),
+                    "class" => v_str("document_empty"),
+                    "detail" => v_str("no english content"),
+                },
+                span(),
+            );
+            writeln!(
+                audit_file,
+                "{}",
+                crate::associations::condensed_line(&engine_state, &row)?
+            )?;
+            audit_rows += 1;
+            format!("{word}.empty.md")
+        };
         let shard_dir = args.out.join(shard_of(word));
         fs::create_dir_all(&shard_dir)?;
-        fs::write(shard_dir.join(format!("{word}.md")), &document.markdown)?;
+        fs::write(shard_dir.join(filename), &document.markdown)?;
         words_rendered += 1;
         pages_rendered += pages.len();
         for row in &document.audit {
@@ -211,6 +241,7 @@ pub(crate) fn wikimedia_corpus(args: &WikimediaCorpusArgs) -> BiquestResult<()> 
             "vocabulary_words" => v_int(words.len() as i64),
             "words_with_pages" => v_int(rows_of.len() as i64),
             "words_rendered" => v_int(words_rendered as i64),
+            "words_empty" => v_int(words_empty as i64),
             "words_missing" => v_int(missing.len() as i64),
             "pages_rendered" => v_int(pages_rendered as i64),
             "render_failures" => v_int(render_failures as i64),
@@ -230,6 +261,7 @@ pub(crate) fn wikimedia_corpus(args: &WikimediaCorpusArgs) -> BiquestResult<()> 
     let summary = harness::nu::Value::record(
         harness::nu::record! {
             "words_rendered" => v_int(words_rendered as i64),
+            "words_empty" => v_int(words_empty as i64),
             "words_missing" => v_int(missing.len() as i64),
             "pages_rendered" => v_int(pages_rendered as i64),
             "render_failures" => v_int(render_failures as i64),

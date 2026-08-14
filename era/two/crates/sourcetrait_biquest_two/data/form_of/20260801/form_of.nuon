@@ -1,0 +1,21 @@
+# Third-party data: English Wiktionary's form-of template alias
+# vocabulary (CC BY-SA; attribution at the repository's
+# docs/licenses/wiktionary/), audit-grown against the measured
+# corpus distribution. `aliases` maps short template names to their
+# full "<label> of" forms; any name already ending in " of" renders
+# by the generic shape rule. Grows with the inflection-tag map on
+# the next derive.
+{
+    aliases: [
+        [ name      full ];
+        [ 'alt form' 'alternative form of' ]
+        [ 'altform' 'alternative form of' ]
+        [ 'alt sp'  'alternative spelling of' ]
+        [ 'altsp'   'alternative spelling of' ]
+        [ 'init of' 'initialism of' ]
+        [ 'abbr of' 'abbreviation of' ]
+        [ 'syn of'  'synonym of' ]
+        [ 'clip of' 'clipping of' ]
+        [ 'stand sp' 'standard spelling of' ]
+    ]
+}
