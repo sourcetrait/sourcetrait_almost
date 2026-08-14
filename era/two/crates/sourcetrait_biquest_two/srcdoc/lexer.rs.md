@@ -18,15 +18,21 @@ admitted-wordlist order.
 The page allocates from both ends (TheUser): user bindings from 0x00
 up (the Syntax.nuon draft), the hardcoded operator block from 0xFF
 down - 0xFC BEGIN_REPEAT, 0xFD END_REPEAT, 0xFE REPEAT, 0xFF
-REPETITION, then the case family at 0xF8 CASED, 0xF9 CASE, 0xFA
-CAPITALIZED, 0xFB UPPERCASED. The first three are legal wire both directions - the
-model may speak them (TheUser). REPETITION is the
+REPETITION, the case family at 0xF8 CASED, 0xF9 CASE, 0xFA
+CAPITALIZED, 0xFB UPPERCASED, then the span pair at 0xF6 UNICODE,
+0xF7 UNICODED (TheUser: forced tokenization is a tokenizer property,
+not portable language syntax, so the pair is hardcoded rather than
+table-bound; both ids ride the wire as encapsulation markers
+bracketing the exact per-character surface, so the model sees the
+tokenization change in-band). The repeat trio is legal wire both
+directions - the model may speak them (TheUser). REPETITION is the
 AbstractConceptMarker backing the repetition AbstractConcept
 (associations.rs): illegal in wire, never emitted, never parsed - it
 exists so the association store can anchor every repetition
 mechanism to one concept ("hint at convention by association").
 Ones-fill corruption decodes as the wire-illegal marker repeated and
-faults immediately.
+faults immediately. TokenizerSyntax.nuon in the iter's reference
+directory tracks the block for posterity; nothing consumes it.
 
 Content bytes still cannot forge structure: no character sequence
 maps to a keyword id through the character, bucket, or dictionary
@@ -131,3 +137,11 @@ construction, and the test surface IS the deliberate-rendering path
 markers are allowed to enter through. The scan is byte-wise and
 boundary-safe because every matched byte is ASCII; a malformed
 spelling (`<|0|>`, `<|GG|>`) falls through to ordinary content.
+
+A `<|unicode|>`..`<|unicoded|>` pair applies the tokenizer's span
+semantics on this surface too: interior text and any other spelling
+render one character row per character - the exact surface, no
+dictionary, no case, no rows, no bands - and an unterminated span
+faults, because the display surface shares the codec's discipline
+(TheUser's fixture: `<|unicode|>Microsoft<|unicoded|>` is the two
+markers bracketing ten character rows, M's surface preserved).

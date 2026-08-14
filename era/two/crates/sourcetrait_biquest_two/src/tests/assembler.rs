@@ -1,7 +1,7 @@
 //! Assembler locks: structural round trips, noun agreement, band
 //! expansion, REPETITION's wire illegality, raw-string protection,
-//! and indentation regeneration - over a hand table and a draft-shaped
-//! syntax table.
+//! indentation regeneration, and the escape and unicode span
+//! mechanics - over a hand table and a draft-shaped syntax table.
 use crate::assembler::Assembler;
 use crate::assembler::SyntaxTable;
 use crate::bucket::BucketTable;
@@ -253,7 +253,7 @@ fn bare_marker_spellings_are_invalid_outside_spans() {
     let text = "OPEN TRAIN\n  OPEN INPUT\n    BEGIN NUON\n      dog <|OPEN|> dog\n    END NUON\n  CLOSE INPUT\nCLOSE TRAIN\n";
     rig.with(|assembler| {
         let fault = assembler.encode(text).expect_err("bare spelling faults");
-        assert!(fault.to_string().contains("outside an escape span"), "got: {fault}");
+        assert!(fault.to_string().contains("outside a span"), "got: {fault}");
     });
 }
 
@@ -386,6 +386,246 @@ fn case_wire_faults_are_loud() {
             .expect_err("case marker faults");
         assert!(fault.to_string().contains("AbstractConceptMarker"), "got: {fault}");
     });
+}
+
+/// The span-capable rig: the escape table over the cased hand table.
+/// UNICODE (0xF6) and UNICODED (0xF7) are hardcoded tokenizer
+/// operators, never table bindings (TheUser: a tokenizer thing, not
+/// portable language syntax).
+fn unicode_rig() -> Rig {
+    Rig {
+        table: table().with_simple_case(&[
+            ('d', 'D'),
+            ('e', 'E'),
+            ('g', 'G'),
+            ('n', 'N'),
+            ('o', 'O'),
+            ('u', 'U'),
+        ]),
+        buckets: BucketTable::new(),
+        syntax: SyntaxTable::from_names(
+            [
+                "NULL", "OPEN", "CLOSE", "BEGIN", "END", "DIALOGUE", "CONFIG",
+                "NUON", "NU", "TRAIN", "INPUT", "ESCAPE", "ESCAPED",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+        )
+        .expect("escape table binds"),
+        admitted: vec![String::from("dog")],
+    }
+}
+
+#[test]
+fn tables_may_not_bind_hardcoded_names() {
+    let outcome = SyntaxTable::from_names(
+        ["NULL", "OPEN", "CLOSE", "BEGIN", "END", "UNICODE"]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+    );
+    let Err(fault) = outcome else {
+        panic!("a table binding a hardcoded name must refuse");
+    };
+    assert!(fault.to_string().contains("hardcoded"), "got: {fault}");
+}
+
+#[test]
+fn unicode_spans_char_split_and_round_trip() {
+    let rig = unicode_rig();
+    let text = "OPEN TRAIN\n  OPEN INPUT\n    BEGIN NUON\n      dog <|UNICODE|>dog<|UNICODED|> dog\n    END NUON\n  CLOSE INPUT\nCLOSE TRAIN\n";
+    let (wire, rendered) = rig.with(|assembler| {
+        let wire = assembler.encode(text).expect("encodes");
+        let rendered = assembler.decode(&wire).expect("decodes");
+        (wire, rendered)
+    });
+    assert_eq!(rendered, text);
+    let dictionary_offset =
+        256 + rig.table.assigned_count() as u32 + rig.buckets.count() as u32;
+    let dog = dictionary_offset;
+    let char_d = 256 + rig.table.index_of('d' as u32).expect("d row");
+    let char_o = 256 + rig.table.index_of('o' as u32).expect("o row");
+    let char_g = 256 + rig.table.index_of('g' as u32).expect("g row");
+    let open_at = wire
+        .iter()
+        .position(|&id| id == crate::lexer::KEYWORD_UNICODE)
+        .expect("unicode id");
+    // The markers bracket the exact per-character surface in-band,
+    // so the model sees the tokenization change.
+    assert_eq!(
+        &wire[open_at..open_at + 5],
+        &[
+            crate::lexer::KEYWORD_UNICODE,
+            char_d,
+            char_o,
+            char_g,
+            crate::lexer::KEYWORD_UNICODED,
+        ]
+    );
+    assert_eq!(
+        wire.iter().filter(|&&id| id == dog).count(),
+        2,
+        "outside the span the dictionary still resolves"
+    );
+    let rewire = rig.with(|assembler| assembler.encode(&rendered).expect("re-encodes"));
+    assert_eq!(wire, rewire);
+}
+
+#[test]
+fn unicode_spans_bypass_case_rows_and_bands() {
+    let rig = unicode_rig();
+    let text = "OPEN TRAIN\n  OPEN INPUT\n    BEGIN NUON\n      <|UNICODE|>Dog oooo!!<|UNICODED|>\n    END NUON\n  CLOSE INPUT\nCLOSE TRAIN\n";
+    let (wire, rendered) = rig.with(|assembler| {
+        let wire = assembler.encode(text).expect("encodes");
+        let rendered = assembler.decode(&wire).expect("decodes");
+        (wire, rendered)
+    });
+    assert_eq!(rendered, text);
+    let open_at = wire
+        .iter()
+        .position(|&id| id == crate::lexer::KEYWORD_UNICODE)
+        .expect("unicode id");
+    let close_at = wire
+        .iter()
+        .position(|&id| id == crate::lexer::KEYWORD_UNICODED)
+        .expect("unicoded id");
+    let span = &wire[open_at + 1..close_at];
+    let keyboard_offset = 256 + rig.table.assigned_count() as u32;
+    assert_eq!(span.len(), "Dog oooo!!".chars().count());
+    assert!(
+        span.iter().all(|&id| (256..keyboard_offset).contains(&id)),
+        "character tokens only: no case modifiers, no rows, no bands"
+    );
+    assert!(!wire.contains(&crate::lexer::KEYWORD_CAPITALIZED));
+    assert!(!wire.contains(&crate::lexer::KEYWORD_REPEAT));
+}
+
+#[test]
+fn unicoded_is_the_sole_terminator() {
+    let rig = unicode_rig();
+    // A marker-shaped spelling inside the span - even one that
+    // resolves elsewhere (END) - is raw content: it char-splits, and
+    // the span ends only at UNICODED.
+    let text = "OPEN TRAIN\n  OPEN INPUT\n    BEGIN NUON\n      <|UNICODE|>d<|END|>g<|UNICODED|>\n    END NUON\n  CLOSE INPUT\nCLOSE TRAIN\n";
+    let (wire, rendered) = rig.with(|assembler| {
+        let wire = assembler.encode(text).expect("encodes");
+        let rendered = assembler.decode(&wire).expect("decodes");
+        (wire, rendered)
+    });
+    assert_eq!(rendered, text);
+    let open_at = wire
+        .iter()
+        .position(|&id| id == crate::lexer::KEYWORD_UNICODE)
+        .expect("unicode id");
+    let close_at = wire
+        .iter()
+        .position(|&id| id == crate::lexer::KEYWORD_UNICODED)
+        .expect("unicoded id");
+    let span = &wire[open_at + 1..close_at];
+    assert_eq!(span.len(), "d<|END|>g".chars().count());
+    assert!(!span.contains(&4), "the END spelling stayed characters");
+    let rewire = rig.with(|assembler| assembler.encode(&rendered).expect("re-encodes"));
+    assert_eq!(wire, rewire);
+}
+
+#[test]
+fn unicode_span_unterminated_faults_both_ways() {
+    let rig = unicode_rig();
+    let text = "OPEN TRAIN\n  OPEN INPUT\n    BEGIN NUON\n      <|UNICODE|>dog\n    END NUON\n  CLOSE INPUT\nCLOSE TRAIN\n";
+    rig.with(|assembler| {
+        let fault = assembler.encode(text).expect_err("unterminated faults");
+        assert!(fault.to_string().contains("never closes"), "got: {fault}");
+        // Decode-side: a span interrupted by a keyword id.
+        let char_d = 256 + rig.table.index_of('d' as u32).expect("d row");
+        let fault = assembler
+            .decode(&[
+                1, 9, 1, 10, 3, 7, crate::lexer::KEYWORD_UNICODE, char_d, 4, 7, 2,
+                10, 2, 9,
+            ])
+            .expect_err("keyword-interrupted span faults");
+        assert!(fault.to_string().contains("never closes"), "got: {fault}");
+    });
+}
+
+#[test]
+fn unicode_spans_are_train_input_only() {
+    let rig = unicode_rig();
+    let text = "OPEN DIALOGUE\n  OPEN CONFIG\n    BEGIN NUON\n      <|UNICODE|>dog<|UNICODED|>\n    END NUON\n  CLOSE CONFIG\nCLOSE DIALOGUE\n";
+    rig.with(|assembler| {
+        let fault = assembler.encode(text).expect_err("outside TRAIN faults");
+        assert!(fault.to_string().contains("legal only inside TRAIN"), "got: {fault}");
+        let char_d = 256 + rig.table.index_of('d' as u32).expect("d row");
+        let fault = assembler
+            .decode(&[
+                1, 6, 3, 7, crate::lexer::KEYWORD_UNICODE, char_d,
+                crate::lexer::KEYWORD_UNICODED, 4, 7, 2, 6,
+            ])
+            .expect_err("decode-side legality");
+        assert!(fault.to_string().contains("legal only inside TRAIN"), "got: {fault}");
+    });
+}
+
+#[test]
+fn unicode_span_admits_character_tokens_only() {
+    let rig = unicode_rig();
+    let dictionary_offset =
+        256 + rig.table.assigned_count() as u32 + rig.buckets.count() as u32;
+    let dog = dictionary_offset;
+    rig.with(|assembler| {
+        let fault = assembler
+            .decode(&[
+                1, 9, 1, 10, 3, 7, crate::lexer::KEYWORD_UNICODE, dog,
+                crate::lexer::KEYWORD_UNICODED, 4, 7, 2, 10, 2, 9,
+            ])
+            .expect_err("dictionary id inside a span faults");
+        assert!(
+            fault.to_string().contains("character tokens only"),
+            "got: {fault}"
+        );
+    });
+}
+
+#[test]
+fn unicode_mention_inside_escape_is_inert() {
+    let rig = unicode_rig();
+    let text = "OPEN TRAIN\n  OPEN INPUT\n    BEGIN NUON\n      <|ESCAPE|><|UNICODE|>dog<|ESCAPED|> dog\n    END NUON\n  CLOSE INPUT\nCLOSE TRAIN\n";
+    let (wire, rendered) = rig.with(|assembler| {
+        let wire = assembler.encode(text).expect("encodes");
+        let rendered = assembler.decode(&wire).expect("decodes");
+        (wire, rendered)
+    });
+    assert_eq!(rendered, text);
+    let escape_at = wire.iter().position(|&id| id == 11).expect("escape id");
+    assert_eq!(
+        wire[escape_at + 1],
+        crate::lexer::KEYWORD_UNICODE,
+        "the UNICODE mention rides as its real id"
+    );
+    let dictionary_offset =
+        256 + rig.table.assigned_count() as u32 + rig.buckets.count() as u32;
+    assert!(
+        wire.contains(&dictionary_offset),
+        "no span opened: dog still dictionary-resolves"
+    );
+    let rewire = rig.with(|assembler| assembler.encode(&rendered).expect("re-encodes"));
+    assert_eq!(wire, rewire);
+}
+
+#[test]
+fn hardcoded_operator_mentions_resolve_and_render_by_name() {
+    let rig = unicode_rig();
+    let text = "OPEN TRAIN\n  OPEN INPUT\n    BEGIN NUON\n      <|ESCAPE|><|CAPITALIZED|><|REPEAT|><|ESCAPED|>\n    END NUON\n  CLOSE INPUT\nCLOSE TRAIN\n";
+    let (wire, rendered) = rig.with(|assembler| {
+        let wire = assembler.encode(text).expect("encodes");
+        let rendered = assembler.decode(&wire).expect("decodes");
+        (wire, rendered)
+    });
+    assert_eq!(rendered, text, "mentions render back by their fixed names");
+    assert!(wire.contains(&crate::lexer::KEYWORD_CAPITALIZED));
+    assert!(wire.contains(&crate::lexer::KEYWORD_REPEAT));
+    let rewire = rig.with(|assembler| assembler.encode(&rendered).expect("re-encodes"));
+    assert_eq!(wire, rewire);
 }
 
 #[test]

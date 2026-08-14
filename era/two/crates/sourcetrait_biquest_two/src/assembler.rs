@@ -12,6 +12,8 @@ use crate::lexer::KEYWORD_END_REPEAT;
 use crate::lexer::KEYWORD_PAGE_SIZE;
 use crate::lexer::KEYWORD_REPEAT;
 use crate::lexer::KEYWORD_REPETITION;
+use crate::lexer::KEYWORD_UNICODE;
+use crate::lexer::KEYWORD_UNICODED;
 use crate::lexer::KEYWORD_UPPERCASED;
 use crate::lexer::Segmenter;
 use crate::ucd::CharClass;
@@ -37,6 +39,23 @@ const NAME_ESCAPE: &str = "ESCAPE";
 const NAME_ESCAPED: &str = "ESCAPED";
 const NAME_TRAIN: &str = "TRAIN";
 const NAME_INPUT: &str = "INPUT";
+
+/// The hardcoded block's assembly-surface names: fixed by the codec,
+/// resolved and rendered beside the user table (which may not bind
+/// them). The span pair lives here because forced tokenization is a
+/// tokenizer property, not portable language syntax (TheUser).
+const HARDCODED_NAMES: [(u32, &str); 10] = [
+    (KEYWORD_UNICODE, "UNICODE"),
+    (KEYWORD_UNICODED, "UNICODED"),
+    (KEYWORD_CASED, "CASED"),
+    (KEYWORD_CASE, "CASE"),
+    (KEYWORD_CAPITALIZED, "CAPITALIZED"),
+    (KEYWORD_UPPERCASED, "UPPERCASED"),
+    (KEYWORD_BEGIN_REPEAT, "BEGIN_REPEAT"),
+    (KEYWORD_END_REPEAT, "END_REPEAT"),
+    (KEYWORD_REPEAT, "REPEAT"),
+    (KEYWORD_REPETITION, "REPETITION"),
+];
 
 /// The user-binding half of the keyword page: Syntax.nuon remapped
 /// onto the page in order, NULL at 0x00. Bindings stop below the
@@ -66,6 +85,11 @@ impl SyntaxTable {
         );
         let mut ids = HashMap::with_capacity(names.len());
         for (index, name) in names.iter().enumerate() {
+            snafu::ensure_whatever!(
+                !HARDCODED_NAMES.iter().any(|(_, hardcoded)| hardcoded == name),
+                "the syntax table binds {name}, a hardcoded tokenizer operator's \
+                 fixed name"
+            );
             snafu::ensure_whatever!(
                 ids.insert(name.clone(), index as u32).is_none(),
                 "the syntax table binds {name} twice"
@@ -270,8 +294,8 @@ impl<'a> Assembler<'a> {
                         let depth = stack.len() + 1;
                         let interior =
                             self.collect_interior(&mut lines, noun, depth, number)?;
-                        let escapes_legal = self.escapes_legal(&stack);
-                        self.encode_interior(&interior, escapes_legal, &mut wire)?;
+                        let spans_legal = self.spans_legal(&stack);
+                        self.encode_interior(&interior, spans_legal, &mut wire)?;
                         wire.push(self.syntax.end);
                         wire.push(noun);
                     } else {
@@ -350,10 +374,10 @@ impl<'a> Assembler<'a> {
         )
     }
 
-    /// Whether escape spans are legal here: inside TRAIN, within an
-    /// INPUT block's serialization (TheUser's ruling), with both
-    /// keywords bound.
-    fn escapes_legal(&self, stack: &[u32]) -> bool {
+    /// Whether escape and unicode spans are legal here: inside TRAIN,
+    /// within an INPUT block's serialization (TheUser's ruling, one
+    /// shared predicate), with TRAIN and INPUT bound.
+    fn spans_legal(&self, stack: &[u32]) -> bool {
         match (self.syntax.train, self.syntax.input) {
             (Some(train), Some(input)) => {
                 stack.contains(&train) && stack.last() == Some(&input)
@@ -362,10 +386,14 @@ impl<'a> Assembler<'a> {
         }
     }
 
-    /// Resolve a marker spelling's interior: a bound keyword name, or
-    /// a two-hex-digit page address.
+    /// Resolve a marker spelling's interior: a bound keyword name, a
+    /// hardcoded operator's fixed name, or a two-hex-digit page
+    /// address.
     fn spelling_id(&self, body: &str) -> Option<u32> {
         if let Some(id) = self.syntax.id_of(body) {
+            return Some(id);
+        }
+        if let Some(&(id, _)) = HARDCODED_NAMES.iter().find(|(_, name)| *name == body) {
             return Some(id);
         }
         if body.len() == 2 && body.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -375,13 +403,15 @@ impl<'a> Assembler<'a> {
     }
 
     /// Encode a serialization interior: content tokenizes, and marker
-    /// spellings are invalid except inside an ESCAPE span, where they
-    /// convert to their keyword ids (prose rides along; nesting and
-    /// an unterminated span fault).
+    /// spellings are invalid except as span openers and inside spans.
+    /// An ESCAPE span converts spellings to their keyword ids (prose
+    /// rides along; nesting and an unterminated span fault); a
+    /// UNICODE span forces per-character tokenization
+    /// (encode_unicode_span).
     fn encode_interior(
         &self,
         interior: &str,
-        escapes_legal: bool,
+        spans_legal: bool,
         wire: &mut Vec<u32>,
     ) -> BiquestResult<()> {
         let escape = self.syntax.escape;
@@ -411,12 +441,22 @@ impl<'a> Assembler<'a> {
                 snafu::whatever!("<|{body}|> is not a bound keyword or page address");
             };
             if !in_span {
+                if id == KEYWORD_UNICODE {
+                    snafu::ensure_whatever!(
+                        spans_legal,
+                        "a unicode span is legal only inside TRAIN, within an INPUT \
+                         serialization"
+                    );
+                    wire.push(id);
+                    rest = self.encode_unicode_span(&rest[end..], wire)?;
+                    continue;
+                }
                 snafu::ensure_whatever!(
                     Some(id) == escape,
-                    "a marker spelling (<|{body}|>) outside an escape span is invalid"
+                    "a marker spelling (<|{body}|>) outside a span is invalid"
                 );
                 snafu::ensure_whatever!(
-                    escapes_legal,
+                    spans_legal,
                     "an escape span is legal only inside TRAIN, within an INPUT \
                      serialization"
                 );
@@ -438,11 +478,56 @@ impl<'a> Assembler<'a> {
         }
     }
 
-    /// A keyword id's mention spelling: the bound name, else the
-    /// two-hex page address.
+    /// A character's layer token id, or the ingestion refusal.
+    fn character_id(&self, c: char) -> BiquestResult<u32> {
+        match self.table.index_of(c as u32) {
+            Some(index) => Ok(KEYWORD_PAGE_SIZE + index),
+            None => snafu::whatever!(
+                "ingestion refusal: unassigned code point U+{:04X}",
+                c as u32
+            ),
+        }
+    }
+
+    /// Encode a forced per-character span's content: every character
+    /// until the UNICODED spelling is one character token - no
+    /// dictionary matching, no case modifiers, no keyboard rows, no
+    /// repeat bands (the point is the exact surface). UNICODED is the
+    /// sole terminator: any other marker-shaped spelling char-splits
+    /// as raw content; a span that never terminates faults. Returns
+    /// the text after the terminator.
+    fn encode_unicode_span<'t>(
+        &self,
+        text: &'t str,
+        wire: &mut Vec<u32>,
+    ) -> BiquestResult<&'t str> {
+        let mut rest = text;
+        loop {
+            let Some((start, end, body)) = find_marker_spelling(rest) else {
+                snafu::whatever!("a unicode span never closes (missing <|UNICODED|>)");
+            };
+            if self.spelling_id(body) == Some(KEYWORD_UNICODED) {
+                for c in rest[..start].chars() {
+                    wire.push(self.character_id(c)?);
+                }
+                wire.push(KEYWORD_UNICODED);
+                return Ok(&rest[end..]);
+            }
+            for c in rest[..end].chars() {
+                wire.push(self.character_id(c)?);
+            }
+            rest = &rest[end..];
+        }
+    }
+
+    /// A keyword id's mention spelling: the bound name, the hardcoded
+    /// operator's fixed name, else the two-hex page address.
     fn mention_spelling(&self, id: u32) -> String {
-        match self.syntax.name_of(id) {
-            Some(name) => format!("<|{name}|>"),
+        if let Some(name) = self.syntax.name_of(id) {
+            return format!("<|{name}|>");
+        }
+        match HARDCODED_NAMES.iter().find(|(hardcoded, _)| *hardcoded == id) {
+            Some(&(_, name)) => format!("<|{name}|>"),
             None => format!("<|{id:02X}|>"),
         }
     }
@@ -531,14 +616,15 @@ impl<'a> Assembler<'a> {
     }
 
     /// Decode a serialization interior: band expansion lives here,
-    /// REPETITION's wire illegality faults here, and escape spans
-    /// render their keyword ids back as mention spellings. Returns
-    /// the interior text and the position of the END keyword.
+    /// REPETITION's wire illegality faults here, escape spans render
+    /// their keyword ids back as mention spellings, and unicode spans
+    /// render their characters verbatim between the two markers.
+    /// Returns the interior text and the position of the END keyword.
     fn decode_interior(
         &self,
         wire: &[u32],
         mut position: usize,
-        escapes_legal: bool,
+        spans_legal: bool,
     ) -> BiquestResult<(String, usize)> {
         let mut interior = String::new();
         let mut in_span = false;
@@ -560,13 +646,61 @@ impl<'a> Assembler<'a> {
             }
             if Some(id) == self.syntax.escape {
                 snafu::ensure_whatever!(
-                    escapes_legal,
+                    spans_legal,
                     "wire fault at token {position}: an escape span is legal only \
                      inside TRAIN, within an INPUT serialization"
                 );
                 interior.push_str(&self.mention_spelling(id));
                 in_span = true;
                 position += 1;
+                continue;
+            }
+            if id == KEYWORD_UNICODE {
+                snafu::ensure_whatever!(
+                    spans_legal,
+                    "wire fault at token {position}: a unicode span is legal only \
+                     inside TRAIN, within an INPUT serialization"
+                );
+                interior.push_str(&self.mention_spelling(id));
+                position += 1;
+                // The span's characters render verbatim: no band
+                // expansion, no case handling - the markers bracket
+                // an exact surface.
+                let keyboard_offset =
+                    KEYWORD_PAGE_SIZE + self.table.assigned_count() as u32;
+                loop {
+                    let Some(&span_id) = wire.get(position) else {
+                        snafu::whatever!(
+                            "wire fault at token {position}: a unicode span never \
+                             closes (missing <|UNICODED|>)"
+                        );
+                    };
+                    if span_id == KEYWORD_UNICODED {
+                        interior.push_str(&self.mention_spelling(span_id));
+                        position += 1;
+                        break;
+                    }
+                    snafu::ensure_whatever!(
+                        span_id >= KEYWORD_PAGE_SIZE,
+                        "wire fault at token {position}: a unicode span never \
+                         closes (missing <|UNICODED|>)"
+                    );
+                    snafu::ensure_whatever!(
+                        span_id < keyboard_offset,
+                        "wire fault at token {position}: a unicode span admits \
+                         character tokens only"
+                    );
+                    let row = &self.table.rows[(span_id - KEYWORD_PAGE_SIZE) as usize];
+                    let Some(c) = char::from_u32(row.code_point) else {
+                        snafu::whatever!(
+                            "wire fault at token {position}: unrenderable code \
+                             point U+{:04X}",
+                            row.code_point
+                        );
+                    };
+                    interior.push(c);
+                    position += 1;
+                }
                 continue;
             }
             if id == KEYWORD_REPETITION {
@@ -591,6 +725,12 @@ impl<'a> Assembler<'a> {
                 snafu::whatever!(
                     "wire fault at token {position}: a repetition operator with no unit \
                      before it"
+                );
+            }
+            if id == KEYWORD_UNICODED {
+                snafu::whatever!(
+                    "wire fault at token {position}: a unicode span closer with no \
+                     open span"
                 );
             }
             if id < KEYWORD_PAGE_SIZE {
@@ -788,9 +928,9 @@ impl<'a> Assembler<'a> {
                     position += 2;
                 } else {
                     out.push_str(&format!("{indent}{HEAD_BEGIN} {noun_name}\n"));
-                    let escapes_legal = self.escapes_legal(&stack);
+                    let spans_legal = self.spans_legal(&stack);
                     let (interior, end_position) =
-                        self.decode_interior(wire, position + 2, escapes_legal)?;
+                        self.decode_interior(wire, position + 2, spans_legal)?;
                     snafu::ensure_whatever!(
                         wire[end_position] == self.syntax.end,
                         "wire fault at token {end_position}: a serialization interrupted \

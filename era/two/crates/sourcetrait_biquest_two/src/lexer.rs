@@ -36,8 +36,16 @@ pub(crate) const KEYWORD_CASE: u32 = 0xF9;
 pub(crate) const KEYWORD_CAPITALIZED: u32 = 0xFA;
 pub(crate) const KEYWORD_UPPERCASED: u32 = 0xFB;
 
+/// The forced per-character span operators (TheUser: a tokenizer
+/// thing, not portable language syntax, so hardcoded rather than
+/// table-bound). UNICODE opens, UNICODED closes; both ride the wire
+/// as encapsulation markers bracketing an exact per-character
+/// surface, so the model sees the tokenization change in-band.
+pub(crate) const KEYWORD_UNICODE: u32 = 0xF6;
+pub(crate) const KEYWORD_UNICODED: u32 = 0xF7;
+
 /// The lowest hardcoded id: user bindings stop below it.
-pub(crate) const HARDCODED_BLOCK_FLOOR: u32 = KEYWORD_CASED;
+pub(crate) const HARDCODED_BLOCK_FLOOR: u32 = KEYWORD_UNICODE;
 
 pub(crate) const BEGIN_REPEAT_ALIAS: &str = "<|begin_repeat|>";
 pub(crate) const END_REPEAT_ALIAS: &str = "<|end_repeat|>";
@@ -47,9 +55,11 @@ pub(crate) const CASE_ALIAS: &str = "<|case|>";
 pub(crate) const CASED_ALIAS: &str = "<|cased|>";
 pub(crate) const CAPITALIZED_ALIAS: &str = "<|capitalized|>";
 pub(crate) const UPPERCASED_ALIAS: &str = "<|uppercased|>";
+pub(crate) const UNICODE_ALIAS: &str = "<|unicode|>";
+pub(crate) const UNICODED_ALIAS: &str = "<|unicoded|>";
 
 /// The hardcoded alias table, id beside spelling.
-pub(crate) const HARDCODED_ALIASES: [(u32, &str); 8] = [
+pub(crate) const HARDCODED_ALIASES: [(u32, &str); 10] = [
     (KEYWORD_BEGIN_REPEAT, BEGIN_REPEAT_ALIAS),
     (KEYWORD_END_REPEAT, END_REPEAT_ALIAS),
     (KEYWORD_REPEAT, REPEAT_ALIAS),
@@ -58,6 +68,8 @@ pub(crate) const HARDCODED_ALIASES: [(u32, &str); 8] = [
     (KEYWORD_CASED, CASED_ALIAS),
     (KEYWORD_CAPITALIZED, CAPITALIZED_ALIAS),
     (KEYWORD_UPPERCASED, UPPERCASED_ALIAS),
+    (KEYWORD_UNICODE, UNICODE_ALIAS),
+    (KEYWORD_UNICODED, UNICODED_ALIAS),
 ];
 
 /// What one lexed piece is, before id resolution.
@@ -737,10 +749,13 @@ fn split_markers(text: &str) -> Vec<TestPart<'_>> {
 ///
 /// Columns: token (the id), unicode (`U+XXXX` for a character-layer
 /// token, null for a keyword or dictionary word), value (the token's
-/// text). `<|XX|>` spellings render as keyword-page tokens. Without
-/// --words the embedded full English set is the dictionary - which
-/// IS the vocabulary (TheUser: the whole dictionary, file order as
-/// id order).
+/// text). `<|XX|>` spellings render as keyword-page tokens, and a
+/// `<|unicode|>`..`<|unicoded|>` span applies the tokenizer's span
+/// semantics: one token per character, the exact surface, any other
+/// spelling inside char-splitting as raw content. Without --words
+/// the embedded full English set is the dictionary - which IS the
+/// vocabulary (TheUser: the whole dictionary, file order as id
+/// order).
 pub(crate) fn tokenize_text(args: &TokenizeArgs) -> BiquestResult<()> {
     let table = CharacterTable::embedded()?;
     let buckets = BucketTable::new();
@@ -750,9 +765,32 @@ pub(crate) fn tokenize_text(args: &TokenizeArgs) -> BiquestResult<()> {
     };
     let segmenter = Segmenter::new(&table, &buckets, &words);
     let mut rows: Vec<harness::nu::Value> = Vec::new();
+    let mut in_span = false;
+    let mut push_chars = |rows: &mut Vec<harness::nu::Value>,
+                          text: &str|
+     -> BiquestResult<()> {
+        for c in text.chars() {
+            let token = segmenter.character_token(c)?;
+            rows.push(harness::nu::Value::record(
+                harness::nu::record! {
+                    "token" => v_int(token.id as i64),
+                    "unicode" => v_str(&format!("U+{:04X}", c as u32)),
+                    "value" => v_str(&c.to_string()),
+                },
+                span(),
+            ));
+        }
+        Ok(())
+    };
     for part in split_markers(&args.text) {
         match part {
             TestPart::Marker(id, spelling) => {
+                if in_span && id as u32 != KEYWORD_UNICODED {
+                    // Inside a span every other spelling is raw
+                    // content: the exact surface, char-split.
+                    push_chars(&mut rows, spelling)?;
+                    continue;
+                }
                 rows.push(harness::nu::Value::record(
                     harness::nu::record! {
                         "token" => v_int(id as i64),
@@ -761,8 +799,17 @@ pub(crate) fn tokenize_text(args: &TokenizeArgs) -> BiquestResult<()> {
                     },
                     span(),
                 ));
+                match id as u32 {
+                    KEYWORD_UNICODE => in_span = true,
+                    KEYWORD_UNICODED => in_span = false,
+                    _ => {}
+                }
             }
             TestPart::Text(text) => {
+                if in_span {
+                    push_chars(&mut rows, text)?;
+                    continue;
+                }
                 for (token, text) in segmenter.segment_pieces(text)? {
                     let unicode = match token.layer {
                         Layer::Character => {
@@ -785,6 +832,10 @@ pub(crate) fn tokenize_text(args: &TokenizeArgs) -> BiquestResult<()> {
             }
         }
     }
+    snafu::ensure_whatever!(
+        !in_span,
+        "a unicode span never closes (missing <|unicoded|>)"
+    );
     let rendered = harness::nu::to_nuon_pretty(&harness::nu::Value::list(rows, span()))?;
     println!("{rendered}");
     Ok(())
