@@ -1,6 +1,6 @@
 [package]
 name = "sourcetrait_biquest_two"
-version = "0.0.0-5"
+version = "0.0.0-6"
 edition = "2024"
 description = "biquest: the QuestImaginary foundation and training tool"
 authors = ["SourceTrait <development@sourcetrait.com>"]

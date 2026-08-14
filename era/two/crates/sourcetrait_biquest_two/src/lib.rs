@@ -10,6 +10,7 @@ pub(crate) mod ledger;
 pub(crate) mod lexer;
 pub(crate) mod matrix;
 pub mod run;
+pub(crate) mod trainer;
 pub(crate) mod ucd;
 pub(crate) mod value;
 
@@ -55,6 +56,8 @@ pub(crate) use crate::cli::{
     TokenizerCommand,
     TokenizerDictionaryArgs,
     TokenizerLedgerArgs,
+    TrainerCommand,
+    TrainerInitArgs,
 };
 pub(crate) use crate::dictionary::tokenizer_dictionary;
 pub(crate) use crate::doc::doc_cli;
@@ -64,6 +67,7 @@ pub(crate) use crate::ledger::{
 };
 pub(crate) use crate::lexer::tokenize_text;
 pub(crate) use crate::matrix::matrix_build;
+pub(crate) use crate::trainer::trainer_init;
 #[allow(unused_imports)]
 pub(crate) use crate::value::{
     epoch_seconds,
@@ -92,5 +96,6 @@ mod tests {
     mod doc;
     mod lexer;
     mod matrix;
+    mod trainer;
     mod value;
 }

@@ -13,7 +13,9 @@ because the store is its own artifact class - the association
 artifact the matrix build and stage-zero corpus consume - not a
 tokenizer measurement. `matrix` is likewise its own family: the
 embedding artifact is the foundation the trainer consumes, not a
-measurement.
+measurement. `trainer` carries the organism's checkpoint and (later)
+training verbs; `assemble`/`disassemble` sit at the top level beside
+`tokenize` as the everyday Quill test surface.
 
 Artifact paths are explicit flags rather than config fields: the
 tokenizer artifacts live on the tmp home tier and their homes are

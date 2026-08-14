@@ -7923,7 +7923,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_biquest_two"
-version = "0.0.0-5"
+version = "0.0.0-6"
 dependencies = [
  "clap",
  "half",

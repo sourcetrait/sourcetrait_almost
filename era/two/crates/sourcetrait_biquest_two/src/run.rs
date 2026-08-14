@@ -22,6 +22,9 @@ pub fn run() {
             TokenizerCommand::Admit(args) => tokenizer_admit(args),
             TokenizerCommand::Ledger(args) => tokenizer_ledger(&cli, args),
         },
+        Command::Trainer { command } => match command {
+            TrainerCommand::Init(args) => trainer_init(args),
+        },
     };
     if let Err(error) = outcome {
         eprintln!("biquest: {error}");

@@ -46,6 +46,33 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: TokenizerCommand,
     },
+    /// The BiquestTrainer: the organism's checkpoint and training.
+    Trainer {
+        #[command(subcommand)]
+        command: TrainerCommand,
+    },
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub(crate) enum TrainerCommand {
+    /// The organism's fresh checkpoint from a matrix artifact.
+    Init(TrainerInitArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct TrainerInitArgs {
+    /// The ImagineQuestMatrix artifact (.safetensors).
+    #[arg(long)]
+    pub(crate) matrix: PathBuf,
+    /// The organism checkpoint directory.
+    #[arg(long)]
+    pub(crate) out: PathBuf,
+    /// Layer count; a multiple of four (three GDN then one attention).
+    #[arg(long, default_value_t = 8)]
+    pub(crate) layers: usize,
+    /// The deterministic core-init seed.
+    #[arg(long, default_value_t = 299_792_458)]
+    pub(crate) seed: u64,
 }
 
 #[derive(Debug, clap::Args)]
