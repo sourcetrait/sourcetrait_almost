@@ -10,14 +10,19 @@ const SCRIPTS: &str = include_str!("../data/ucd/Scripts.txt");
 
 /// The lexer's classification of a code point.
 ///
-/// Word and Unicode partition the ASSIGNED set whole - any assigned
-/// character lexes, which is the totality the Unicode floor exists
-/// for. Other is what the table does not hold: unassigned code
-/// points, the ingestion refusal.
+/// Word, Digit, and Unicode partition the ASSIGNED set whole - any
+/// assigned character lexes, which is the totality the Unicode floor
+/// exists for. Other is what the table does not hold: unassigned
+/// code points, the ingestion refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CharClass {
     /// Letters, marks, and numbers: word-constituent.
     Word,
+    /// The ten ASCII digits `0`-`9` (TheUser-ruled scope), exactly.
+    /// Word-constituent for piece formation, but never
+    /// run-collapsed: a number is place-value content, not
+    /// repetition.
+    Digit,
     /// Every other assigned character - it resolves at the Unicode
     /// table: always a boundary, one token per character.
     Unicode,
@@ -298,8 +303,11 @@ impl CharacterTable {
         self.index_of.get(&code_point).copied()
     }
 
-    /// An assigned row is Word or Symbol, never Other.
+    /// An assigned row is Word, Digit, or Unicode, never Other.
     pub(crate) fn class_of_row(&self, row: &CharRow) -> CharClass {
+        if (0x0030..=0x0039).contains(&row.code_point) {
+            return CharClass::Digit;
+        }
         let category = &self.general_categories[row.category as usize];
         match category.as_bytes().first() {
             Some(b'L') | Some(b'M') | Some(b'N') => CharClass::Word,

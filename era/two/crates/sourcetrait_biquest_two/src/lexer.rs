@@ -1,7 +1,8 @@
 //! The Quill content lexer: dictionary hit or character split, nothing
-//! between; identical-token runs collapse through REPEAT, uniformly.
+//! between; repetition rides banded operators and keyboard rows.
 use crate::*;
 
+use crate::bucket::BucketTable;
 use crate::census::read_admitted;
 use crate::ucd::CharClass;
 use crate::ucd::CharacterTable;
@@ -10,11 +11,30 @@ use crate::ucd::CharacterTable;
 pub(crate) const KEYWORD_PAGE_SIZE: u32 = 256;
 /// The character layer's id offset, directly above the keyword page.
 pub(crate) const CHARACTER_OFFSET: u32 = KEYWORD_PAGE_SIZE;
-/// The REPEAT operator: hardcoded keyword ids allocate from the
-/// page's end downward, user bindings from 0x00 upward.
-pub(crate) const KEYWORD_REPEAT: u32 = 0xFF;
-/// REPEAT's hardcoded authoring alias.
+
+/// The hardcoded operator block allocates from the page's end
+/// downward, user bindings from 0x00 upward. begin/end bracket a
+/// multi-digit count for long runs; REPEAT carries a one-digit
+/// count; REPETITION is the conceptual association hub - illegal in
+/// wire, never emitted, never parsed (TheUser: the other three may
+/// speak back).
+pub(crate) const KEYWORD_BEGIN_REPEAT: u32 = 0xFC;
+pub(crate) const KEYWORD_END_REPEAT: u32 = 0xFD;
+pub(crate) const KEYWORD_REPEAT: u32 = 0xFE;
+pub(crate) const KEYWORD_REPETITION: u32 = 0xFF;
+
+pub(crate) const BEGIN_REPEAT_ALIAS: &str = "<|begin_repeat|>";
+pub(crate) const END_REPEAT_ALIAS: &str = "<|end_repeat|>";
 pub(crate) const REPEAT_ALIAS: &str = "<|repeat|>";
+pub(crate) const REPETITION_ALIAS: &str = "<|repetition|>";
+
+/// The hardcoded alias table, id beside spelling.
+pub(crate) const HARDCODED_ALIASES: [(u32, &str); 4] = [
+    (KEYWORD_BEGIN_REPEAT, BEGIN_REPEAT_ALIAS),
+    (KEYWORD_END_REPEAT, END_REPEAT_ALIAS),
+    (KEYWORD_REPEAT, REPEAT_ALIAS),
+    (KEYWORD_REPETITION, REPETITION_ALIAS),
+];
 
 /// What one lexed piece is, before id resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,7 +64,7 @@ pub(crate) fn boundary_pieces<'a>(
     let mut word_start: Option<usize> = None;
     for (offset, c) in text.char_indices() {
         match table.class_of(c) {
-            CharClass::Word => {
+            CharClass::Word | CharClass::Digit => {
                 if word_start.is_none() {
                     word_start = Some(offset);
                 }
@@ -76,6 +96,8 @@ pub(crate) enum Layer {
     /// A hardcoded keyword-page operator the encoder emitted.
     Keyword,
     Character,
+    /// A keyboard-symbol double or triple row.
+    Bucket,
     Dictionary,
 }
 
@@ -86,23 +108,45 @@ pub(crate) struct Token {
     pub(crate) layer: Layer,
 }
 
-/// The layered segmenter: keyword page, characters, then words.
+/// The layered segmenter: keyword page, characters, keyboard rows,
+/// then words.
 pub(crate) struct Segmenter<'a> {
     table: &'a CharacterTable,
+    buckets: &'a BucketTable,
+    bucket_offset: u32,
     /// Case-folded admitted word to its dictionary-layer id.
     word_ids: HashMap<String, u32>,
+    /// The ten Digit-class character ids, exempt from run encoding.
+    digit_ids: HashSet<u32>,
 }
 
 impl<'a> Segmenter<'a> {
-    /// Admitted words take ids above the character layer, in list order.
-    pub(crate) fn new(table: &'a CharacterTable, admitted: &[String]) -> Self {
-        let dictionary_offset = CHARACTER_OFFSET + table.assigned_count() as u32;
+    /// Keyboard rows take ids above the character layer; admitted
+    /// words above the rows, in list order.
+    pub(crate) fn new(
+        table: &'a CharacterTable,
+        buckets: &'a BucketTable,
+        admitted: &[String],
+    ) -> Self {
+        let bucket_offset = CHARACTER_OFFSET + table.assigned_count() as u32;
+        let dictionary_offset = bucket_offset + buckets.count() as u32;
         let word_ids = admitted
             .iter()
             .enumerate()
             .map(|(index, word)| (word.clone(), dictionary_offset + index as u32))
             .collect();
-        Self { table, word_ids }
+        let digit_ids = ('0'..='9')
+            .filter_map(|digit| table.index_of(digit as u32))
+            .map(|index| CHARACTER_OFFSET + index)
+            .collect();
+        Self { table, buckets, bucket_offset, word_ids, digit_ids }
+    }
+
+    /// The character behind a character-layer token id.
+    fn char_of(&self, id: u32) -> Option<char> {
+        let index = id.checked_sub(CHARACTER_OFFSET)? as usize;
+        let row = self.table.rows.get(index)?;
+        char::from_u32(row.code_point)
     }
 
     fn character_token(&self, c: char) -> BiquestResult<Token> {
@@ -118,21 +162,35 @@ impl<'a> Segmenter<'a> {
         }
     }
 
-    /// Collapse runs of an identical non-word token into REPEAT
-    /// groups: unit, REPEAT, one count digit. Canonical form, ruled:
-    /// a run of three or more collapses (ties prefer REPEAT), groups
-    /// carry at most nine, a leftover of one or two stays plain. The
-    /// single count digit is what keeps the wire unambiguous against
-    /// literal digits that follow a run.
-    fn collapse_runs(
+    /// Encode runs of an identical non-word, non-digit token through
+    /// the magnitude bands (canonical, deterministic):
+    ///
+    /// - 1: the token itself.
+    /// - 2 or 3, keyboard symbol: the double or triple row.
+    /// - 2, otherwise: plain (a group would cost three).
+    /// - 3..=9 (from 3 where no row exists): unit, REPEAT, one count
+    ///   digit - the one-digit bound keeps literal digits after a
+    ///   run unambiguous.
+    /// - 10 and up: unit, BEGIN_REPEAT, the count's digits,
+    ///   END_REPEAT - bracketed, so any magnitude costs a bounded
+    ///   handful of tokens.
+    ///
+    /// The rows never compose with the operators or each other
+    /// (TheUser: repeat runs early and greedy, without the doubles
+    /// and triples). Digits never encode as runs: a number is
+    /// place-value content.
+    fn encode_runs(
         &self,
         raw: Vec<(Token, String)>,
+        keep_text: bool,
     ) -> BiquestResult<Vec<(Token, String)>> {
         let mut out: Vec<(Token, String)> = Vec::with_capacity(raw.len());
         let mut index = 0usize;
         while index < raw.len() {
             let (token, text) = &raw[index];
-            if token.layer == Layer::Dictionary {
+            let exempt = token.layer != Layer::Character
+                || self.digit_ids.contains(&token.id);
+            if exempt {
                 out.push((*token, text.clone()));
                 index += 1;
                 continue;
@@ -144,20 +202,51 @@ impl<'a> Segmenter<'a> {
             {
                 run += 1;
             }
-            let mut remaining = run;
-            while remaining >= 3 {
-                let taken = remaining.min(9);
-                out.push((*token, text.clone()));
-                out.push((
-                    Token { id: KEYWORD_REPEAT, layer: Layer::Keyword },
-                    String::from(REPEAT_ALIAS),
-                ));
-                let digit = char::from(b'0' + taken as u8);
-                out.push((self.character_token(digit)?, digit.to_string()));
-                remaining -= taken;
-            }
-            for _ in 0..remaining {
-                out.push((*token, text.clone()));
+            let symbol = self.char_of(token.id);
+            let row_index = symbol.and_then(|c| {
+                if run == 2 || run == 3 {
+                    self.buckets.index_for(c, run as u8)
+                } else {
+                    None
+                }
+            });
+            let kept = |value: String| if keep_text { value } else { String::new() };
+            match (run, row_index) {
+                (1, _) => out.push((*token, text.clone())),
+                (2..=3, Some(row)) => out.push((
+                    Token {
+                        id: self.bucket_offset + row as u32,
+                        layer: Layer::Bucket,
+                    },
+                    kept(self.buckets.entry(row).sequence()),
+                )),
+                (2, None) => {
+                    out.push((*token, text.clone()));
+                    out.push((*token, text.clone()));
+                }
+                (3..=9, None) => {
+                    out.push((*token, text.clone()));
+                    out.push((
+                        Token { id: KEYWORD_REPEAT, layer: Layer::Keyword },
+                        kept(String::from(REPEAT_ALIAS)),
+                    ));
+                    let digit = char::from(b'0' + run as u8);
+                    out.push((self.character_token(digit)?, kept(digit.to_string())));
+                }
+                _ => {
+                    out.push((*token, text.clone()));
+                    out.push((
+                        Token { id: KEYWORD_BEGIN_REPEAT, layer: Layer::Keyword },
+                        kept(String::from(BEGIN_REPEAT_ALIAS)),
+                    ));
+                    for digit in run.to_string().chars() {
+                        out.push((self.character_token(digit)?, kept(digit.to_string())));
+                    }
+                    out.push((
+                        Token { id: KEYWORD_END_REPEAT, layer: Layer::Keyword },
+                        kept(String::from(END_REPEAT_ALIAS)),
+                    ));
+                }
             }
             index += run;
         }
@@ -196,15 +285,19 @@ impl<'a> Segmenter<'a> {
         text: &str,
     ) -> BiquestResult<Vec<(Token, String)>> {
         let raw = self.raw_tokens(text, true)?;
-        self.collapse_runs(raw)
+        self.encode_runs(raw, true)
     }
 
     /// Segment content text: a word piece is a case-folded dictionary
     /// hit or its character split; a Unicode piece is its character;
-    /// identical-token runs collapse into REPEAT groups.
+    /// identical-token runs encode through the magnitude bands.
     pub(crate) fn segment(&self, text: &str) -> BiquestResult<Vec<Token>> {
         let raw = self.raw_tokens(text, false)?;
-        Ok(self.collapse_runs(raw)?.into_iter().map(|(token, _)| token).collect())
+        Ok(self
+            .encode_runs(raw, false)?
+            .into_iter()
+            .map(|(token, _)| token)
+            .collect())
     }
 }
 
@@ -225,19 +318,18 @@ fn split_markers(text: &str) -> Vec<TestPart<'_>> {
     let mut parts = Vec::new();
     let mut rest_start = 0usize;
     let mut i = 0usize;
-    while i < bytes.len() {
+    'scan: while i < bytes.len() {
         // The hardcoded aliases spell like markers and mean their id.
-        if text[i..].starts_with(REPEAT_ALIAS) {
-            if rest_start < i {
-                parts.push(TestPart::Text(&text[rest_start..i]));
+        for (id, alias) in HARDCODED_ALIASES {
+            if text[i..].starts_with(alias) {
+                if rest_start < i {
+                    parts.push(TestPart::Text(&text[rest_start..i]));
+                }
+                parts.push(TestPart::Marker(id as u8, &text[i..i + alias.len()]));
+                i += alias.len();
+                rest_start = i;
+                continue 'scan;
             }
-            parts.push(TestPart::Marker(
-                KEYWORD_REPEAT as u8,
-                &text[i..i + REPEAT_ALIAS.len()],
-            ));
-            i += REPEAT_ALIAS.len();
-            rest_start = i;
-            continue;
         }
         let is_marker = i + 6 <= bytes.len()
             && bytes[i] == b'<'
@@ -274,11 +366,12 @@ fn split_markers(text: &str) -> Vec<TestPart<'_>> {
 /// ids are the test surface's, not a trained vocabulary's.
 pub(crate) fn tokenize_text(args: &TokenizeArgs) -> BiquestResult<()> {
     let table = CharacterTable::embedded()?;
+    let buckets = BucketTable::new();
     let admitted = match &args.admitted {
         Some(path) => read_admitted(path)?,
         None => crate::dictionary::embedded_words(),
     };
-    let segmenter = Segmenter::new(&table, &admitted);
+    let segmenter = Segmenter::new(&table, &buckets, &admitted);
     let mut rows: Vec<harness::nu::Value> = Vec::new();
     for part in split_markers(&args.text) {
         match part {
@@ -299,7 +392,7 @@ pub(crate) fn tokenize_text(args: &TokenizeArgs) -> BiquestResult<()> {
                             let c = text.chars().next().unwrap_or('\u{FFFD}');
                             v_str(&format!("U+{:04X}", c as u32))
                         }
-                        Layer::Keyword | Layer::Dictionary => {
+                        Layer::Keyword | Layer::Bucket | Layer::Dictionary => {
                             harness::nu::Value::nothing(span())
                         }
                     };

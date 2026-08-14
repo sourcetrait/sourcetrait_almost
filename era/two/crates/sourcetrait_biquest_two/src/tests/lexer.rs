@@ -1,7 +1,10 @@
 //! Lexer locks: boundary splitting, folding, layer resolution, ids,
-//! REPEAT collapsing, and the ingestion refusals - over a hand-built
-//! table.
+//! the banded run encoder, digit exemption, and the ingestion
+//! refusals - over a hand-built table.
+use crate::bucket::BucketTable;
 use crate::lexer::CHARACTER_OFFSET;
+use crate::lexer::KEYWORD_BEGIN_REPEAT;
+use crate::lexer::KEYWORD_END_REPEAT;
 use crate::lexer::KEYWORD_REPEAT;
 use crate::lexer::Layer;
 use crate::lexer::PieceKind;
@@ -76,10 +79,122 @@ fn text_splits_into_word_runs_and_single_unicode_pieces() {
 }
 
 #[test]
+fn digits_ride_word_runs_and_never_encode_as_repetition() {
+    let table = table();
+    let buckets = BucketTable::new();
+    let segmenter = Segmenter::new(&table, &buckets, &[]);
+    // The zeros are a run of five identical digit tokens and MUST
+    // stay plain: a number is place-value content, not repetition.
+    let tokens = segmenter.segment("4000019").expect("segments");
+    assert_eq!(tokens.len(), 7);
+    assert!(tokens.iter().all(|t| t.layer == Layer::Character));
+    assert_eq!(tokens[1].id, CHARACTER_OFFSET + char_index(&table, '0'));
+    assert_eq!(tokens[5].id, CHARACTER_OFFSET + char_index(&table, '1'));
+}
+
+#[test]
+fn keyboard_doubles_and_triples_take_their_rows() {
+    let table = table();
+    let buckets = BucketTable::new();
+    let segmenter = Segmenter::new(&table, &buckets, &[]);
+    let bucket_offset = CHARACTER_OFFSET + table.assigned_count() as u32;
+
+    let tokens = segmenter.segment("  ").expect("segments");
+    let space_double = buckets.index_for(' ', 2).expect("row") as u32;
+    assert_eq!(tokens.len(), 1);
+    assert_eq!((tokens[0].id, tokens[0].layer), (bucket_offset + space_double, Layer::Bucket));
+
+    let tokens = segmenter.segment("...").expect("segments");
+    let dot_triple = buckets.index_for('.', 3).expect("row") as u32;
+    assert_eq!(tokens.len(), 1);
+    assert_eq!((tokens[0].id, tokens[0].layer), (bucket_offset + dot_triple, Layer::Bucket));
+}
+
+#[test]
+fn non_keyboard_runs_skip_the_rows() {
+    let table = table();
+    let buckets = BucketTable::new();
+    let segmenter = Segmenter::new(&table, &buckets, &[]);
+    // The control character has no keyboard row: two stays plain,
+    // three rides REPEAT.
+    let tokens = segmenter.segment("\u{0001}\u{0001}").expect("segments");
+    assert_eq!(tokens.len(), 2);
+    assert!(tokens.iter().all(|t| t.layer == Layer::Character));
+    let tokens = segmenter.segment(&"\u{0001}".repeat(3)).expect("segments");
+    let layers: Vec<Layer> = tokens.iter().map(|t| t.layer).collect();
+    assert_eq!(layers, [Layer::Character, Layer::Keyword, Layer::Character]);
+    assert_eq!(tokens[1].id, KEYWORD_REPEAT);
+    assert_eq!(tokens[2].id, CHARACTER_OFFSET + char_index(&table, '3'));
+}
+
+#[test]
+fn mid_runs_ride_repeat_with_one_count_digit() {
+    let table = table();
+    let buckets = BucketTable::new();
+    let segmenter = Segmenter::new(&table, &buckets, &[]);
+    // Four through nine ride |unit||REPEAT||digit| - rows serve
+    // exactly two and three, never composing.
+    let tokens = segmenter.segment(&" ".repeat(4)).expect("segments");
+    let shape: Vec<(u32, Layer)> = tokens.iter().map(|t| (t.id, t.layer)).collect();
+    assert_eq!(
+        shape,
+        [
+            (CHARACTER_OFFSET + char_index(&table, ' '), Layer::Character),
+            (KEYWORD_REPEAT, Layer::Keyword),
+            (CHARACTER_OFFSET + char_index(&table, '4'), Layer::Character),
+        ]
+    );
+    // A count digit then literal digits: exactly one digit is the
+    // count, so the year survives as content.
+    let text = format!("{}2024", " ".repeat(7));
+    let tokens = segmenter.segment(&text).expect("segments");
+    assert_eq!(tokens.len(), 7);
+    assert_eq!(tokens[2].id, CHARACTER_OFFSET + char_index(&table, '7'));
+    assert_eq!(tokens[3].id, CHARACTER_OFFSET + char_index(&table, '2'));
+}
+
+#[test]
+fn long_runs_bracket_a_multi_digit_count() {
+    let table = table();
+    let buckets = BucketTable::new();
+    let segmenter = Segmenter::new(&table, &buckets, &[]);
+    let tokens = segmenter.segment(&" ".repeat(128)).expect("segments");
+    let shape: Vec<(u32, Layer)> = tokens.iter().map(|t| (t.id, t.layer)).collect();
+    assert_eq!(
+        shape,
+        [
+            (CHARACTER_OFFSET + char_index(&table, ' '), Layer::Character),
+            (KEYWORD_BEGIN_REPEAT, Layer::Keyword),
+            (CHARACTER_OFFSET + char_index(&table, '1'), Layer::Character),
+            (CHARACTER_OFFSET + char_index(&table, '2'), Layer::Character),
+            (CHARACTER_OFFSET + char_index(&table, '8'), Layer::Character),
+            (KEYWORD_END_REPEAT, Layer::Keyword),
+        ]
+    );
+}
+
+#[test]
+fn ids_stack_keywords_characters_buckets_then_dictionary() {
+    let table = table();
+    let buckets = BucketTable::new();
+    let admitted = vec![String::from("dog"), String::from("it")];
+    let segmenter = Segmenter::new(&table, &buckets, &admitted);
+    let bucket_offset = CHARACTER_OFFSET + table.assigned_count() as u32;
+    let dictionary_offset = bucket_offset + buckets.count() as u32;
+    let tokens = segmenter.segment("it  dog").expect("segments");
+    // it = admitted[1]; the double space = its keyboard row; dog =
+    // admitted[0].
+    assert_eq!(tokens[0].id, dictionary_offset + 1);
+    assert_eq!(tokens[1].layer, Layer::Bucket);
+    assert_eq!(tokens[2].id, dictionary_offset);
+}
+
+#[test]
 fn dictionary_hit_is_case_insensitive_and_miss_splits_to_characters() {
     let table = table();
+    let buckets = BucketTable::new();
     let admitted = vec![String::from("dog"), String::from("it")];
-    let segmenter = Segmenter::new(&table, &admitted);
+    let segmenter = Segmenter::new(&table, &buckets, &admitted);
     let tokens = segmenter.segment("Dog ate it").expect("segments");
     let layers: Vec<Layer> = tokens.iter().map(|token| token.layer).collect();
     assert_eq!(
@@ -97,123 +212,11 @@ fn dictionary_hit_is_case_insensitive_and_miss_splits_to_characters() {
 }
 
 #[test]
-fn ids_stack_keywords_characters_then_dictionary() {
-    let table = table();
-    let admitted = vec![String::from("dog"), String::from("it")];
-    let segmenter = Segmenter::new(&table, &admitted);
-    let dictionary_offset = CHARACTER_OFFSET + table.assigned_count() as u32;
-    let tokens = segmenter.segment("it  dog").expect("segments");
-    // it = admitted[1]; a two-space run stays plain characters; dog =
-    // admitted[0].
-    assert_eq!(tokens[0].id, dictionary_offset + 1);
-    assert_eq!(tokens[1].id, CHARACTER_OFFSET + char_index(&table, ' '));
-    assert_eq!(tokens[2].id, CHARACTER_OFFSET + char_index(&table, ' '));
-    assert_eq!(tokens[3].id, dictionary_offset);
-}
-
-#[test]
-fn runs_collapse_into_repeat_groups() {
-    let table = table();
-    let segmenter = Segmenter::new(&table, &[]);
-
-    // A four-space indent is one group: |sp||REPEAT||4|.
-    let tokens = segmenter.segment(&" ".repeat(4)).expect("segments");
-    let shape: Vec<(u32, Layer)> = tokens.iter().map(|t| (t.id, t.layer)).collect();
-    assert_eq!(
-        shape,
-        [
-            (CHARACTER_OFFSET + char_index(&table, ' '), Layer::Character),
-            (KEYWORD_REPEAT, Layer::Keyword),
-            (CHARACTER_OFFSET + char_index(&table, '4'), Layer::Character),
-        ]
-    );
-
-    // Two spaces stay plain: the group would cost three.
-    let tokens = segmenter.segment(&" ".repeat(2)).expect("segments");
-    assert_eq!(tokens.len(), 2);
-    assert!(tokens.iter().all(|t| t.layer == Layer::Character));
-
-    // Twelve spaces chain greedily: nine, then three.
-    let tokens = segmenter.segment(&" ".repeat(12)).expect("segments");
-    let layers: Vec<Layer> = tokens.iter().map(|t| t.layer).collect();
-    assert_eq!(
-        layers,
-        [
-            Layer::Character, // space unit
-            Layer::Keyword,   // REPEAT
-            Layer::Character, // 9
-            Layer::Character, // space unit
-            Layer::Keyword,   // REPEAT
-            Layer::Character, // 3
-        ]
-    );
-    assert_eq!(tokens[2].id, CHARACTER_OFFSET + char_index(&table, '9'));
-    assert_eq!(tokens[5].id, CHARACTER_OFFSET + char_index(&table, '3'));
-
-    // A four-tab run collapses over the tab character row.
-    let tokens = segmenter.segment(&"\t".repeat(4)).expect("segments");
-    let shape: Vec<(u32, Layer)> = tokens.iter().map(|t| (t.id, t.layer)).collect();
-    assert_eq!(
-        shape,
-        [
-            (CHARACTER_OFFSET + char_index(&table, '\t'), Layer::Character),
-            (KEYWORD_REPEAT, Layer::Keyword),
-            (CHARACTER_OFFSET + char_index(&table, '4'), Layer::Character),
-        ]
-    );
-}
-
-#[test]
-fn repeat_count_is_one_digit_so_literal_digits_stay_literal() {
-    let table = table();
-    let segmenter = Segmenter::new(&table, &[]);
-    // Eight spaces then a literal year: the count digit is exactly
-    // one token, so 2024 survives as its own word-run character
-    // split.
-    let text = format!("{}2024", " ".repeat(8));
-    let tokens = segmenter.segment(&text).expect("segments");
-    let layers: Vec<Layer> = tokens.iter().map(|t| t.layer).collect();
-    assert_eq!(
-        layers,
-        [
-            Layer::Character, // the space unit
-            Layer::Keyword,   // REPEAT
-            Layer::Character, // count digit 8
-            Layer::Character, // 2
-            Layer::Character, // 0
-            Layer::Character, // 2
-            Layer::Character, // 4
-        ]
-    );
-    assert_eq!(tokens[2].id, CHARACTER_OFFSET + char_index(&table, '8'));
-    assert_eq!(tokens[3].id, CHARACTER_OFFSET + char_index(&table, '2'));
-}
-
-#[test]
-fn long_runs_chain_groups_of_nine() {
-    let table = table();
-    let segmenter = Segmenter::new(&table, &[]);
-    // Eleven tabs: a group of nine, then a leftover pair stays plain.
-    let tokens = segmenter.segment(&"\t".repeat(11)).expect("segments");
-    let layers: Vec<Layer> = tokens.iter().map(|t| t.layer).collect();
-    assert_eq!(
-        layers,
-        [
-            Layer::Character, // tab unit
-            Layer::Keyword,   // REPEAT
-            Layer::Character, // count digit 9
-            Layer::Character, // leftover tab
-            Layer::Character, // leftover tab
-        ]
-    );
-    assert_eq!(tokens[2].id, CHARACTER_OFFSET + char_index(&table, '9'));
-}
-
-#[test]
 fn segment_pieces_carries_folded_words_and_characters() {
     let table = table();
+    let buckets = BucketTable::new();
     let admitted = vec![String::from("dog")];
-    let segmenter = Segmenter::new(&table, &admitted);
+    let segmenter = Segmenter::new(&table, &buckets, &admitted);
     let pairs = segmenter.segment_pieces("Dog. a").expect("segments");
     let texts: Vec<(&str, Layer)> = pairs
         .iter()
