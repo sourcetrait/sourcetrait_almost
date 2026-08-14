@@ -298,7 +298,7 @@ impl<'a> Renderer<'a> {
             }
             "blend" => {
                 let head = if named("nocap").is_some() { "blend of" } else { "Blend of" };
-                let parts = self.plus_joined(&positional[1..]);
+                let parts = self.plus_joined(positional.get(1..).unwrap_or(&[]));
                 format!("{head} {parts}")
             }
             "suffix" | "suf" => {
@@ -321,7 +321,9 @@ impl<'a> Renderer<'a> {
                 };
                 format!("[{prefix}] + {}", self.anchored_argument(base))
             }
-            "affix" | "af" | "compound" | "com" => self.plus_joined(&positional[1..]),
+            "affix" | "af" | "compound" | "com" => {
+                self.plus_joined(positional.get(1..).unwrap_or(&[]))
+            }
             _ => {
                 self.audit("template_unhandled", template.name.clone());
                 String::new()

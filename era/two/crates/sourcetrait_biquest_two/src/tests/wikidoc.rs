@@ -81,6 +81,13 @@ fn source_italics_flatten_and_bold_survives() {
 }
 
 #[test]
+fn argless_etymology_templates_render_without_panic() {
+    let text = "==English==\n\n===Etymology===\nA {{blend}} and {{af|nocap=1}} case.\n";
+    let document = render_word_document(&[page("x", text)]).expect("render");
+    assert!(document.markdown.contains("## Etymology"));
+}
+
+#[test]
 fn audit_details_are_single_line() {
     let text = "==English==\n\n===Etymology===\nSee [[File:a\nb.png|x]] here.\n";
     let document = render_word_document(&[page("x", text)]).expect("render");
