@@ -19,7 +19,6 @@ pub fn run() {
             TokenizerCommand::Ucd => tokenizer_ucd(),
             TokenizerCommand::Dictionary(args) => tokenizer_dictionary(args),
             TokenizerCommand::Census(args) => tokenizer_census(args),
-            TokenizerCommand::Admit(args) => tokenizer_admit(args),
             TokenizerCommand::Ledger(args) => tokenizer_ledger(&cli, args),
         },
         Command::Trainer { command } => match command {

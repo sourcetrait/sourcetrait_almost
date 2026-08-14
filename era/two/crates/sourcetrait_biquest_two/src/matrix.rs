@@ -2,7 +2,7 @@
 use crate::*;
 
 use crate::bucket::BucketTable;
-use crate::census::read_admitted;
+use crate::dictionary::read_words_ordered;
 use crate::lexer::KEYWORD_PAGE_SIZE;
 use crate::lexer::KEYWORD_REPETITION;
 use crate::ucd::CharacterTable;
@@ -222,17 +222,19 @@ pub(crate) fn build_matrix(
 }
 
 /// `biquest matrix build`: the embedding artifact from the embedded
-/// layers plus an admitted wordlist; bf16 safetensors, tied by design.
+/// layers plus the dictionary word file - the WHOLE dictionary is
+/// the vocabulary (TheUser), file order as id order; bf16
+/// safetensors, tied by design.
 pub(crate) fn matrix_build(args: &MatrixBuildArgs) -> BiquestResult<()> {
     let started = std::time::Instant::now();
     let table = CharacterTable::embedded()?;
     let buckets = BucketTable::new();
-    let admitted = read_admitted(&args.admitted)?;
+    let words = read_words_ordered(&args.words)?;
     let hidden = MATRIX_HEADS * args.head_dim;
     let build = build_matrix(
         &table,
         &buckets,
-        &admitted,
+        &words,
         MatrixSpec {
             hidden,
             reserve: args.reserve,
@@ -272,7 +274,7 @@ pub(crate) fn matrix_build(args: &MatrixBuildArgs) -> BiquestResult<()> {
     meta("hidden_size", hidden.to_string());
     meta("num_heads", MATRIX_HEADS.to_string());
     meta("head_dim", args.head_dim.to_string());
-    meta("admitted_words", admitted.len().to_string());
+    meta("dictionary_words", words.len().to_string());
     meta("reserve_rows", args.reserve.to_string());
     meta("seed", args.seed.to_string());
     meta("sigma", ROW_SIGMA.to_string());
@@ -294,7 +296,7 @@ pub(crate) fn matrix_build(args: &MatrixBuildArgs) -> BiquestResult<()> {
 
     let provenance = harness::nu::Value::record(
         harness::nu::record! {
-            "admitted" => v_str(&args.admitted.display().to_string()),
+            "words" => v_str(&args.words.display().to_string()),
             "unicode_assigned" => v_int(table.assigned_count() as i64),
             "keyword_rows" => v_int(layout.character_offset as i64),
             "character_rows" => v_int((layout.keyboard_offset - layout.character_offset) as i64),

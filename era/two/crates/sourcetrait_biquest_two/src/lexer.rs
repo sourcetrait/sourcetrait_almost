@@ -4,7 +4,7 @@
 use crate::*;
 
 use crate::bucket::BucketTable;
-use crate::census::read_admitted;
+use crate::dictionary::read_words_ordered;
 use crate::ucd::CharClass;
 use crate::ucd::CharacterTable;
 
@@ -291,16 +291,17 @@ pub(crate) struct Segmenter<'a> {
 }
 
 impl<'a> Segmenter<'a> {
-    /// Keyboard rows take ids above the character layer; admitted
-    /// words above the rows, in list order.
+    /// Keyboard rows take ids above the character layer; dictionary
+    /// words above the rows, in file order (the whole dictionary is
+    /// the vocabulary).
     pub(crate) fn new(
         table: &'a CharacterTable,
         buckets: &'a BucketTable,
-        admitted: &[String],
+        words: &[String],
     ) -> Self {
         let bucket_offset = CHARACTER_OFFSET + table.assigned_count() as u32;
         let dictionary_offset = bucket_offset + buckets.count() as u32;
-        let word_ids = admitted
+        let word_ids = words
             .iter()
             .enumerate()
             .map(|(index, word)| (word.clone(), dictionary_offset + index as u32))
@@ -570,16 +571,17 @@ fn split_markers(text: &str) -> Vec<TestPart<'_>> {
 /// Columns: token (the id), unicode (`U+XXXX` for a character-layer
 /// token, null for a keyword or dictionary word), value (the token's
 /// text). `<|XX|>` spellings render as keyword-page tokens. Without
-/// --admitted the embedded full English set is the dictionary; its
-/// ids are the test surface's, not a trained vocabulary's.
+/// --words the embedded full English set is the dictionary - which
+/// IS the vocabulary (TheUser: the whole dictionary, file order as
+/// id order).
 pub(crate) fn tokenize_text(args: &TokenizeArgs) -> BiquestResult<()> {
     let table = CharacterTable::embedded()?;
     let buckets = BucketTable::new();
-    let admitted = match &args.admitted {
-        Some(path) => read_admitted(path)?,
+    let words = match &args.words {
+        Some(path) => read_words_ordered(path)?,
         None => crate::dictionary::embedded_words(),
     };
-    let segmenter = Segmenter::new(&table, &buckets, &admitted);
+    let segmenter = Segmenter::new(&table, &buckets, &words);
     let mut rows: Vec<harness::nu::Value> = Vec::new();
     for part in split_markers(&args.text) {
         match part {

@@ -9,11 +9,13 @@ which here is literally the seeding rule that produced it.
 MATRIX_HEADS is 32 by TheUser's ruling (hidden dimension is
 associative capacity, heads are correlation channels; the hybrid's 30
 is ai2's comparison artifact). Width is arithmetic and settled at the
-organism default head_dim 32, hidden 1024: at the current layered
-vocabulary (~175k rows with the 8,192-row reserve) that is ~179M
-embedding parameters against a ~120M-class organism core -
-embedding-dominant as designed, inside the 100-200M stage-zero class,
-with the full 4096 geometry one `--head-dim 128` away. The artifact
+organism default head_dim 32, hidden 1024. The vocabulary is the
+WHOLE dictionary (TheUser: census admission can never work off a
+corpus as small as ours) - the word file's line order is the
+dictionary layer's id order, ~1.24M rows total with the reserve, so
+the embedding is ~1.27B parameters and the model is a lookup
+structure by weight to a degree the admitted-subset design never
+reached. The full 4096 geometry stays one `--head-dim 128` away. The artifact
 carries the embedding matrix alone (tied embeddings are the rule;
 the trainer materializes the tied head), so nothing here decides
 depth, GDN dims, or intermediate width.

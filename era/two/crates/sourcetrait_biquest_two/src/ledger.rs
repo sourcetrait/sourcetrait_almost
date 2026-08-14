@@ -3,8 +3,8 @@ use crate::*;
 
 use crate::bucket::BucketTable;
 use crate::census::corpus_files;
-use crate::census::read_admitted;
 use crate::census::refused_rows;
+use crate::dictionary::read_words_ordered;
 use crate::lexer::Layer;
 use crate::lexer::Segmenter;
 use crate::ucd::CharacterTable;
@@ -18,8 +18,8 @@ pub(crate) fn tokenizer_ledger(cli: &Cli, args: &TokenizerLedgerArgs) -> Biquest
     llm::verify_token_map(&tokenizer)?;
     let table = CharacterTable::embedded()?;
     let buckets = BucketTable::new();
-    let admitted = read_admitted(&args.admitted)?;
-    let segmenter = Segmenter::new(&table, &buckets, &admitted);
+    let words = read_words_ordered(&args.words)?;
+    let segmenter = Segmenter::new(&table, &buckets, &words);
     let files = corpus_files(&args.roots)?;
 
     let mut rows: Vec<harness::nu::Value> = Vec::new();
@@ -93,7 +93,7 @@ pub(crate) fn tokenizer_ledger(cli: &Cli, args: &TokenizerLedgerArgs) -> Biquest
                 args.roots.iter().map(|p| v_str(&p.display().to_string())).collect(),
                 span(),
             ),
-            "admitted" => v_str(&args.admitted.display().to_string()),
+            "words" => v_str(&args.words.display().to_string()),
             "files" => v_int(measured_files as i64),
             "refused_files" => refused_rows(&refused),
             "text_bytes" => v_int(byte_total as i64),

@@ -36,22 +36,18 @@ pub(crate) use crate::assembler::{
     disassemble_wire,
 };
 pub(crate) use crate::associations::associations_build;
-pub(crate) use crate::census::{
-    tokenizer_admit,
-    tokenizer_census,
-};
+pub(crate) use crate::census::tokenizer_census;
 pub(crate) use crate::cli::{
     AssembleArgs,
     AssociationsBuildArgs,
     AssociationsCommand,
     Cli,
-    DisassembleArgs,
     Command,
+    DisassembleArgs,
     DocCommand,
     MatrixBuildArgs,
     MatrixCommand,
     TokenizeArgs,
-    TokenizerAdmitArgs,
     TokenizerCensusArgs,
     TokenizerCommand,
     TokenizerDictionaryArgs,

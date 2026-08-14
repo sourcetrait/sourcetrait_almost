@@ -2,7 +2,7 @@
 use crate::*;
 
 use crate::bucket::BucketTable;
-use crate::census::read_admitted;
+use crate::dictionary::read_words_ordered;
 use crate::lexer::KEYWORD_BEGIN_REPEAT;
 use crate::lexer::KEYWORD_END_REPEAT;
 use crate::lexer::KEYWORD_PAGE_SIZE;
@@ -596,13 +596,13 @@ struct AssemblerParts {
 
 fn assembler_parts(
     syntax_path: &Path,
-    admitted_path: Option<&PathBuf>,
+    words_path: Option<&PathBuf>,
 ) -> BiquestResult<AssemblerParts> {
     Ok(AssemblerParts {
         table: CharacterTable::embedded()?,
         buckets: BucketTable::new(),
-        admitted: match admitted_path {
-            Some(path) => read_admitted(path)?,
+        admitted: match words_path {
+            Some(path) => read_words_ordered(path)?,
             None => crate::dictionary::embedded_words(),
         },
         syntax: SyntaxTable::load(syntax_path)?,
@@ -611,7 +611,7 @@ fn assembler_parts(
 
 /// `biquest assemble`: assembly text to the wire id list, as NUON.
 pub(crate) fn assemble_text(args: &AssembleArgs) -> BiquestResult<()> {
-    let parts = assembler_parts(&args.syntax, args.admitted.as_ref())?;
+    let parts = assembler_parts(&args.syntax, args.words.as_ref())?;
     let segmenter = Segmenter::new(&parts.table, &parts.buckets, &parts.admitted);
     let assembler = Assembler::new(
         &parts.syntax,
@@ -638,7 +638,7 @@ pub(crate) fn assemble_text(args: &AssembleArgs) -> BiquestResult<()> {
 
 /// `biquest disassemble`: a NUON wire id list back to assembly text.
 pub(crate) fn disassemble_wire(args: &DisassembleArgs) -> BiquestResult<()> {
-    let parts = assembler_parts(&args.syntax, args.admitted.as_ref())?;
+    let parts = assembler_parts(&args.syntax, args.words.as_ref())?;
     let segmenter = Segmenter::new(&parts.table, &parts.buckets, &parts.admitted);
     let assembler = Assembler::new(
         &parts.syntax,

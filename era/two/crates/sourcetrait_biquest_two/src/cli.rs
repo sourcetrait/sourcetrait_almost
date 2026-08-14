@@ -79,10 +79,10 @@ pub(crate) struct TrainerInitArgs {
 pub(crate) struct TokenizeArgs {
     /// The text to tokenize.
     pub(crate) text: String,
-    /// An admitted wordlist (.nuon) as the dictionary; absent = the
-    /// embedded full English set.
+    /// A dictionary word file (one word per line, file order = id
+    /// order); absent = the embedded full English set.
     #[arg(long)]
-    pub(crate) admitted: Option<PathBuf>,
+    pub(crate) words: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -95,10 +95,10 @@ pub(crate) struct AssembleArgs {
     /// The keyword-page binding table (Syntax.nuon).
     #[arg(long)]
     pub(crate) syntax: PathBuf,
-    /// An admitted wordlist (.nuon) as the dictionary; absent = the
+    /// A dictionary word file (file order = id order); absent = the
     /// embedded full English set.
     #[arg(long)]
-    pub(crate) admitted: Option<PathBuf>,
+    pub(crate) words: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -111,10 +111,10 @@ pub(crate) struct DisassembleArgs {
     /// The keyword-page binding table (Syntax.nuon).
     #[arg(long)]
     pub(crate) syntax: PathBuf,
-    /// An admitted wordlist (.nuon) as the dictionary; absent = the
+    /// A dictionary word file (file order = id order); absent = the
     /// embedded full English set.
     #[arg(long)]
-    pub(crate) admitted: Option<PathBuf>,
+    pub(crate) words: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -149,9 +149,9 @@ pub(crate) enum MatrixCommand {
 
 #[derive(Debug, clap::Args)]
 pub(crate) struct MatrixBuildArgs {
-    /// The admitted wordlist (.nuon); row order is the id order.
+    /// The dictionary word file (file order = id order).
     #[arg(long)]
-    pub(crate) admitted: PathBuf,
+    pub(crate) words: PathBuf,
     /// The embedding artifact (.safetensors).
     #[arg(long)]
     pub(crate) out: PathBuf,
@@ -170,12 +170,11 @@ pub(crate) struct MatrixBuildArgs {
 pub(crate) enum TokenizerCommand {
     /// Report the embedded character layer's shape.
     Ucd,
-    /// Extract the folded single-piece word set from a wiktextract dump.
+    /// Extract the folded connected-word set from a wiktextract dump.
     Dictionary(TokenizerDictionaryArgs),
-    /// Count folded word types across corpus trees.
+    /// Count word types across corpus trees (an instrument; the
+    /// vocabulary is the whole dictionary).
     Census(TokenizerCensusArgs),
-    /// Gate census counts through dictionary membership.
-    Admit(TokenizerAdmitArgs),
     /// Measure Quill tokens against the checkpoint tokenizer.
     Ledger(TokenizerLedgerArgs),
 }
@@ -205,26 +204,10 @@ pub(crate) struct TokenizerCensusArgs {
 }
 
 #[derive(Debug, clap::Args)]
-pub(crate) struct TokenizerAdmitArgs {
-    /// A census type-count artifact.
-    #[arg(long)]
-    pub(crate) counts: PathBuf,
-    /// A dictionary word-set artifact.
+pub(crate) struct TokenizerLedgerArgs {
+    /// The dictionary word file (file order = id order).
     #[arg(long)]
     pub(crate) words: PathBuf,
-    /// The admitted wordlist (.nuon); row order is the id order.
-    #[arg(long)]
-    pub(crate) out: PathBuf,
-    /// Census occurrences below this are not admitted.
-    #[arg(long, default_value_t = 1)]
-    pub(crate) min_count: u64,
-}
-
-#[derive(Debug, clap::Args)]
-pub(crate) struct TokenizerLedgerArgs {
-    /// The admitted wordlist (.nuon).
-    #[arg(long)]
-    pub(crate) admitted: PathBuf,
     /// Corpus files or trees, walked sorted.
     #[arg(long, required = true, num_args = 1..)]
     pub(crate) roots: Vec<PathBuf>,
