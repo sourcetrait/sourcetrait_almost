@@ -20,6 +20,11 @@ pub(crate) struct Cli {
 
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum Command {
+    /// The ImagineQuestAssociations store.
+    Associations {
+        #[command(subcommand)]
+        command: AssociationsCommand,
+    },
     /// Self-documentation of the always-moving surface.
     Doc {
         #[command(subcommand)]
@@ -42,6 +47,23 @@ pub(crate) struct TokenizeArgs {
     /// embedded full English set.
     #[arg(long)]
     pub(crate) admitted: Option<PathBuf>,
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub(crate) enum AssociationsCommand {
+    /// Build the whole store from the embedded UCD and a wiktextract
+    /// dump.
+    Build(AssociationsBuildArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct AssociationsBuildArgs {
+    /// The wiktextract English dump (.jsonl, decompressed).
+    #[arg(long)]
+    pub(crate) dump: PathBuf,
+    /// The store directory; the class files land inside it.
+    #[arg(long)]
+    pub(crate) out: PathBuf,
 }
 
 #[derive(Debug, clap::Subcommand)]

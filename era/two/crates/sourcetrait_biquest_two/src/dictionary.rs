@@ -54,7 +54,7 @@ struct DictionaryTally {
 /// Multiword, hyphenated, and apostrophe-carrying entries fail here by
 /// design: a token can never span a boundary, so such entries decompose
 /// at lex time and get no dictionary row.
-fn single_piece_folded(table: &CharacterTable, candidate: &str) -> Option<String> {
+pub(crate) fn single_piece_folded(table: &CharacterTable, candidate: &str) -> Option<String> {
     let pieces = boundary_pieces(table, candidate).ok()?;
     if pieces.len() != 1 || pieces[0].kind != PieceKind::Word {
         return None;

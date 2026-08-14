@@ -12,7 +12,9 @@ candidate must lex as exactly one Word piece under the character
 table, so multiword entries ("give up"), hyphenations ("well-being"),
 and apostrophe forms ("don't") are excluded - the lexer can never
 match a token across a boundary, so a row for one would be
-unreachable. Those entries decompose at lex time instead, by design.
+unreachable. The filter (`single_piece_folded`) is shared with the
+associations pass, which is what keeps the store's word set
+identical to this artifact's. Those entries decompose at lex time instead, by design.
 Inflected forms are admitted as their own words ("dogs" beside "dog"),
 which is what lets the segmenter resolve whole pieces with no
 morphology layer.

@@ -1,3 +1,4 @@
+pub(crate) mod associations;
 pub(crate) mod bucket;
 pub(crate) mod census;
 pub(crate) mod cli;
@@ -27,11 +28,14 @@ pub(crate) use std::{
 pub(crate) use sourcetrait_lib_quest_harness_two as harness;
 pub(crate) use sourcetrait_lib_quest_llm_two as llm;
 
+pub(crate) use crate::associations::associations_build;
 pub(crate) use crate::census::{
     tokenizer_admit,
     tokenizer_census,
 };
 pub(crate) use crate::cli::{
+    AssociationsBuildArgs,
+    AssociationsCommand,
     Cli,
     Command,
     DocCommand,
@@ -71,6 +75,7 @@ pub(crate) use crate::error::{
 
 #[cfg(test)]
 mod tests {
+    mod associations;
     mod bucket;
     mod doc;
     mod lexer;

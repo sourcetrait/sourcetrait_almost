@@ -3,6 +3,9 @@ use crate::*;
 pub fn run() {
     let cli = <Cli as clap::Parser>::parse();
     let outcome = match &cli.command {
+        Command::Associations { command } => match command {
+            AssociationsCommand::Build(args) => associations_build(args),
+        },
         Command::Doc { command } => match command {
             DocCommand::Cli => doc_cli(),
         },

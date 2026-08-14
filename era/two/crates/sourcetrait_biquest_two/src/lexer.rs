@@ -15,9 +15,9 @@ pub(crate) const CHARACTER_OFFSET: u32 = KEYWORD_PAGE_SIZE;
 /// The hardcoded operator block allocates from the page's end
 /// downward, user bindings from 0x00 upward. begin/end bracket a
 /// multi-digit count for long runs; REPEAT carries a one-digit
-/// count; REPETITION is the conceptual association hub - illegal in
-/// wire, never emitted, never parsed (TheUser: the other three may
-/// speak back).
+/// count; REPETITION is the AbstractConceptMarker backing the
+/// repetition AbstractConcept - illegal in wire, never emitted,
+/// never parsed (TheUser: the other three may speak back).
 pub(crate) const KEYWORD_BEGIN_REPEAT: u32 = 0xFC;
 pub(crate) const KEYWORD_END_REPEAT: u32 = 0xFD;
 pub(crate) const KEYWORD_REPEAT: u32 = 0xFE;

@@ -1,6 +1,6 @@
 //! The keyboard-symbol bucket: doubles and triples of every keyboard
 //! symbol, one uniform rule, association-hinted to the repetition
-//! concept.
+//! AbstractConcept.
 use crate::*;
 
 /// The keyboard symbol characters, ascending: tab, space, and the 32
@@ -14,9 +14,9 @@ pub(crate) const KEYBOARD_CHARS: [char; 34] = [
 ];
 
 /// One keyboard-symbol entry: the character and its run length (2 or
-/// 3). The pair IS the parameter association: at matrix time each row
-/// associates to its character row, the `<|repetition|>` concept
-/// marker, and its count.
+/// 3). The pair IS the association: at matrix time each row
+/// associates to its character row, the repetition AbstractConcept,
+/// and its count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct KeyboardSymbolBucket {
     pub(crate) symbol: char,

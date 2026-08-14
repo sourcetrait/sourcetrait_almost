@@ -19,8 +19,9 @@ The page allocates from both ends (TheUser): user bindings from 0x00
 up (the Syntax.nuon draft), the hardcoded operator block from 0xFF
 down - 0xFC BEGIN_REPEAT, 0xFD END_REPEAT, 0xFE REPEAT, 0xFF
 REPETITION. The first three are legal wire both directions - the
-model may speak them (TheUser). REPETITION is the conceptual
-association hub: illegal in wire, never emitted, never parsed - it
+model may speak them (TheUser). REPETITION is the
+AbstractConceptMarker backing the repetition AbstractConcept
+(associations.rs): illegal in wire, never emitted, never parsed - it
 exists so the association store can anchor every repetition
 mechanism to one concept ("hint at convention by association").
 Ones-fill corruption decodes as the wire-illegal marker repeated and
