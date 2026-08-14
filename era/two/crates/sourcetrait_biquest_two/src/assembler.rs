@@ -478,6 +478,44 @@ impl<'a> Assembler<'a> {
         }
     }
 
+    /// The wire as tokenize-style rows: keyword ids as their mention
+    /// spellings, character tokens with their U+ column, rows and
+    /// words with their text - the assembler's test surface.
+    fn wire_table_rows(&self, wire: &[u32]) -> BiquestResult<Vec<harness::nu::Value>> {
+        let character_offset = KEYWORD_PAGE_SIZE;
+        let keyboard_offset = character_offset + self.table.assigned_count() as u32;
+        let mut rows = Vec::with_capacity(wire.len());
+        for (position, &id) in wire.iter().enumerate() {
+            let (unicode, value) = if id < KEYWORD_PAGE_SIZE {
+                (harness::nu::Value::nothing(span()), self.mention_spelling(id))
+            } else if id < keyboard_offset {
+                let row = &self.table.rows[(id - character_offset) as usize];
+                let Some(c) = char::from_u32(row.code_point) else {
+                    snafu::whatever!(
+                        "wire fault at token {position}: unrenderable code point \
+                         U+{:04X}",
+                        row.code_point
+                    );
+                };
+                (v_str(&format!("U+{:04X}", c as u32)), c.to_string())
+            } else {
+                (
+                    harness::nu::Value::nothing(span()),
+                    self.content_text(id, position)?,
+                )
+            };
+            rows.push(harness::nu::Value::record(
+                harness::nu::record! {
+                    "token" => v_int(id as i64),
+                    "unicode" => unicode,
+                    "value" => v_str(&value),
+                },
+                span(),
+            ));
+        }
+        Ok(rows)
+    }
+
     /// A character's layer token id, or the ingestion refusal.
     fn character_id(&self, c: char) -> BiquestResult<u32> {
         match self.table.index_of(c as u32) {
@@ -1045,7 +1083,8 @@ fn assembler_parts(
     })
 }
 
-/// `biquest assemble`: assembly text to the wire id list, as NUON.
+/// `biquest assemble`: assembly text to the wire id list, as NUON;
+/// --table renders the tokenize-style test surface instead.
 pub(crate) fn assemble_text(args: &AssembleArgs) -> BiquestResult<()> {
     let parts = assembler_parts(&args.syntax, args.words.as_ref())?;
     let segmenter = Segmenter::new(&parts.table, &parts.buckets, &parts.admitted);
@@ -1064,6 +1103,13 @@ pub(crate) fn assemble_text(args: &AssembleArgs) -> BiquestResult<()> {
         },
     };
     let wire = assembler.encode(&text)?;
+    if args.table {
+        let rows = assembler.wire_table_rows(&wire)?;
+        let rendered =
+            harness::nu::to_nuon_pretty(&harness::nu::Value::list(rows, span()))?;
+        println!("{rendered}");
+        return Ok(());
+    }
     let rendered = harness::nu::to_nuon_text(&harness::nu::Value::list(
         wire.iter().map(|&id| v_int(id as i64)).collect(),
         span(),

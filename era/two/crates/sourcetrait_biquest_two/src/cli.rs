@@ -239,6 +239,10 @@ pub(crate) struct AssembleArgs {
     /// embedded full English set.
     #[arg(long)]
     pub(crate) words: Option<PathBuf>,
+    /// Render the tokenize-style [token, unicode, value] table
+    /// instead of the wire id list.
+    #[arg(long)]
+    pub(crate) table: bool,
 }
 
 #[derive(Debug, clap::Args)]
