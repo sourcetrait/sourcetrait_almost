@@ -206,12 +206,13 @@ fn head_template_pairs_and_pointers_render() {
 
 #[test]
 fn accent_codes_resolve_against_the_label_data() {
-    let text = "==English==\n\n===Pronunciation===\n* {{IPA|en|/x/|a=GenAm,SSB,Scotland,square-nurse,non-rhotic,nMmmm}}\n\n===Noun===\n{{en-noun}}\n\n# A sense.\n";
+    let text = "==English==\n\n===Pronunciation===\n* {{IPA|en|/x/|a=GenAm,SSB,Scotland,square-nurse,non-rhotic,nMmmm,æ-tensing,non-æ-tensing}}\n\n===Noun===\n{{en-noun}}\n\n# A sense.\n";
     let document = render_word_document(&[page("x", text)]).expect("render");
     assert!(
         document.markdown.contains(
             "IPA (General American, Standard Southern British, Scotland, \
-             fair-fur merger, non-rhotic, without the Mary-marry-merry merger): /x/"
+             fair-fur merger, non-rhotic, without the Mary-marry-merry merger, \
+             æ-raising, without æ-raising): /x/"
         ),
         "got: {}",
         document.markdown

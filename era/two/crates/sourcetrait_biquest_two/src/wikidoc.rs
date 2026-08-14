@@ -51,7 +51,14 @@ const LIST_SECTIONS: [&str; 6] = [
 /// The IPA accent-code map, audit-grown from the measured corpus
 /// distribution against the snapshot's own label data
 /// (Module:labels/data/lang/en): codes whose display differs.
-const ACCENT_NAMES: [(&str, &str); 29] = [
+const ACCENT_NAMES: [(&str, &str); 36] = [
+    ("æ-tensing", "æ-raising"),
+    ("SSBE", "Standard Southern British"),
+    ("IE", "Ireland"),
+    ("ZA", "South Africa"),
+    ("Aus", "Australia"),
+    ("toe-tow", "toe-tow merger"),
+    ("weak form", "weak form"),
     ("RP", "Received Pronunciation"),
     ("GA", "General American"),
     ("GenAm", "General American"),
@@ -85,11 +92,12 @@ const ACCENT_NAMES: [(&str, &str); 29] = [
 
 /// Accent codes the label data names for themselves: render
 /// verbatim, no audit row.
-const ACCENT_VERBATIM: [&str; 35] = [
+const ACCENT_VERBATIM: [&str; 42] = [
     "UK", "US", "Scotland", "Northern England", "Wales", "Canada",
     "Philippines", "Ireland", "Southern US", "Australia", "India",
     "Lancashire", "rhotic", "non-rhotic", "Atlantic Canada", "Northumbria",
-    "Teesside",
+    "Teesside", "Northern Ireland", "Humberside", "South Africa",
+    "Upper Midwestern US", "Pacific Northwest", "dialectal", "strong form",
     "MLE", "Boston", "New England", "Norfolk", "Yorkshire",
     "Received Pronunciation", "Estuary English", "Tasmania", "Dublin",
     "Cork", "London", "Multicultural London English", "Geordie", "Cumbria",
