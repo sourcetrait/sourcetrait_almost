@@ -30,6 +30,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: DocCommand,
     },
+    /// The ImagineQuestMatrix: the hand-built embedding artifact.
+    Matrix {
+        #[command(subcommand)]
+        command: MatrixCommand,
+    },
     /// Tokenize a string and print the token table.
     Tokenize(TokenizeArgs),
     /// The ImagineQuestTokenizer: layers, census, admission, ledger.
@@ -70,6 +75,32 @@ pub(crate) struct AssociationsBuildArgs {
 pub(crate) enum DocCommand {
     /// Print the whole command tree, one summary line per node.
     Cli,
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub(crate) enum MatrixCommand {
+    /// Build the associative embedding matrix from the embedded
+    /// layers plus an admitted wordlist.
+    Build(MatrixBuildArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct MatrixBuildArgs {
+    /// The admitted wordlist (.nuon); row order is the id order.
+    #[arg(long)]
+    pub(crate) admitted: PathBuf,
+    /// The embedding artifact (.safetensors).
+    #[arg(long)]
+    pub(crate) out: PathBuf,
+    /// Width per head; hidden is 32 heads times this.
+    #[arg(long, default_value_t = 32)]
+    pub(crate) head_dim: usize,
+    /// Unminted rows reserved above the dictionary for expansion.
+    #[arg(long, default_value_t = 8192)]
+    pub(crate) reserve: usize,
+    /// The deterministic build seed.
+    #[arg(long, default_value_t = 299_792_458)]
+    pub(crate) seed: u64,
 }
 
 #[derive(Debug, clap::Subcommand)]

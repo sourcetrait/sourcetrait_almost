@@ -7923,9 +7923,10 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_biquest_two"
-version = "0.0.0-3"
+version = "0.0.0-4"
 dependencies = [
  "clap",
+ "half",
  "nu-protocol",
  "nuon",
  "safetensors 0.8.0",

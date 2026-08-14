@@ -7,6 +7,7 @@ pub(crate) mod doc;
 pub(crate) mod error;
 pub(crate) mod ledger;
 pub(crate) mod lexer;
+pub(crate) mod matrix;
 pub mod run;
 pub(crate) mod ucd;
 pub(crate) mod value;
@@ -39,6 +40,8 @@ pub(crate) use crate::cli::{
     Cli,
     Command,
     DocCommand,
+    MatrixBuildArgs,
+    MatrixCommand,
     TokenizeArgs,
     TokenizerAdmitArgs,
     TokenizerCensusArgs,
@@ -53,6 +56,7 @@ pub(crate) use crate::ledger::{
     tokenizer_ucd,
 };
 pub(crate) use crate::lexer::tokenize_text;
+pub(crate) use crate::matrix::matrix_build;
 #[allow(unused_imports)]
 pub(crate) use crate::value::{
     epoch_seconds,
@@ -79,5 +83,6 @@ mod tests {
     mod bucket;
     mod doc;
     mod lexer;
+    mod matrix;
     mod value;
 }

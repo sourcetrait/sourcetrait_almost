@@ -11,7 +11,9 @@ the build-and-measure verbs.
 The `associations` noun is its own verb family beside `tokenizer`
 because the store is its own artifact class - the association
 artifact the matrix build and stage-zero corpus consume - not a
-tokenizer measurement.
+tokenizer measurement. `matrix` is likewise its own family: the
+embedding artifact is the foundation the trainer consumes, not a
+measurement.
 
 Artifact paths are explicit flags rather than config fields: the
 tokenizer artifacts live on the tmp home tier and their homes are

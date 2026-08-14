@@ -9,6 +9,9 @@ pub fn run() {
         Command::Doc { command } => match command {
             DocCommand::Cli => doc_cli(),
         },
+        Command::Matrix { command } => match command {
+            MatrixCommand::Build(args) => matrix_build(args),
+        },
         Command::Tokenize(args) => tokenize_text(args),
         Command::Tokenizer { command } => match command {
             TokenizerCommand::Ucd => tokenizer_ucd(),
