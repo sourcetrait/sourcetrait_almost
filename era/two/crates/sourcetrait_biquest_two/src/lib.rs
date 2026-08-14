@@ -1,4 +1,3 @@
-pub(crate) mod bucket;
 pub(crate) mod census;
 pub(crate) mod cli;
 pub(crate) mod dictionary;
@@ -71,7 +70,6 @@ pub(crate) use crate::error::{
 
 #[cfg(test)]
 mod tests {
-    mod bucket;
     mod doc;
     mod lexer;
     mod value;

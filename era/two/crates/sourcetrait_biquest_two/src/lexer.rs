@@ -1,8 +1,7 @@
 //! The Quill content lexer: dictionary hit or character split, nothing
-//! between; designed bucket sequences match ahead of single characters.
+//! between; identical-token runs collapse through REPEAT, uniformly.
 use crate::*;
 
-use crate::bucket::BucketTable;
 use crate::census::read_admitted;
 use crate::ucd::CharClass;
 use crate::ucd::CharacterTable;
@@ -24,8 +23,6 @@ pub(crate) enum PieceKind {
     Word,
     /// One Unicode-class character; they never merge.
     Unicode,
-    /// A designed bucket sequence, by its in-layer index.
-    Bucket(usize),
 }
 
 /// One lexed piece: a slice of the input plus its kind.
@@ -35,48 +32,31 @@ pub(crate) struct Piece<'a> {
     pub(crate) kind: PieceKind,
 }
 
-/// Split text into W+ word runs, bucket sequences, and
-/// single-character Unicode pieces. A bucket match is tried first at
-/// every Unicode-class position (all bucket sequences start with
-/// Unicode-class characters, so a word run is never broken). An
-/// unassigned code point refuses; every assigned character lexes.
+/// Split text into W+ word runs and single-character Unicode pieces.
+/// One rule for every character, no designed sequences (TheUser:
+/// consistency over special cases - irregularity bites in training).
+/// An unassigned code point refuses; every assigned character lexes.
 pub(crate) fn boundary_pieces<'a>(
     table: &CharacterTable,
-    buckets: &BucketTable,
     text: &'a str,
 ) -> BiquestResult<Vec<Piece<'a>>> {
     let mut pieces = Vec::new();
     let mut word_start: Option<usize> = None;
-    let mut offset = 0usize;
-    while offset < text.len() {
-        let c = text[offset..].chars().next().expect("char at boundary");
+    for (offset, c) in text.char_indices() {
         match table.class_of(c) {
             CharClass::Word => {
                 if word_start.is_none() {
                     word_start = Some(offset);
                 }
-                offset += c.len_utf8();
             }
             CharClass::Unicode => {
                 if let Some(start) = word_start.take() {
                     pieces.push(Piece { text: &text[start..offset], kind: PieceKind::Word });
                 }
-                match buckets.match_at(&text[offset..]) {
-                    Some((index, length)) => {
-                        pieces.push(Piece {
-                            text: &text[offset..offset + length],
-                            kind: PieceKind::Bucket(index),
-                        });
-                        offset += length;
-                    }
-                    None => {
-                        pieces.push(Piece {
-                            text: &text[offset..offset + c.len_utf8()],
-                            kind: PieceKind::Unicode,
-                        });
-                        offset += c.len_utf8();
-                    }
-                }
+                pieces.push(Piece {
+                    text: &text[offset..offset + c.len_utf8()],
+                    kind: PieceKind::Unicode,
+                });
             }
             CharClass::Other => snafu::whatever!(
                 "ingestion refusal: unassigned code point U+{:04X} at byte {offset}",
@@ -96,7 +76,6 @@ pub(crate) enum Layer {
     /// A hardcoded keyword-page operator the encoder emitted.
     Keyword,
     Character,
-    Bucket,
     Dictionary,
 }
 
@@ -107,31 +86,23 @@ pub(crate) struct Token {
     pub(crate) layer: Layer,
 }
 
-/// The layered segmenter: keyword page, characters, buckets, words.
+/// The layered segmenter: keyword page, characters, then words.
 pub(crate) struct Segmenter<'a> {
     table: &'a CharacterTable,
-    buckets: &'a BucketTable,
-    bucket_offset: u32,
     /// Case-folded admitted word to its dictionary-layer id.
     word_ids: HashMap<String, u32>,
 }
 
 impl<'a> Segmenter<'a> {
-    /// Buckets take ids above the character layer; admitted words
-    /// above the buckets, in list order.
-    pub(crate) fn new(
-        table: &'a CharacterTable,
-        buckets: &'a BucketTable,
-        admitted: &[String],
-    ) -> Self {
-        let bucket_offset = CHARACTER_OFFSET + table.assigned_count() as u32;
-        let dictionary_offset = bucket_offset + buckets.count() as u32;
+    /// Admitted words take ids above the character layer, in list order.
+    pub(crate) fn new(table: &'a CharacterTable, admitted: &[String]) -> Self {
+        let dictionary_offset = CHARACTER_OFFSET + table.assigned_count() as u32;
         let word_ids = admitted
             .iter()
             .enumerate()
             .map(|(index, word)| (word.clone(), dictionary_offset + index as u32))
             .collect();
-        Self { table, buckets, bucket_offset, word_ids }
+        Self { table, word_ids }
     }
 
     fn character_token(&self, c: char) -> BiquestResult<Token> {
@@ -196,32 +167,20 @@ impl<'a> Segmenter<'a> {
     /// The raw piece resolution, before the REPEAT collapse.
     fn raw_tokens(&self, text: &str, keep_text: bool) -> BiquestResult<Vec<(Token, String)>> {
         let mut tokens = Vec::new();
-        for piece in boundary_pieces(self.table, self.buckets, text)? {
-            match piece.kind {
-                PieceKind::Bucket(index) => {
-                    let token = Token {
-                        id: self.bucket_offset + index as u32,
-                        layer: Layer::Bucket,
-                    };
-                    let kept = if keep_text { piece.text.to_string() } else { String::new() };
-                    tokens.push((token, kept));
+        for piece in boundary_pieces(self.table, text)? {
+            if piece.kind == PieceKind::Word {
+                let folded = match self.table.fold_str(piece.text) {
+                    Ok(folded) => folded,
+                    Err(c) => snafu::whatever!(
+                        "ingestion refusal: unassigned code point U+{:04X}",
+                        c as u32
+                    ),
+                };
+                if let Some(&id) = self.word_ids.get(&folded) {
+                    let kept = if keep_text { folded } else { String::new() };
+                    tokens.push((Token { id, layer: Layer::Dictionary }, kept));
                     continue;
                 }
-                PieceKind::Word => {
-                    let folded = match self.table.fold_str(piece.text) {
-                        Ok(folded) => folded,
-                        Err(c) => snafu::whatever!(
-                            "ingestion refusal: unassigned code point U+{:04X}",
-                            c as u32
-                        ),
-                    };
-                    if let Some(&id) = self.word_ids.get(&folded) {
-                        let kept = if keep_text { folded } else { String::new() };
-                        tokens.push((Token { id, layer: Layer::Dictionary }, kept));
-                        continue;
-                    }
-                }
-                PieceKind::Unicode => {}
             }
             for c in piece.text.chars() {
                 let kept = if keep_text { c.to_string() } else { String::new() };
@@ -241,9 +200,8 @@ impl<'a> Segmenter<'a> {
     }
 
     /// Segment content text: a word piece is a case-folded dictionary
-    /// hit or its character split; a bucket piece is its designed id;
-    /// a Unicode piece is its character; identical-token runs collapse
-    /// into REPEAT groups.
+    /// hit or its character split; a Unicode piece is its character;
+    /// identical-token runs collapse into REPEAT groups.
     pub(crate) fn segment(&self, text: &str) -> BiquestResult<Vec<Token>> {
         let raw = self.raw_tokens(text, false)?;
         Ok(self.collapse_runs(raw)?.into_iter().map(|(token, _)| token).collect())
@@ -316,12 +274,11 @@ fn split_markers(text: &str) -> Vec<TestPart<'_>> {
 /// ids are the test surface's, not a trained vocabulary's.
 pub(crate) fn tokenize_text(args: &TokenizeArgs) -> BiquestResult<()> {
     let table = CharacterTable::embedded()?;
-    let buckets = BucketTable::new();
     let admitted = match &args.admitted {
         Some(path) => read_admitted(path)?,
         None => crate::dictionary::embedded_words(),
     };
-    let segmenter = Segmenter::new(&table, &buckets, &admitted);
+    let segmenter = Segmenter::new(&table, &admitted);
     let mut rows: Vec<harness::nu::Value> = Vec::new();
     for part in split_markers(&args.text) {
         match part {
@@ -342,7 +299,7 @@ pub(crate) fn tokenize_text(args: &TokenizeArgs) -> BiquestResult<()> {
                             let c = text.chars().next().unwrap_or('\u{FFFD}');
                             v_str(&format!("U+{:04X}", c as u32))
                         }
-                        Layer::Keyword | Layer::Bucket | Layer::Dictionary => {
+                        Layer::Keyword | Layer::Dictionary => {
                             harness::nu::Value::nothing(span())
                         }
                     };

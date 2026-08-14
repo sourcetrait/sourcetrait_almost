@@ -3,7 +3,6 @@ use crate::*;
 
 use std::io::BufRead;
 
-use crate::bucket::BucketTable;
 use crate::lexer::PieceKind;
 use crate::lexer::boundary_pieces;
 use crate::ucd::CharacterTable;
@@ -55,12 +54,8 @@ struct DictionaryTally {
 /// Multiword, hyphenated, and apostrophe-carrying entries fail here by
 /// design: a token can never span a boundary, so such entries decompose
 /// at lex time and get no dictionary row.
-fn single_piece_folded(
-    table: &CharacterTable,
-    buckets: &BucketTable,
-    candidate: &str,
-) -> Option<String> {
-    let pieces = boundary_pieces(table, buckets, candidate).ok()?;
+fn single_piece_folded(table: &CharacterTable, candidate: &str) -> Option<String> {
+    let pieces = boundary_pieces(table, candidate).ok()?;
     if pieces.len() != 1 || pieces[0].kind != PieceKind::Word {
         return None;
     }
@@ -71,7 +66,6 @@ fn single_piece_folded(
 pub(crate) fn tokenizer_dictionary(args: &TokenizerDictionaryArgs) -> BiquestResult<()> {
     let started = std::time::Instant::now();
     let table = CharacterTable::embedded()?;
-    let buckets = BucketTable::new();
     let file = fs::File::open(&args.dump)?;
     let reader = io::BufReader::with_capacity(1 << 20, file);
 
@@ -103,7 +97,7 @@ pub(crate) fn tokenizer_dictionary(args: &TokenizerDictionaryArgs) -> BiquestRes
             }
         }
         for candidate in candidates {
-            match single_piece_folded(&table, &buckets, candidate) {
+            match single_piece_folded(&table, candidate) {
                 Some(folded) => {
                     words.insert(folded);
                 }

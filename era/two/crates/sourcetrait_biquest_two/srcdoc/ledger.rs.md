@@ -6,9 +6,10 @@ The day-one instrument: Quill token counts against the checkpoint's
 dolma2 tokenizer (cl100k family) over the same files. A file the
 segmenter refuses drops out of BOTH sides so the ratio stays a
 same-set comparison; the refused list rides the report. The
-dictionary/character layer split is the health metric that explains a
-ratio: symbol characters are one token each under Quill while cl100k
-merges whitespace runs, so a code-heavy corpus reads high on
+dictionary/repeat/character split is the health metric that explains
+a ratio: non-word characters are one token each under Quill (REPEAT
+collapsing runs) while cl100k merges whitespace and operator
+sequences into fossil rows, so a code-heavy corpus reads high on
 quill_over_cl100k long before the word layer is at fault.
 
 The llm LibConfig profile flags supply the model dir; verify_token_map

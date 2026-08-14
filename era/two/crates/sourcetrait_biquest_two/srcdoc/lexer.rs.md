@@ -12,9 +12,14 @@ it.
 The id layout, each offset a constant forever: ids 0x00-0xFF are the
 keyword page (reserved whole regardless of how many keywords are
 bound - the page belongs to Quill, not the lexer), the character layer
-starts at 256 indexed by the table's dense order, the bucket layer
-directly above it, and the dictionary layer above the buckets in
-admitted-wordlist order.
+starts at 256 indexed by the table's dense order, and the dictionary
+layer sits directly above it in admitted-wordlist order. There are no
+sequence rows: TheUser's uniformity ruling retired the bucket-layer
+experiment - every character acts like every other (character row
+plus REPEAT), because special-cased rows are irregularity that bites
+in training. The measured arc that priced it: 1.95 characters-only,
+1.64 with 17 designed rows, 1.72 uniform - the ~58k-position hit
+taken deliberately.
 
 The page allocates from both ends, TheUser's ruling: user bindings
 grow from 0x00 up (the Syntax.nuon draft), hardcoded
@@ -34,27 +39,28 @@ allowed to enter through.
 
 ## fn Segmenter::collapse_runs
 
-Token-level run-length encoding, TheUser's design replacing depth
-enumerations: a run of three or more identical non-word tokens
-becomes unit, REPEAT, one count digit (his example: twelve spaces =
-`|    ||REPEAT||3|`). Ties prefer REPEAT (ruled); a run of two stays
-plain because the group costs three. Groups carry at most nine and
-chain greedily, a leftover of one or two staying plain. The count is
-EXACTLY one digit token - that bound is what keeps the wire
-unambiguous when literal digits follow a run (sixteen spaces then
-"2024": the decoder takes one count digit and the year survives as
-content). The count digit is the ordinary character row for 2-9,
-spending no vocabulary. Newline runs, tab runs, and any other
-identical-token run collapse through the same pass with no dedicated
-entries anywhere.
+Token-level run-length encoding, TheUser's design replacing all
+sequence enumeration: a run of three or more identical non-word
+tokens becomes unit, REPEAT, one count digit. Ties prefer REPEAT
+(ruled); a run of two stays plain because the group costs three.
+Groups carry at most nine and chain greedily, a leftover of one or
+two staying plain. The count is EXACTLY one digit token - that bound
+is what keeps the wire unambiguous when literal digits follow a run
+(eight spaces then "2024": the decoder takes one count digit and the
+year survives as content). The count digit is the ordinary character
+row for 2-9, spending no vocabulary. Space, newline, tab, dash - any
+identical-token run collapses through this one pass with no
+dedicated entries anywhere.
 
 ## fn boundary_pieces
 
 W+ word runs and single-character Unicode pieces (TheUser-ruled: `Dog
 ate. it` lexes Dog, space, ate, period, space, it - they never
-merge). Digit runs ride the Word class, so an out-of-dictionary number
-falls to digit-per-character; lexed numeric literals remain an open
-decision recorded in the campaign.
+merge). One rule for every character; multi-character constructs
+(`//`, `**`, `...`, headings) are learned compositionally over their
+explicit tokens. Digit runs ride the Word class, so an
+out-of-dictionary number falls to digit-per-character; lexed numeric
+literals remain an open decision recorded in the campaign.
 
 ## struct Segmenter
 
