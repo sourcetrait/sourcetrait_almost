@@ -171,17 +171,39 @@ fn interior_needs_raw(interior: &str) -> bool {
     })
 }
 
-/// Strip up to `depth` indentation levels off a content line; excess
-/// indentation is the content's own.
-fn strip_indent(line: &str, depth: usize) -> &str {
+/// Strip exactly `depth` indentation levels off a non-empty content
+/// line; excess indentation is the content's own, and a shortfall
+/// faults - assembly indentation is enforced for parse precision
+/// (TheUser's ruling: two spaces per level, as Syntax.md shows).
+fn strip_indent(line: &str, depth: usize, number: usize) -> BiquestResult<&str> {
+    if line.is_empty() {
+        return Ok(line);
+    }
     let mut rest = line;
     for _ in 0..depth {
         match rest.strip_prefix(INDENT) {
             Some(stripped) => rest = stripped,
-            None => break,
+            None => snafu::whatever!(
+                "line {number}: content wants {depth} indentation levels \
+                 ({} spaces)",
+                depth * INDENT.len()
+            ),
         }
     }
-    rest
+    Ok(rest)
+}
+
+/// Require a structural line to sit at exactly `depth` levels: the
+/// expected indent, then a non-space head.
+fn require_depth(line: &str, depth: usize, number: usize) -> BiquestResult<()> {
+    let expected = INDENT.len() * depth;
+    let leading = line.len() - line.trim_start_matches(' ').len();
+    snafu::ensure_whatever!(
+        leading == expected,
+        "line {number}: expected {expected} spaces of indentation ({depth} \
+         levels), got {leading}"
+    );
+    Ok(())
 }
 
 /// The Quill assembler over one syntax table and content tokenizer.
@@ -263,9 +285,12 @@ impl<'a> Assembler<'a> {
         }
     }
 
-    /// Assembly text to the wire: indentation drops, structure checks
-    /// as it encodes, serialization interiors pass through content
-    /// tokenization (raw-string wrappers strip).
+    /// Assembly text to the wire: indentation is enforced at exactly
+    /// two spaces per level and drops (so no structural whitespace
+    /// reaches the wire), structure checks as it encodes, and
+    /// serialization interiors pass through content tokenization
+    /// (raw-string wrappers strip). Blank lines are legal only
+    /// outside any open block.
     pub(crate) fn encode(&self, text: &str) -> BiquestResult<Vec<u32>> {
         let mut wire: Vec<u32> = Vec::new();
         let mut stack: Vec<u32> = Vec::new();
@@ -273,24 +298,45 @@ impl<'a> Assembler<'a> {
         while let Some((index, line)) = lines.next() {
             let number = index + 1;
             match self.parse_line(line, number)? {
-                AssemblyLine::Blank | AssemblyLine::Reign => {}
-                AssemblyLine::Bare(id) => wire.push(id),
+                AssemblyLine::Blank => {
+                    // Newlines between things are enforced: a blank
+                    // line is legal only outside any open block (the
+                    // REIGN header region).
+                    snafu::ensure_whatever!(
+                        stack.is_empty(),
+                        "line {number}: a blank line inside an open block"
+                    );
+                }
+                AssemblyLine::Reign => {
+                    require_depth(line, stack.len(), number)?;
+                }
+                AssemblyLine::Bare(id) => {
+                    require_depth(line, stack.len(), number)?;
+                    wire.push(id);
+                }
                 AssemblyLine::Structural { head, noun } => {
-                    wire.push(head);
-                    wire.push(noun);
                     if head == self.syntax.open {
+                        require_depth(line, stack.len(), number)?;
+                        wire.push(head);
+                        wire.push(noun);
                         stack.push(noun);
                     } else if head == self.syntax.close {
                         let Some(expected) = stack.pop() else {
                             snafu::whatever!("line {number}: CLOSE with nothing open");
                         };
+                        require_depth(line, stack.len(), number)?;
                         snafu::ensure_whatever!(
                             expected == noun,
                             "line {number}: CLOSE {} against open {}",
                             self.syntax.name_of(noun).unwrap_or("?"),
                             self.syntax.name_of(expected).unwrap_or("?")
                         );
+                        wire.push(head);
+                        wire.push(noun);
                     } else if head == self.syntax.begin {
+                        require_depth(line, stack.len(), number)?;
+                        wire.push(head);
+                        wire.push(noun);
                         let depth = stack.len() + 1;
                         let interior =
                             self.collect_interior(&mut lines, noun, depth, number)?;
@@ -316,8 +362,15 @@ impl<'a> Assembler<'a> {
         Ok(wire)
     }
 
-    /// Collect a serialization interior through its END line, indent
-    /// stripped, raw-string wrapper honored.
+    /// Collect a serialization interior through its END line. The
+    /// terminator is recognized by POSITION - the only line that may
+    /// sit at the BEGIN's own depth - so a data line spelling END at
+    /// the data indent stays data. Non-empty interior lines carry
+    /// the base indent exactly (stripped; a shortfall faults) and
+    /// everything past it is data verbatim; a raw-string wrapper is
+    /// honored at the base indent. The precision is the point
+    /// (TheUser): the surface indent strips reliably, so no
+    /// structural tabs or spaces reach the wire.
     fn collect_interior(
         &self,
         lines: &mut std::iter::Peekable<
@@ -332,8 +385,8 @@ impl<'a> Assembler<'a> {
         let mut first = true;
         for (index, line) in lines.by_ref() {
             let number = index + 1;
-            let content = strip_indent(line, depth);
             if let Some(closer) = &raw_closer {
+                let content = strip_indent(line, depth, number)?;
                 if content.trim() == closer.as_str() {
                     raw_closer = None;
                     continue;
@@ -341,6 +394,26 @@ impl<'a> Assembler<'a> {
                 collected.push(content.to_string());
                 continue;
             }
+            let leading = line.len() - line.trim_start_matches(' ').len();
+            if !line.is_empty() && leading == INDENT.len() * (depth - 1) {
+                if let Ok(AssemblyLine::Structural { head, noun }) =
+                    self.parse_line(line, number)
+                    && head == self.syntax.end
+                {
+                    snafu::ensure_whatever!(
+                        noun == format,
+                        "line {number}: END {} against BEGIN {}",
+                        self.syntax.name_of(noun).unwrap_or("?"),
+                        self.syntax.name_of(format).unwrap_or("?")
+                    );
+                    return Ok(collected.join("\n"));
+                }
+                snafu::whatever!(
+                    "line {number}: a serialization admits only its END line at \
+                     the parent depth"
+                );
+            }
+            let content = strip_indent(line, depth, number)?;
             let trimmed = content.trim();
             if first
                 && trimmed.starts_with('#')
@@ -353,19 +426,6 @@ impl<'a> Assembler<'a> {
                 continue;
             }
             first = false;
-            // The END line terminates the interior; anything else,
-            // structural-looking or not, is content by position.
-            if let Ok(AssemblyLine::Structural { head, noun }) = self.parse_line(line, number)
-                && head == self.syntax.end
-            {
-                snafu::ensure_whatever!(
-                    noun == format,
-                    "line {number}: END {} against BEGIN {}",
-                    self.syntax.name_of(noun).unwrap_or("?"),
-                    self.syntax.name_of(format).unwrap_or("?")
-                );
-                return Ok(collected.join("\n"));
-            }
             collected.push(content.to_string());
         }
         snafu::whatever!(

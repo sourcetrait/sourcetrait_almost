@@ -20,17 +20,23 @@ codec, and a shadowing binding would make mentions ambiguous.
 
 ## fn encode / fn collect_interior
 
-Interior collection ends ONLY at an `END <format>` line - an interior
-line reading `OPEN X` or a bare keyword is content by position. The
-one collision is an `END <other>` line, which faults the encode as a
-noun disagreement; that is what the raw-string wrapper exists for,
-and why the DECODER wraps conservatively (any structural-looking
-line) - over-wrapping is safe and round-trip stable, under-wrapping
-would re-encode wrong. The raw opener is honored only as the
-interior's first line, matching what the decoder renders.
+Indentation is enforced (TheUser's ruling): structural lines sit at
+exactly two spaces per level, blank lines are legal only outside any
+open block (the REIGN header region), and a non-empty interior line
+carries its base indent exactly - stripped on encode, everything
+past it data verbatim. The precision is the point: the surface
+indent strips reliably, so no structural tabs or spaces ever reach
+the wire.
 
-Content lines strip exactly their nesting depth of indentation and
-keep the excess: content's own indentation (nu code) is content.
+Interior collection ends at the `END <format>` line recognized BY
+POSITION - the only line that may sit at the BEGIN's own depth - so
+a data line spelling `END NUON` at the data indent stays data, and a
+non-END line at the parent depth faults. The noun still checks
+against the BEGIN. The raw opener is honored only as the interior's
+first line, at the base indent; the DECODER still wraps
+conservatively (any structural-looking or delimiter-shaped line) -
+over-wrapping is safe and round-trip stable, and a raw-delimiter-
+shaped content line still needs the wrapper on encode.
 
 ## fn decode / fn decode_interior
 

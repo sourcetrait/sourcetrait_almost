@@ -83,23 +83,63 @@ impl Rig {
 }
 
 #[test]
-fn structure_round_trips_with_indentation_regenerated() {
+fn structure_round_trips_and_indentation_is_enforced() {
     let rig = Rig::new();
-    // Encoded flat: indentation is surface-only.
-    let flat = "OPEN DIALOGUE\nOPEN CONFIG\nNU\nCLOSE CONFIG\nCLOSE DIALOGUE\n";
+    let text = "OPEN DIALOGUE\n  OPEN CONFIG\n    NU\n  CLOSE CONFIG\nCLOSE DIALOGUE\n";
     let (wire, rendered) = rig.with(|assembler| {
-        let wire = assembler.encode(flat).expect("encodes");
+        let wire = assembler.encode(text).expect("encodes");
         let rendered = assembler.decode(&wire).expect("decodes");
         (wire, rendered)
     });
-    // OPEN DIALOGUE OPEN CONFIG NU CLOSE CONFIG CLOSE DIALOGUE.
+    // OPEN DIALOGUE OPEN CONFIG NU CLOSE CONFIG CLOSE DIALOGUE; the
+    // enforced surface indent never reaches the wire.
     assert_eq!(wire, [1, 5, 1, 6, 8, 2, 6, 2, 5]);
+    assert_eq!(rendered, text);
+    let rewire = rig.with(|assembler| assembler.encode(&rendered).expect("re-encodes"));
+    assert_eq!(wire, rewire);
+    // Exactly two spaces per level: flat, over-indented, and
+    // blank-inside-block forms fault.
+    rig.with(|assembler| {
+        let flat =
+            assembler.encode("OPEN DIALOGUE\nOPEN CONFIG\nCLOSE CONFIG\nCLOSE DIALOGUE\n");
+        assert!(flat.is_err(), "flat structural lines fault");
+        let over = assembler
+            .encode("OPEN DIALOGUE\n    OPEN CONFIG\n    CLOSE CONFIG\nCLOSE DIALOGUE\n");
+        assert!(over.is_err(), "over-indent faults");
+        let blank = assembler.encode("OPEN DIALOGUE\n\nCLOSE DIALOGUE\n");
+        assert!(blank.is_err(), "a blank line inside an open block faults");
+    });
+}
+
+#[test]
+fn interior_base_indent_is_enforced_and_end_is_positional() {
+    let rig = Rig::new();
+    // A data line spelling END NUON at the DATA indent is data: the
+    // terminator is recognized by position (the BEGIN's own depth).
+    // The decoder wraps it raw conservatively, and that form
+    // re-encodes to the same wire.
+    let text = "OPEN CONFIG\n  BEGIN NUON\n    END NUON\n  END NUON\nCLOSE CONFIG\n";
+    let (wire, rendered) = rig.with(|assembler| {
+        let wire = assembler.encode(text).expect("END at data indent is data");
+        let rendered = assembler.decode(&wire).expect("decodes");
+        (wire, rendered)
+    });
     assert_eq!(
         rendered,
-        "OPEN DIALOGUE\n  OPEN CONFIG\n    NU\n  CLOSE CONFIG\nCLOSE DIALOGUE\n"
+        "OPEN CONFIG\n  BEGIN NUON\n    #{\n    END NUON\n    }#\n  END NUON\nCLOSE CONFIG\n"
     );
     let rewire = rig.with(|assembler| assembler.encode(&rendered).expect("re-encodes"));
     assert_eq!(wire, rewire);
+    rig.with(|assembler| {
+        // Under-indented content faults (the base indent is the
+        // reliable strip; a non-END line at the parent depth faults).
+        let shallow =
+            assembler.encode("OPEN CONFIG\n  BEGIN NUON\ndog\n  END NUON\nCLOSE CONFIG\n");
+        assert!(shallow.is_err(), "unindented content faults");
+        let parent_depth =
+            assembler.encode("OPEN CONFIG\n  BEGIN NUON\n  dog\n  END NUON\nCLOSE CONFIG\n");
+        assert!(parent_depth.is_err(), "non-END content at parent depth faults");
+    });
 }
 
 #[test]

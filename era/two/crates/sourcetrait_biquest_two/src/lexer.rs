@@ -766,7 +766,7 @@ pub(crate) fn tokenize_text(args: &TokenizeArgs) -> BiquestResult<()> {
     let segmenter = Segmenter::new(&table, &buckets, &words);
     let mut rows: Vec<harness::nu::Value> = Vec::new();
     let mut in_span = false;
-    let mut push_chars = |rows: &mut Vec<harness::nu::Value>,
+    let push_chars = |rows: &mut Vec<harness::nu::Value>,
                           text: &str|
      -> BiquestResult<()> {
         for c in text.chars() {
