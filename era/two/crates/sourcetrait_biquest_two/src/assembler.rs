@@ -57,6 +57,11 @@ const HARDCODED_NAMES: [(u32, &str); 10] = [
     (KEYWORD_REPETITION, "REPETITION"),
 ];
 
+/// The vendored default binding table (TheUser's Syntax.nuon draft),
+/// embedded so the bare verbs need no --syntax; re-vendor from the
+/// reference copy when the draft moves.
+const DEFAULT_SYNTAX: &str = include_str!("../data/syntax/Syntax.nuon");
+
 /// The user-binding half of the keyword page: Syntax.nuon remapped
 /// onto the page in order, NULL at 0x00. Bindings stop below the
 /// hardcoded operator block.
@@ -115,12 +120,12 @@ impl SyntaxTable {
         })
     }
 
-    /// Load the `> HUMAN` draft table: a NUON table with a name column.
-    pub(crate) fn load(path: &Path) -> BiquestResult<Self> {
-        let value = harness::nu::load_value(path)?;
+    /// Parse a binding table's NUON text: a table with a name column.
+    pub(crate) fn from_text(text: &str) -> BiquestResult<Self> {
+        let value = harness::nu::from_nuon_text(text)?;
         let rows = match value.as_list() {
             Ok(rows) => rows,
-            Err(e) => snafu::whatever!("{}: not a table: {e}", path.display()),
+            Err(e) => snafu::whatever!("the syntax table is not a table: {e}"),
         };
         let mut names = Vec::with_capacity(rows.len());
         for row in rows {
@@ -131,6 +136,17 @@ impl SyntaxTable {
             names.push(field_str(record, "name")?);
         }
         Self::from_names(names)
+    }
+
+    /// The embedded default table.
+    pub(crate) fn embedded() -> BiquestResult<Self> {
+        Self::from_text(DEFAULT_SYNTAX)
+    }
+
+    /// Load the `> HUMAN` draft table from a file.
+    pub(crate) fn load(path: &Path) -> BiquestResult<Self> {
+        let text = fs::read_to_string(path)?;
+        Self::from_text(&text)
     }
 
     fn id_of(&self, name: &str) -> Option<u32> {
@@ -1129,7 +1145,7 @@ struct AssemblerParts {
 }
 
 fn assembler_parts(
-    syntax_path: &Path,
+    syntax_path: Option<&PathBuf>,
     words_path: Option<&PathBuf>,
 ) -> BiquestResult<AssemblerParts> {
     Ok(AssemblerParts {
@@ -1139,14 +1155,38 @@ fn assembler_parts(
             Some(path) => read_words_ordered(path)?,
             None => crate::dictionary::embedded_words(),
         },
-        syntax: SyntaxTable::load(syntax_path)?,
+        syntax: match syntax_path {
+            Some(path) => SyntaxTable::load(path)?,
+            None => SyntaxTable::embedded()?,
+        },
     })
 }
 
-/// `biquest assemble`: assembly text to the wire id list, as NUON;
-/// --table renders the tokenize-style test surface instead.
+/// `biquest assembler`: TheUser's test surface - one file path in,
+/// the tokenize-style [token, unicode, value] table out, everything
+/// else embedded defaults.
+pub(crate) fn assembler_table(args: &AssemblerArgs) -> BiquestResult<()> {
+    let parts = assembler_parts(None, None)?;
+    let segmenter = Segmenter::new(&parts.table, &parts.buckets, &parts.admitted);
+    let assembler = Assembler::new(
+        &parts.syntax,
+        &segmenter,
+        &parts.table,
+        &parts.buckets,
+        &parts.admitted,
+    );
+    let text = fs::read_to_string(&args.file)?;
+    let wire = assembler.encode(&text)?;
+    let rows = assembler.wire_table_rows(&wire)?;
+    let rendered =
+        harness::nu::to_nuon_pretty(&harness::nu::Value::list(rows, span()))?;
+    println!("{rendered}");
+    Ok(())
+}
+
+/// `biquest assemble`: assembly text to the wire id list, as NUON.
 pub(crate) fn assemble_text(args: &AssembleArgs) -> BiquestResult<()> {
-    let parts = assembler_parts(&args.syntax, args.words.as_ref())?;
+    let parts = assembler_parts(args.syntax.as_ref(), args.words.as_ref())?;
     let segmenter = Segmenter::new(&parts.table, &parts.buckets, &parts.admitted);
     let assembler = Assembler::new(
         &parts.syntax,
@@ -1163,13 +1203,6 @@ pub(crate) fn assemble_text(args: &AssembleArgs) -> BiquestResult<()> {
         },
     };
     let wire = assembler.encode(&text)?;
-    if args.table {
-        let rows = assembler.wire_table_rows(&wire)?;
-        let rendered =
-            harness::nu::to_nuon_pretty(&harness::nu::Value::list(rows, span()))?;
-        println!("{rendered}");
-        return Ok(());
-    }
     let rendered = harness::nu::to_nuon_text(&harness::nu::Value::list(
         wire.iter().map(|&id| v_int(id as i64)).collect(),
         span(),
@@ -1180,7 +1213,7 @@ pub(crate) fn assemble_text(args: &AssembleArgs) -> BiquestResult<()> {
 
 /// `biquest disassemble`: a NUON wire id list back to assembly text.
 pub(crate) fn disassemble_wire(args: &DisassembleArgs) -> BiquestResult<()> {
-    let parts = assembler_parts(&args.syntax, args.words.as_ref())?;
+    let parts = assembler_parts(args.syntax.as_ref(), args.words.as_ref())?;
     let segmenter = Segmenter::new(&parts.table, &parts.buckets, &parts.admitted);
     let assembler = Assembler::new(
         &parts.syntax,

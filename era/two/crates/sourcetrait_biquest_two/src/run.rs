@@ -4,6 +4,7 @@ pub fn run() {
     let cli = <Cli as clap::Parser>::parse();
     let outcome = match &cli.command {
         Command::Assemble(args) => assemble_text(args),
+        Command::Assembler(args) => assembler_table(args),
         Command::Associations { command } => match command {
             AssociationsCommand::Build(args) => associations_build(args),
         },

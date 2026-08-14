@@ -97,6 +97,113 @@ fn audit_details_are_single_line() {
     }
 }
 
+fn pos_doc(pos: &str, template_line: &str, title: &str) -> String {
+    let text = format!("==English==\n\n==={pos}===\n{template_line}\n\n# A sense.\n");
+    render_word_document(&[page(title, &text)]).expect("render").markdown
+}
+
+#[test]
+fn noun_specs_derive_the_documented_plurals() {
+    assert!(pos_doc("Noun", "{{en-noun|-}}", "awe").contains("(uncountable)"));
+    assert!(pos_doc("Noun", "{{en-noun|-|+}}", "reality")
+        .contains("(usually uncountable, plural [realities])"));
+    assert!(pos_doc("Noun", "{{en-noun|~}}", "beer")
+        .contains("(countable and uncountable, plural [beers])"));
+    assert!(pos_doc("Noun", "{{en-noun|+|octopi|octopodes}}", "octopus")
+        .contains("(plural [octopuses] or [octopi] or [octopodes])"));
+    assert!(pos_doc("Noun", "{{en-noun|*}}", "sheep").contains("(plural [sheep])"));
+    assert!(pos_doc("Noun", "{{en-noun|++}}", "quiz").contains("(plural [quizzes])"));
+    assert!(pos_doc("Noun", "{{en-noun|+|treen<l:obsolete>}}", "tree")
+        .contains("(plural [trees] or [treen] (obsolete))"));
+    assert!(pos_doc("Noun", "{{en-noun|p|attr=pant}}", "pants")
+        .contains("(plural only, attributive [pant])"));
+}
+
+#[test]
+fn verb_slots_and_indicators_derive_the_documented_forms() {
+    assert!(pos_doc("Verb", "{{en-verb}}", "flip").contains(
+        "(third-person singular simple present [flips], present participle \
+         [flipping], simple past and past participle [flipped])"
+    ));
+    assert!(pos_doc("Verb", "{{en-verb}}", "tie").contains("[tying]"));
+    assert!(pos_doc("Verb", "{{en-verb|does|doing|did|done}}", "do")
+        .contains("simple past [did], past participle [done]"));
+    assert!(pos_doc("Verb", "{{en-verb|+|+|+,wrought<l:obsolete>}}", "work")
+        .contains("simple past and past participle [worked] or [wrought] (obsolete)"));
+    let can = pos_doc("Verb", "{{en-verb|can|-|could|-}}", "can");
+    assert!(
+        can.contains("(third-person singular simple present [can], simple past [could])"),
+        "got: {can}"
+    );
+    let log_on = pos_doc("Verb", "{{en-verb|*}}", "log on");
+    assert!(
+        log_on.contains("[logs on]")
+            && log_on.contains("[logging on]")
+            && log_on.contains("[logged on]"),
+        "got: {log_on}"
+    );
+    let grudge = pos_doc("Verb", "{{en-verb|hold<,,held> a grudge}}", "hold a grudge");
+    assert!(
+        grudge.contains("[holds a grudge]")
+            && grudge.contains("simple past and past participle [held a grudge]"),
+        "got: {grudge}"
+    );
+}
+
+#[test]
+fn graded_specs_derive_comparatives_and_superlatives() {
+    assert!(pos_doc("Adjective", "{{en-adj|er}}", "hard")
+        .contains("(comparative [harder], superlative [hardest])"));
+    assert!(pos_doc("Adjective", "{{en-adj|-}}", "coal").contains("(not comparable)"));
+    let avid = pos_doc("Adjective", "{{en-adj|more,avider<l:less common>}}", "avid");
+    assert!(
+        avid.contains("comparative [more avid] or [avider] (less common)"),
+        "got: {avid}"
+    );
+    assert!(
+        avid.contains("superlative [most avid] or [avidest] (less common)"),
+        "got: {avid}"
+    );
+    let fitting = pos_doc("Adjective", "{{en-adj|+first}}", "loose-fitting");
+    assert!(
+        fitting.contains("(comparative [looser-fitting], superlative [loosest-fitting])"),
+        "got: {fitting}"
+    );
+    assert!(pos_doc("Adverb", "{{en-adv|-}}", "solely").contains("(not comparable)"));
+}
+
+#[test]
+fn head_template_pairs_and_pointers_render() {
+    let lemma = pos_doc("Noun", "{{head|en|noun|plural|lemmas|or|lemmata}}", "lemma");
+    assert!(lemma.contains("(plural [lemmas] or [lemmata])"), "got: {lemma}");
+    let milk = pos_doc(
+        "Noun",
+        "{{head|en|noun|countable and uncountable||plural|milks}}",
+        "milk",
+    );
+    assert!(
+        milk.contains("(countable and uncountable, plural [milks])"),
+        "got: {milk}"
+    );
+    // A bare head carries no inflections and is handled, not audited.
+    let text = "==English==\n\n===Verb===\n{{head|en|verb form}}\n\n# A sense.\n";
+    let document = render_word_document(&[page("runs", text)]).expect("render");
+    assert!(
+        document.audit.iter().all(|row| !row.class.starts_with("head_")),
+        "audit: {:?}",
+        document.audit
+    );
+    // The wikipedia pointer routes to its own audit class and the
+    // head template still lands.
+    let text = "==English==\n\n===Noun===\n{{wp}}\n\n{{en-noun}}\n\n# A sense.\n";
+    let document = render_word_document(&[page("dog", text)]).expect("render");
+    assert!(document.markdown.contains("(plural [dogs])"));
+    assert!(document.audit.iter().any(|row| row.class == "wikipedia_pointer"));
+    // head= overrides the headword line.
+    let intj = pos_doc("Interjection", "{{en-intj|head=not!}}", "not");
+    assert!(intj.contains("### not!"), "got: {intj}");
+}
+
 #[test]
 fn typography_normalizes_in_rendered_text() {
     let text = "==English==\n\n===Etymology===\nFrom \u{201C}so\u{2014}called\u{201D} use.\n";

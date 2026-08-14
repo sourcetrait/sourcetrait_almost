@@ -72,16 +72,56 @@ pub(crate) fn regular_plural(word: &str) -> String {
     format!("{word}s")
 }
 
-/// The regular present participle: a silent trailing e drops.
+/// Whether a lemma has the doubling shape: consonants, one vowel,
+/// one final consonant not in w/x/y/h (the en-verb C*VC rule).
+fn doubles_final(word: &str) -> bool {
+    let lower = word.to_lowercase();
+    let chars: Vec<char> = lower.chars().collect();
+    let Some((&last, body)) = chars.split_last() else { return false };
+    if !last.is_ascii_alphabetic() || "aeiouwxyh".contains(last) {
+        return false;
+    }
+    let Some((&vowel, head)) = body.split_last() else { return false };
+    if !"aeiou".contains(vowel) {
+        return false;
+    }
+    head.iter().all(|&c| c.is_ascii_alphabetic() && !"aeiou".contains(c))
+}
+
+/// The word with its final consonant doubled before a suffix.
+fn doubled(word: &str, suffix: &str) -> String {
+    match word.chars().last() {
+        Some(last) => format!("{word}{last}{suffix}"),
+        None => String::from(suffix),
+    }
+}
+
+/// The regular present participle (the en-verb exact rules): -ie to
+/// -ying, -ue drops the e, consonant-e drops the e, C*VC doubles,
+/// else +ing.
 pub(crate) fn regular_participle(word: &str) -> String {
     let lower = word.to_lowercase();
-    if lower.ends_with('e') && !lower.ends_with("ee") && !lower.ends_with("ye") {
+    if lower.ends_with("ie") {
+        return format!("{}ying", &word[..word.len() - 2]);
+    }
+    if lower.ends_with("ue") {
         return format!("{}ing", &word[..word.len() - 1]);
+    }
+    if lower.ends_with('e') {
+        let before = lower.chars().rev().nth(1);
+        if before.is_some_and(|c| c.is_ascii_alphabetic() && !"aeiouy".contains(c)) {
+            return format!("{}ing", &word[..word.len() - 1]);
+        }
+        return format!("{word}ing");
+    }
+    if doubles_final(word) {
+        return doubled(word, "ing");
     }
     format!("{word}ing")
 }
 
-/// The regular past: trailing e takes +d, consonant-y takes -ied.
+/// The regular past (the en-verb exact rules): e takes +d,
+/// consonant-y takes -ied, C*VC doubles, else +ed.
 pub(crate) fn regular_past(word: &str) -> String {
     let lower = word.to_lowercase();
     if lower.ends_with('e') {
@@ -90,7 +130,33 @@ pub(crate) fn regular_past(word: &str) -> String {
     if let Some(stem) = consonant_y_stem(word) {
         return format!("{stem}ied");
     }
+    if doubles_final(word) {
+        return doubled(word, "ed");
+    }
     format!("{word}ed")
+}
+
+/// An -er/-est graded form (the en-adj rules): e drops, consonant-y
+/// and consonant-ey become -i-, C*VC doubles, else the bare suffix.
+fn graded_form(word: &str, suffix: &str) -> String {
+    let lower = word.to_lowercase();
+    if lower.ends_with('e') {
+        return format!("{}{suffix}", &word[..word.len() - 1]);
+    }
+    if lower.ends_with("ey") {
+        let head_end = word.len() - 2;
+        let before = lower.chars().rev().nth(2);
+        if before.is_some_and(|c| c.is_ascii_alphabetic() && !"aeiou".contains(c)) {
+            return format!("{}i{suffix}", &word[..head_end]);
+        }
+    }
+    if let Some(stem) = consonant_y_stem(word) {
+        return format!("{stem}i{suffix}");
+    }
+    if doubles_final(word) {
+        return doubled(word, suffix);
+    }
+    format!("{word}{suffix}")
 }
 
 /// The stem before a consonant-y ending, or None.
@@ -105,6 +171,137 @@ fn consonant_y_stem(word: &str) -> Option<&str> {
         return None;
     }
     Some(&word[..word.len() - 1])
+}
+
+/// One inflected form: its text plus rendered label text, from the
+/// en-headword inline-modifier grammar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpecForm {
+    text: String,
+    labels: Vec<String>,
+}
+
+impl SpecForm {
+    fn plain(text: String) -> Self {
+        Self { text, labels: Vec::new() }
+    }
+
+    /// The document rendering: an anchored form plus its label
+    /// parenthetical.
+    fn rendered(&self) -> String {
+        if self.labels.is_empty() {
+            format!("[{}]", self.text)
+        } else {
+            format!("[{}] ({})", self.text, self.labels.join(", "))
+        }
+    }
+}
+
+/// Render one label body: `l:`/`q:` class prefixes drop, `ref:`
+/// bodies drop whole, comma lists join with the `_` separator
+/// suppressor removed.
+fn label_text(body: &str) -> Option<String> {
+    let value = if let Some(rest) = body.split_once(':') {
+        if rest.0 == "ref" {
+            return None;
+        }
+        rest.1
+    } else {
+        body
+    };
+    let parts: Vec<&str> = value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty() && *part != "_")
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join(", ").replace("<<", "").replace(">>", ""))
+}
+
+/// Split a spec on top-level commas (inline `<...>` modifiers shield
+/// theirs), strip each form's modifiers into labels, and substitute
+/// `~` with the lemma. Empty pieces drop.
+fn spec_forms(spec: &str, title: &str) -> Vec<SpecForm> {
+    let mut pieces: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    for c in spec.chars() {
+        match c {
+            '<' => {
+                depth += 1;
+                current.push(c);
+            }
+            '>' => {
+                depth = depth.saturating_sub(1);
+                current.push(c);
+            }
+            ',' if depth == 0 => pieces.push(std::mem::take(&mut current)),
+            _ => current.push(c),
+        }
+    }
+    pieces.push(current);
+    pieces
+        .into_iter()
+        .map(|piece| piece.trim().to_string())
+        .filter(|piece| !piece.is_empty())
+        .map(|piece| {
+            let mut text = piece;
+            let mut labels = Vec::new();
+            while text.ends_with('>')
+                && let Some(open) = text.rfind('<')
+            {
+                let body = text[open + 1..text.len() - 1].to_string();
+                text.truncate(open);
+                if let Some(label) = label_text(&body) {
+                    labels.insert(0, label);
+                }
+            }
+            // A lone `~` is a marker (noun countability), never a
+            // substitution site; anywhere else `~` takes the lemma.
+            let text = if text == "~" { text } else { text.replace('~', title) };
+            SpecForm { text, labels }
+        })
+        .collect()
+}
+
+/// What a POS section's head template contributes: an optional
+/// headword display override and an optional inflection
+/// parenthetical.
+#[derive(Default)]
+pub(crate) struct HeadLine {
+    pub(crate) headword: Option<String>,
+    pub(crate) parenthetical: Option<String>,
+}
+
+/// Whether a template is an English headword-line template.
+fn is_head_family(name: &str) -> bool {
+    name == "head" || name.starts_with("en-")
+}
+
+/// A template's compact call signature for the audit: name, then
+/// positionals, then named args, pipe-joined and capped - the head
+/// families grow audit-driven, and that needs the arguments, not
+/// just the name.
+fn template_signature(template: &Template) -> String {
+    let mut out = template.name.clone();
+    for positional in &template.positional {
+        out.push('|');
+        out.push_str(positional);
+    }
+    for (key, value) in &template.named {
+        out.push('|');
+        out.push_str(key);
+        out.push('=');
+        out.push_str(value);
+    }
+    if out.chars().count() > 200 {
+        let mut capped: String = out.chars().take(200).collect();
+        capped.push_str("...");
+        return capped;
+    }
+    out
 }
 
 /// An anchor per the display/resource rule: bare when the display IS
@@ -418,33 +615,706 @@ impl<'a> Renderer<'a> {
         }
     }
 
-    /// The headword parenthetical a bare head template derives; args
-    /// beyond the language audit until their grammar is needed.
-    fn head_parenthetical(&mut self, template: &Template) -> Option<String> {
-        if template.positional.len() > 1 || !template.named.is_empty() {
-            self.audit("head_arguments_unhandled", template.name.clone());
+    /// The en-noun engine: positionals are plural specs (the special
+    /// values plus literals), countability markers ride the same
+    /// slots, and plurale tantum adds sg=/attr=.
+    fn noun_parenthetical(&mut self, template: &Template, proper: bool) -> Option<String> {
+        let title = self.page_title.to_string();
+        let named = |key: &str| -> Option<&str> {
+            template
+                .named
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+        let mut uncountable = false;
+        let mut both = false;
+        let mut plural_only = false;
+        let mut unattested = false;
+        let mut plurals: Vec<SpecForm> = Vec::new();
+        for raw in &template.positional {
+            for form in spec_forms(raw, &title) {
+                let labels = form.labels.clone();
+                match form.text.as_str() {
+                    "-" => uncountable = true,
+                    "~" => both = true,
+                    "p" => plural_only = true,
+                    "!" => unattested = true,
+                    "?" => return None,
+                    "+" | "^" => plurals.push(SpecForm {
+                        text: regular_plural(&title),
+                        labels,
+                    }),
+                    "++" => {
+                        let lower = title.to_lowercase();
+                        let text = if lower.ends_with('s') || lower.ends_with('z') {
+                            doubled(&title, "es")
+                        } else {
+                            regular_plural(&title)
+                        };
+                        plurals.push(SpecForm { text, labels });
+                    }
+                    "*" => plurals.push(SpecForm { text: title.clone(), labels }),
+                    "s" => plurals.push(SpecForm { text: format!("{title}s"), labels }),
+                    "es" => plurals.push(SpecForm { text: format!("{title}es"), labels }),
+                    "ies" => {
+                        let stem = title.strip_suffix('y').unwrap_or(&title);
+                        plurals.push(SpecForm { text: format!("{stem}ies"), labels });
+                    }
+                    _ => plurals.push(form),
+                }
+            }
+        }
+        let plural_piece = |plurals: &[SpecForm]| -> String {
+            let rendered: Vec<String> =
+                plurals.iter().map(SpecForm::rendered).collect();
+            format!("plural {}", rendered.join(" or "))
+        };
+        let mut pieces: Vec<String> = Vec::new();
+        if plural_only {
+            pieces.push(String::from("plural only"));
+            if let Some(sg) = named("sg") {
+                let rendered: Vec<String> =
+                    spec_forms(sg, &title).iter().map(SpecForm::rendered).collect();
+                pieces.push(format!("singular {}", rendered.join(" or ")));
+            }
+            if let Some(attr) = named("attr") {
+                let rendered: Vec<String> =
+                    spec_forms(attr, &title).iter().map(SpecForm::rendered).collect();
+                pieces.push(format!("attributive {}", rendered.join(" or ")));
+            }
+        } else if uncountable && plurals.is_empty() {
+            pieces.push(String::from("uncountable"));
+        } else if uncountable {
+            pieces.push(String::from("usually uncountable"));
+            pieces.push(plural_piece(&plurals));
+        } else if both {
+            if plurals.is_empty() {
+                plurals.push(SpecForm::plain(regular_plural(&title)));
+            }
+            pieces.push(String::from("countable and uncountable"));
+            pieces.push(plural_piece(&plurals));
+        } else if unattested {
+            pieces.push(String::from("plural not attested"));
+        } else if !plurals.is_empty() {
+            pieces.push(plural_piece(&plurals));
+        } else if !proper {
+            pieces.push(format!("plural [{}]", regular_plural(&title)));
+        }
+        if pieces.is_empty() {
             return None;
         }
-        let title = self.page_title;
-        match template.name.as_str() {
-            "en-noun" => {
-                Some(format!("(plural [{}])", regular_plural(title)))
+        Some(format!("({})", pieces.join(", ")))
+    }
+
+    /// Derive one en-verb slot's forms for a special indicator; the
+    /// multiword `*` variants conjugate the first word only.
+    fn verb_indicator_forms(
+        &self,
+        indicator: &str,
+        slot: usize,
+        labels: &[String],
+    ) -> Vec<SpecForm> {
+        let title = self.page_title.to_string();
+        let (word, suffix_rest) = if indicator.starts_with('*') {
+            match title.split_once(' ') {
+                Some((first, rest)) => (first.to_string(), format!(" {rest}")),
+                None => (title.clone(), String::new()),
             }
-            "en-verb" => Some(format!(
-                "(third-person singular simple present [{}], present participle [{}], simple past and past participle [{}])",
-                regular_plural(title),
-                regular_participle(title),
-                regular_past(title),
-            )),
-            "en-adj" => Some(format!(
-                "(comparative [more {title}], superlative [most {title}])"
-            )),
-            "en-prop" | "en-proper noun" | "en-proper-noun" => None,
-            other => {
-                self.audit("head_template_unhandled", other.to_string());
+        } else {
+            (title.clone(), String::new())
+        };
+        let base = match indicator {
+            "*" => "+",
+            "**" => "++",
+            "*l" => "+l",
+            "*!" => "+!",
+            "*'" => "+'",
+            other => other,
+        };
+        let with_labels = |text: String, extra: Option<&str>| -> SpecForm {
+            let mut labels = labels.to_vec();
+            if let Some(extra) = extra {
+                labels.push(String::from(extra));
+            }
+            SpecForm { text: format!("{text}{suffix_rest}"), labels }
+        };
+        match (base, slot) {
+            ("+" | "^", 0) => vec![with_labels(regular_plural(&word), None)],
+            ("+" | "^", 1) => vec![with_labels(regular_participle(&word), None)],
+            ("+" | "^", _) => vec![with_labels(regular_past(&word), None)],
+            ("++", 0) => vec![with_labels(regular_plural(&word), None)],
+            ("++", 1) => vec![with_labels(doubled(&word, "ing"), None)],
+            ("++", _) => vec![with_labels(doubled(&word, "ed"), None)],
+            ("+!", 0) => vec![with_labels(format!("{word}s"), None)],
+            ("+!", 1) => vec![with_labels(format!("{word}ing"), None)],
+            ("+!", _) => vec![with_labels(format!("{word}ed"), None)],
+            ("+'", 0) => vec![with_labels(format!("{word}'s"), None)],
+            ("+'", 1) => vec![with_labels(format!("{word}'ing"), None)],
+            ("+'", _) => vec![
+                with_labels(format!("{word}'d"), None),
+                with_labels(format!("{word}'ed"), None),
+            ],
+            ("+l", 0) => vec![with_labels(regular_plural(&word), None)],
+            ("+l", 1) => vec![
+                with_labels(format!("{word}ing"), Some("US")),
+                with_labels(doubled(&word, "ing"), Some("UK")),
+            ],
+            ("+l", _) => vec![
+                with_labels(format!("{word}ed"), Some("US")),
+                with_labels(doubled(&word, "ed"), Some("UK")),
+            ],
+            _ => Vec::new(),
+        }
+    }
+
+    /// The en-verb engine: four slots (pres3sg, presp, past, pastp),
+    /// slot-one special indicators becoming later defaults, and the
+    /// simple angle-bracket forms; the complex residue audits.
+    fn verb_parenthetical(&mut self, template: &Template) -> Option<String> {
+        const INDICATORS: [&str; 11] =
+            ["+", "^", "++", "+l", "+!", "+'", "*", "**", "*l", "*!", "*'"];
+        let title = self.page_title.to_string();
+        if template.positional.len() > 4 {
+            self.audit("head_arguments_unhandled", template_signature(template));
+            return None;
+        }
+        let first = template.positional.first().cloned().unwrap_or_default();
+        let angle = first.find('<').and_then(|open| {
+            let close = first[open + 1..].find('>').map(|c| open + 1 + c)?;
+            let body = &first[open + 1..close];
+            let is_modifier = ["l:", "ll:", "q:", "qq:", "ref:"]
+                .iter()
+                .any(|prefix| body.starts_with(prefix));
+            if is_modifier {
                 None
+            } else {
+                Some((open, close))
+            }
+        });
+        if let Some((open, close)) = angle {
+            let after = &first[close + 1..];
+            if first.contains("((") || after.contains('<') || template.positional.len() > 1 {
+                self.audit("head_arguments_unhandled", template_signature(template));
+                return None;
+            }
+            let before = &first[..open];
+            let (word, prefix, rest) = if before.trim().is_empty() {
+                match title.split_once(' ') {
+                    Some((w, r)) => (w.to_string(), String::new(), format!(" {r}")),
+                    None => (title.clone(), String::new(), String::new()),
+                }
+            } else {
+                let word_start = before.rfind(' ').map(|i| i + 1).unwrap_or(0);
+                (
+                    before[word_start..].to_string(),
+                    before[..word_start].to_string(),
+                    after.to_string(),
+                )
+            };
+            let body = &first[open + 1..close];
+            let slot_specs: Vec<&str> = body.split(',').collect();
+            if slot_specs.len() > 4 {
+                self.audit("head_arguments_unhandled", template_signature(template));
+                return None;
+            }
+            let mut participle_defective = false;
+            let mut slots: Vec<Vec<SpecForm>> = Vec::new();
+            for slot in 0..4 {
+                let spec = slot_specs.get(slot).copied().unwrap_or("");
+                if spec.trim() == "-" {
+                    if slot == 3 {
+                        participle_defective = true;
+                    }
+                    slots.push(Vec::new());
+                    continue;
+                }
+                let mut forms: Vec<SpecForm> = Vec::new();
+                for alternative in spec.split(':') {
+                    let mut text = alternative.trim().to_string();
+                    let mut labels: Vec<String> = Vec::new();
+                    while text.ends_with(']')
+                        && let Some(bracket) = text.rfind('[')
+                    {
+                        let body = text[bracket + 1..text.len() - 1].to_string();
+                        text.truncate(bracket);
+                        if let Some(label) = label_text(&body) {
+                            labels.push(label);
+                        }
+                    }
+                    let derived = if text.is_empty() || text == "+" || text == "^" {
+                        match slot {
+                            0 => regular_plural(&word),
+                            1 => regular_participle(&word),
+                            _ => regular_past(&word),
+                        }
+                    } else if text == "~" {
+                        word.clone()
+                    } else {
+                        text
+                    };
+                    forms.push(SpecForm {
+                        text: format!("{prefix}{derived}{rest}"),
+                        labels,
+                    });
+                }
+                slots.push(forms);
+            }
+            if slot_specs.len() < 4 {
+                slots[3] = Vec::new();
+            }
+            return Some(self.verb_pieces(slots, participle_defective));
+        }
+        let mut participle_defective = false;
+        let mut slots: Vec<Vec<SpecForm>> = Vec::new();
+        let mut slot_one_indicators: Vec<(String, Vec<String>)> = Vec::new();
+        for slot in 0..4 {
+            let raw = template.positional.get(slot).cloned().unwrap_or_default();
+            let mut forms: Vec<SpecForm> = Vec::new();
+            let mut defective = false;
+            let parsed = spec_forms(&raw, &title);
+            let effective = if parsed.is_empty() && slot < 3 {
+                vec![SpecForm::plain(String::from("+"))]
+            } else {
+                parsed
+            };
+            for form in effective {
+                let text = form.text.as_str();
+                if text == "-" {
+                    defective = true;
+                    continue;
+                }
+                if slot == 0 && INDICATORS.contains(&text) {
+                    slot_one_indicators.push((text.to_string(), form.labels.clone()));
+                    forms.extend(self.verb_indicator_forms(text, 0, &form.labels));
+                    continue;
+                }
+                if text == "+" {
+                    if slot_one_indicators.is_empty() {
+                        forms.extend(self.verb_indicator_forms("+", slot, &form.labels));
+                    } else {
+                        for (indicator, labels) in slot_one_indicators.clone() {
+                            let mut labels = labels;
+                            labels.extend(form.labels.clone());
+                            forms.extend(
+                                self.verb_indicator_forms(&indicator, slot, &labels),
+                            );
+                        }
+                    }
+                    continue;
+                }
+                if text == "^" || (slot > 0 && INDICATORS.contains(&text)) {
+                    forms.extend(self.verb_indicator_forms(text, slot, &form.labels));
+                    continue;
+                }
+                if slot == 3 && text == "n" {
+                    forms.push(SpecForm {
+                        text: format!("{title}n"),
+                        labels: form.labels.clone(),
+                    });
+                    continue;
+                }
+                if text == "~" {
+                    forms.push(SpecForm {
+                        text: title.clone(),
+                        labels: form.labels.clone(),
+                    });
+                    continue;
+                }
+                forms.push(form);
+            }
+            if defective && forms.is_empty() {
+                if slot == 3 {
+                    participle_defective = true;
+                }
+                slots.push(Vec::new());
+            } else {
+                slots.push(forms);
             }
         }
+        Some(self.verb_pieces(slots, participle_defective))
+    }
+
+    /// Render the four verb slots to the parenthetical; an absent or
+    /// past-equal participle folds into the combined piece, and an
+    /// explicitly defective one leaves the past standing alone.
+    fn verb_pieces(&self, slots: Vec<Vec<SpecForm>>, participle_defective: bool) -> String {
+        let join = |forms: &[SpecForm]| -> String {
+            forms
+                .iter()
+                .map(SpecForm::rendered)
+                .collect::<Vec<String>>()
+                .join(" or ")
+        };
+        let mut pieces: Vec<String> = Vec::new();
+        if !slots[0].is_empty() {
+            pieces.push(format!(
+                "third-person singular simple present {}",
+                join(&slots[0])
+            ));
+        }
+        if !slots[1].is_empty() {
+            pieces.push(format!("present participle {}", join(&slots[1])));
+        }
+        let past_texts: Vec<&str> =
+            slots[2].iter().map(|form| form.text.as_str()).collect();
+        let participle_texts: Vec<&str> =
+            slots[3].iter().map(|form| form.text.as_str()).collect();
+        if !slots[2].is_empty() {
+            if participle_defective {
+                pieces.push(format!("simple past {}", join(&slots[2])));
+            } else if participle_texts.is_empty() || participle_texts == past_texts {
+                pieces.push(format!(
+                    "simple past and past participle {}",
+                    join(&slots[2])
+                ));
+            } else {
+                pieces.push(format!("simple past {}", join(&slots[2])));
+                pieces.push(format!("past participle {}", join(&slots[3])));
+            }
+        } else if !slots[3].is_empty() {
+            pieces.push(format!("past participle {}", join(&slots[3])));
+        }
+        format!("({})", pieces.join(", "))
+    }
+
+    /// Graded (-er/-est) words of a multiword term per the +first
+    /// family of selectors; words split on spaces and hyphens.
+    fn graded_words(&self, selector: &str, suffix: &str) -> String {
+        let title = self.page_title;
+        let mut words: Vec<String> = Vec::new();
+        let mut separators: Vec<char> = Vec::new();
+        let mut current = String::new();
+        for c in title.chars() {
+            if c == ' ' || c == '-' {
+                words.push(std::mem::take(&mut current));
+                separators.push(c);
+            } else {
+                current.push(c);
+            }
+        }
+        words.push(current);
+        let last = words.len() - 1;
+        for (index, word) in words.iter_mut().enumerate() {
+            let selected = match selector {
+                "+first" => index == 0,
+                "+second" => index == 1,
+                "+first-second" => index <= 1,
+                "+first-last" => index == 0 || index == last,
+                "+each" => true,
+                _ => false,
+            };
+            if selected && !word.is_empty() {
+                *word = graded_form(word, suffix);
+            }
+        }
+        let mut out = String::new();
+        for (index, word) in words.iter().enumerate() {
+            out.push_str(word);
+            if let Some(&separator) = separators.get(index) {
+                out.push(separator);
+            }
+        }
+        out
+    }
+
+    /// The en-adj/en-adv engine: comparative specs in the
+    /// positionals, superlatives derived or given via sup=.
+    fn graded_parenthetical(&mut self, template: &Template) -> Option<String> {
+        let title = self.page_title.to_string();
+        let named = |key: &str| -> Option<&str> {
+            template
+                .named
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+        let mut not_comparable = false;
+        let mut comparatives: Vec<SpecForm> = Vec::new();
+        let mut default_sups: Vec<SpecForm> = Vec::new();
+        let selectors = ["+first", "+second", "+first-second", "+first-last", "+each"];
+        for raw in &template.positional {
+            for form in spec_forms(raw, &title) {
+                let labels = form.labels.clone();
+                match form.text.as_str() {
+                    "-" => not_comparable = true,
+                    "?" => return None,
+                    "more" | "+" => {
+                        comparatives.push(SpecForm {
+                            text: format!("more {title}"),
+                            labels: labels.clone(),
+                        });
+                        default_sups.push(SpecForm {
+                            text: format!("most {title}"),
+                            labels,
+                        });
+                    }
+                    "further" => {
+                        for (comparative, superlative) in
+                            [("further", "furthest"), ("farther", "farthest")]
+                        {
+                            comparatives.push(SpecForm {
+                                text: format!("{comparative} {title}"),
+                                labels: labels.clone(),
+                            });
+                            default_sups.push(SpecForm {
+                                text: format!("{superlative} {title}"),
+                                labels: labels.clone(),
+                            });
+                        }
+                    }
+                    "better" => {
+                        comparatives.push(SpecForm {
+                            text: format!("better {title}"),
+                            labels: labels.clone(),
+                        });
+                        default_sups.push(SpecForm {
+                            text: format!("best {title}"),
+                            labels,
+                        });
+                    }
+                    "er" => {
+                        comparatives.push(SpecForm {
+                            text: graded_form(&title, "er"),
+                            labels: labels.clone(),
+                        });
+                        default_sups.push(SpecForm {
+                            text: graded_form(&title, "est"),
+                            labels,
+                        });
+                    }
+                    selector if selectors.contains(&selector) => {
+                        comparatives.push(SpecForm {
+                            text: self.graded_words(selector, "er"),
+                            labels: labels.clone(),
+                        });
+                        default_sups.push(SpecForm {
+                            text: self.graded_words(selector, "est"),
+                            labels,
+                        });
+                    }
+                    "~" => {
+                        comparatives.push(SpecForm { text: title.clone(), labels });
+                    }
+                    _ => {
+                        if let Some(stem) = form.text.strip_suffix("er") {
+                            default_sups.push(SpecForm {
+                                text: format!("{stem}est"),
+                                labels: labels.clone(),
+                            });
+                        }
+                        comparatives.push(form);
+                    }
+                }
+            }
+        }
+        if comparatives.is_empty() && !not_comparable && named("sup").is_none() {
+            comparatives.push(SpecForm::plain(format!("more {title}")));
+            default_sups.push(SpecForm::plain(format!("most {title}")));
+        }
+        let mut superlatives: Vec<SpecForm> = Vec::new();
+        match named("sup") {
+            None => superlatives = default_sups,
+            Some(sup) => {
+                for form in spec_forms(sup, &title) {
+                    let labels = form.labels.clone();
+                    match form.text.as_str() {
+                        "+" => superlatives.extend(default_sups.clone()),
+                        "most" => superlatives.push(SpecForm {
+                            text: format!("most {title}"),
+                            labels,
+                        }),
+                        "furthest" => {
+                            for superlative in ["furthest", "farthest"] {
+                                superlatives.push(SpecForm {
+                                    text: format!("{superlative} {title}"),
+                                    labels: labels.clone(),
+                                });
+                            }
+                        }
+                        "best" => superlatives.push(SpecForm {
+                            text: format!("best {title}"),
+                            labels,
+                        }),
+                        "er" | "est" => superlatives.push(SpecForm {
+                            text: graded_form(&title, "est"),
+                            labels,
+                        }),
+                        selector if selectors.contains(&selector) => {
+                            superlatives.push(SpecForm {
+                                text: self.graded_words(selector, "est"),
+                                labels,
+                            });
+                        }
+                        _ => superlatives.push(form),
+                    }
+                }
+            }
+        }
+        let join = |forms: &[SpecForm]| -> String {
+            forms
+                .iter()
+                .map(SpecForm::rendered)
+                .collect::<Vec<String>>()
+                .join(" or ")
+        };
+        let mut pieces: Vec<String> = Vec::new();
+        if named("componly").is_some() {
+            pieces.push(String::from("comparative form only"));
+        }
+        if named("suponly").is_some() {
+            pieces.push(String::from("superlative form only"));
+        }
+        if not_comparable && comparatives.is_empty() {
+            pieces.push(String::from("not comparable"));
+        } else if not_comparable {
+            pieces.push(String::from("not generally comparable"));
+        }
+        if !comparatives.is_empty() {
+            pieces.push(format!("comparative {}", join(&comparatives)));
+        }
+        if !superlatives.is_empty() && (!not_comparable || !comparatives.is_empty() || named("sup").is_some()) {
+            pieces.push(format!("superlative {}", join(&superlatives)));
+        }
+        if pieces.is_empty() {
+            return None;
+        }
+        Some(format!("({})", pieces.join(", ")))
+    }
+
+    /// The generic head template's pairwise inflections: (name, form)
+    /// pairs after the language and part of speech, `or` continuing
+    /// the previous name, a formless name riding as a note.
+    fn head_pairs_parenthetical(&mut self, template: &Template) -> Option<String> {
+        let rest = template.positional.get(2..).unwrap_or(&[]);
+        let mut pieces: Vec<(String, Vec<String>)> = Vec::new();
+        let mut index = 0usize;
+        while index < rest.len() {
+            let name = rest[index].trim().to_string();
+            let form = rest.get(index + 1).map(|value| value.trim());
+            if name == "or" {
+                if let Some(form) = form
+                    && !form.is_empty()
+                    && let Some(last) = pieces.last_mut()
+                {
+                    let anchored = self.anchored_argument(form);
+                    last.1.push(anchored);
+                }
+            } else if !name.is_empty() {
+                let forms = match form {
+                    Some(form) if !form.is_empty() => {
+                        vec![self.anchored_argument(form)]
+                    }
+                    _ => Vec::new(),
+                };
+                pieces.push((name, forms));
+            }
+            index += 2;
+        }
+        if pieces.is_empty() {
+            return None;
+        }
+        let rendered: Vec<String> = pieces
+            .into_iter()
+            .map(|(name, forms)| {
+                if forms.is_empty() {
+                    name
+                } else {
+                    format!("{name} {}", forms.join(" or "))
+                }
+            })
+            .collect();
+        Some(format!("({})", rendered.join(", ")))
+    }
+
+    /// A POS section's head template, dispatched by family. The
+    /// families grow audit-driven: arguments outside a family's
+    /// grammar audit with the full signature and contribute nothing.
+    fn head_line(&mut self, template: &Template) -> HeadLine {
+        const IGNORED_NAMED: [&str; 26] = [
+            "id", "sort", "pagename", "sc", "sccat", "g", "g2", "g3", "tr", "ts",
+            "autotrinfl", "nolink", "nolinkhead", "splithyph", "nosplithyph",
+            "hyphspace", "nosuffix", "nomultiwordcat", "nopalindromecat",
+            "noposcat", "nogendercat", "cat2", "cat3", "cat4", "angle_bracket",
+            "plqual",
+        ];
+        const FAMILY_NAMED: [&str; 10] = [
+            "head", "head2", "head3", "def", "the", "abbr", "sg", "attr", "sup",
+            "componly",
+        ];
+        let title = self.page_title.to_string();
+        for (key, _) in &template.named {
+            let key = key.as_str();
+            let form_meta = key.starts_with('f')
+                && key.chars().nth(1).is_some_and(|c| c.is_ascii_digit());
+            if !IGNORED_NAMED.contains(&key)
+                && !FAMILY_NAMED.contains(&key)
+                && key != "suponly"
+                && !form_meta
+            {
+                self.audit("head_arguments_unhandled", template_signature(template));
+                return HeadLine::default();
+            }
+        }
+        let named = |key: &str| -> Option<&str> {
+            template
+                .named
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+        let mut headword = named("head")
+            .map(|raw| self.argument_text(&raw.replace("\\,", ",")))
+            .filter(|text| !text.is_empty());
+        match named("def").or(named("the")) {
+            Some("1") => {
+                let base = headword.unwrap_or_else(|| title.clone());
+                headword = Some(format!("the {base}"));
+            }
+            Some("~") => {
+                let base = headword.unwrap_or_else(|| title.clone());
+                headword = Some(format!("(the) {base}"));
+            }
+            _ => {}
+        }
+        let parenthetical = match template.name.as_str() {
+            "en-noun" => self.noun_parenthetical(template, false),
+            "en-prop" | "en-proper noun" | "en-proper-noun" | "en-propn" => {
+                self.noun_parenthetical(template, true)
+            }
+            "en-verb" => self.verb_parenthetical(template),
+            "en-adj" | "en-adjective" | "en-adv" | "en-adverb" => {
+                self.graded_parenthetical(template)
+            }
+            "head" => self.head_pairs_parenthetical(template),
+            _ => {
+                // Any other en-* head: the bare and head=-only forms
+                // carry no inflections; positionals are the residue.
+                if template.positional.is_empty() {
+                    None
+                } else {
+                    self.audit("head_template_unhandled", template_signature(template));
+                    None
+                }
+            }
+        };
+        let parenthetical = match (parenthetical, named("abbr")) {
+            (parenthetical, None) => parenthetical,
+            (parenthetical, Some(abbr)) => {
+                let rendered: Vec<String> = spec_forms(abbr, &title)
+                    .iter()
+                    .map(SpecForm::rendered)
+                    .collect();
+                let piece = format!("abbreviation {}", rendered.join(" or "));
+                Some(match parenthetical {
+                    Some(inner) => {
+                        format!("({}, {piece})", &inner[1..inner.len() - 1])
+                    }
+                    None => format!("({piece})"),
+                })
+            }
+        };
+        HeadLine { headword, parenthetical }
     }
 }
 
@@ -695,23 +1565,33 @@ fn render_list_section(
 fn render_pos(renderer: &mut Renderer<'_>, section: &Section<'_>, level: usize) {
     renderer.heading(level, &section.name);
     renderer.blank();
-    renderer.lines.push(format!("{} {}", "#".repeat(level + 1), renderer.page_title));
-    let mut parenthetical: Option<String> = None;
+    let mut head_line = HeadLine::default();
     let mut head_seen = false;
     for block in &section.blocks {
         if let Block::Paragraph { content } = block {
             for inline in content {
                 let Inline::Template(template) = inline else { continue };
-                if !head_seen {
+                let name = template.name.as_str();
+                if !head_seen && is_head_family(name) {
                     head_seen = true;
-                    parenthetical = renderer.head_parenthetical(template);
+                    head_line = renderer.head_line(template);
+                } else if matches!(name, "wp" | "swp" | "wikipedia" | "slim-wp") {
+                    // The word-to-article signal, kept in the audit
+                    // for the spidering service.
+                    renderer.audit("wikipedia_pointer", template_signature(template));
                 } else {
                     renderer.audit("template_unhandled", template.name.clone());
                 }
             }
         }
     }
-    if let Some(parenthetical) = parenthetical {
+    let headword = head_line
+        .headword
+        .unwrap_or_else(|| renderer.page_title.to_string());
+    renderer
+        .lines
+        .push(format!("{} {headword}", "#".repeat(level + 1)));
+    if let Some(parenthetical) = head_line.parenthetical {
         renderer.lines.push(parenthetical);
         renderer.lines.push(String::new());
     }

@@ -38,11 +38,13 @@ pub(crate) use sourcetrait_lib_quest_llm_two as llm;
 
 pub(crate) use crate::assembler::{
     assemble_text,
+    assembler_table,
     disassemble_wire,
 };
 pub(crate) use crate::associations::associations_build;
 pub(crate) use crate::cli::{
     AssembleArgs,
+    AssemblerArgs,
     AssociationsBuildArgs,
     AssociationsCommand,
     Cli,
