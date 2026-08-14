@@ -352,6 +352,82 @@ fn key_base(key: &str) -> &str {
     if trimmed.is_empty() { key } else { trimmed }
 }
 
+/// A named list parameter's values: the base key plus its numbered
+/// variants, in numeric order (meaning, meaning2, ...).
+fn named_family(template: &Template, base: &str) -> Vec<String> {
+    let mut rows: Vec<(usize, String)> = Vec::new();
+    for (key, value) in &template.named {
+        if key_base(key) == base && !value.trim().is_empty() {
+            let number = key[base.len()..].parse::<usize>().unwrap_or(1);
+            rows.push((number, value.clone()));
+        }
+    }
+    rows.sort_by_key(|(number, _)| *number);
+    rows.into_iter().map(|(_, value)| value).collect()
+}
+
+/// Split a value on commas outside `<...>` modifier blocks (the
+/// inline-modifier convention shared by the name and form-of
+/// families).
+fn split_modifier_commas(value: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    for c in value.chars() {
+        match c {
+            '<' => {
+                depth += 1;
+                current.push(c);
+            }
+            '>' => {
+                depth = depth.saturating_sub(1);
+                current.push(c);
+            }
+            ',' if depth == 0 => parts.push(std::mem::take(&mut current)),
+            _ => current.push(c),
+        }
+    }
+    if !current.trim().is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
+/// Join resolved tag displays with the documented punctuation
+/// spacing: a closer attaches left, an opener attaches right, a
+/// slash or hyphen attaches both sides.
+fn join_tags(tokens: &[String]) -> String {
+    let mut out = String::new();
+    let mut suppress_space = true;
+    for token in tokens {
+        match token.as_str() {
+            "," | ")" | "]" | ":" => {
+                out.push_str(token);
+                suppress_space = false;
+            }
+            "(" | "[" => {
+                if !suppress_space {
+                    out.push(' ');
+                }
+                out.push_str(token);
+                suppress_space = true;
+            }
+            "/" | "-" => {
+                out.push_str(token);
+                suppress_space = true;
+            }
+            _ => {
+                if !suppress_space {
+                    out.push(' ');
+                }
+                out.push_str(token);
+                suppress_space = false;
+            }
+        }
+    }
+    out
+}
+
 /// Fold numeric named arguments into their positional slots - the
 /// MediaWiki |1=x| equivalence - so the engines see one shape.
 fn normalize_numbered(template: &Template) -> Template {
@@ -444,13 +520,18 @@ fn form_of_name(name: &str) -> Option<String> {
     None
 }
 
-/// The first letter capitalized, the form-of display convention.
-fn capitalize_first(text: &str) -> String {
-    let mut chars = text.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
+/// Templates that carry no document meaning anywhere they appear:
+/// categorization, sense ids, maintenance requests, and data-only
+/// carriers. They render nothing and file no audit row.
+const SILENT_TEMPLATES: [&str; 22] = [
+    "C", "c", "topics", "cln", "catlangname", "senseid", "sid", "defdate",
+    "rfe", "rfd", "rfv", "rfdef", "rfex", "rfquote", "attention", "anchor",
+    "etystub", "dercat", "etymid", "root", "wikidata lexeme", "rfc",
+];
+
+/// Whether a template renders to nothing by design (no audit).
+fn is_silent_template(name: &str) -> bool {
+    SILENT_TEMPLATES.contains(&name)
 }
 
 /// Anchored text flattened to plain display: `[d](t)` and `[x]`
@@ -546,13 +627,27 @@ impl<'a> Renderer<'a> {
                         out.push_str(&anchor(display, rest));
                         continue;
                     }
+                    // A same-page section link carries no
+                    // cross-reference: its display text stands alone.
+                    if let Some(section) = target.strip_prefix('#') {
+                        let display = link.display.as_deref().unwrap_or(section);
+                        out.push_str(&normalize_typography(display));
+                        out.push_str(&link.trail);
+                        continue;
+                    }
                     if target.contains(':') {
                         self.audit("link_dropped", target.to_string());
                         continue;
                     }
-                    let base = link.display.as_deref().unwrap_or(target);
+                    // A section suffix addresses within the page; the
+                    // page name is the resource.
+                    let page = match target.split_once('#') {
+                        Some((page, _)) if !page.is_empty() => page,
+                        _ => target,
+                    };
+                    let base = link.display.as_deref().unwrap_or(page);
                     let display = format!("{base}{}", link.trail);
-                    out.push_str(&anchor(&display, target));
+                    out.push_str(&anchor(&display, page));
                 }
                 Inline::ExternalLink { url, .. } => {
                     self.audit("external_link_dropped", url.clone());
@@ -645,7 +740,7 @@ impl<'a> Renderer<'a> {
                 let display = positional.get(1).copied().unwrap_or(target);
                 anchor(display, target)
             }
-            "l" | "m" | "m+" | "ll" => {
+            "l" | "m" | "ll" => {
                 let word = positional.get(1).copied().unwrap_or_default();
                 let display = positional
                     .get(2)
@@ -722,8 +817,203 @@ impl<'a> Renderer<'a> {
             }
             // Pure metadata: categories, sense ids, dates, and
             // maintenance stubs carry no document meaning.
-            "C" | "c" | "cln" | "senseid" | "defdate" | "rfe" | "rfd" | "rfv"
-            | "attention" | "anchor" => String::new(),
+            name if is_silent_template(name) => String::new(),
+            // The etymology reference family: language name plus
+            // anchored term, complete-wording variants prefixed.
+            "der" | "derived" | "uder" | "undefined derivation" => {
+                self.ety_reference(template, 1, "")
+            }
+            "bor" | "borrowed" | "inh" | "inherited" => self.ety_reference(template, 1, ""),
+            "der+" => self.ety_reference(template, 1, "Derived from "),
+            "bor+" => self.ety_reference(template, 1, "Borrowed from "),
+            "inh+" => self.ety_reference(template, 1, "Inherited from "),
+            "lbor" | "learned borrowing" => {
+                self.ety_reference(template, 1, "Learned borrowing from ")
+            }
+            "ubor" | "unadapted borrowing" => {
+                self.ety_reference(template, 1, "Unadapted borrowing from ")
+            }
+            "slbor" | "semi-learned borrowing" => {
+                self.ety_reference(template, 1, "Semi-learned borrowing from ")
+            }
+            "obor" | "orthographic borrowing" => {
+                self.ety_reference(template, 1, "Orthographic borrowing from ")
+            }
+            "semantic loan" => self.ety_reference(template, 1, "Semantic loan from "),
+            "calque" | "cal" | "clq" => self.ety_reference(template, 1, "Calque of "),
+            "partial calque" | "pcal" => {
+                self.ety_reference(template, 1, "Partial calque of ")
+            }
+            "cog" | "cognate" | "noncog" | "noncognate" | "ncog" | "m+" => {
+                self.ety_reference(template, 0, "")
+            }
+            "doublet" | "dbt" => self.doublet_text(template, "Doublet of "),
+            "piecewise doublet" | "pw dbt" | "pwdbt" | "pwd" => {
+                self.doublet_text(template, "Piecewise doublet of ")
+            }
+            "unk" | "unknown" => self.origin_statement(template, "Unknown"),
+            "unc" | "uncertain" => self.origin_statement(template, "Uncertain"),
+            "back-form" | "back-formation" | "bf" => {
+                let flag = |key: &str| {
+                    template.named.iter().any(|(name, _)| name == key)
+                };
+                let term_text = match template.positional.get(1) {
+                    Some(term) if !term.is_empty() && term != "-" => {
+                        let term = term.clone();
+                        let alt = template.positional.get(2).cloned().unwrap_or_default();
+                        self.ety_term_anchor(&term, &alt)
+                    }
+                    _ => String::new(),
+                };
+                if flag("notext") {
+                    return term_text;
+                }
+                let text = if term_text.is_empty() {
+                    String::from("Back-formation")
+                } else {
+                    format!("Back-formation from {term_text}")
+                };
+                if flag("nocap") { lcfirst(&text) } else { text }
+            }
+            "surf" | "surface analysis" | "surface etymology" => {
+                if template
+                    .positional
+                    .get(1)
+                    .is_some_and(|part| part.starts_with('+'))
+                {
+                    self.audit("template_unhandled", template_signature(template));
+                    return String::new();
+                }
+                let parts: Vec<String> = template
+                    .positional
+                    .iter()
+                    .skip(1)
+                    .filter(|part| !part.trim().is_empty())
+                    .map(|part| term_modifiers(part).0)
+                    .collect();
+                let joined: Vec<String> = parts
+                    .iter()
+                    .map(|part| self.anchored_argument(part))
+                    .collect();
+                let named = |key: &str| {
+                    template.named.iter().any(|(name, _)| name == key)
+                };
+                let text = format!("By surface analysis, {}", joined.join(" + "));
+                if named("nocap") { lcfirst(&text) } else { text }
+            }
+            "etymon" | "ety" => self.etymon_text(template),
+            "inflection of" | "infl of" | "noun form of" | "verb form of"
+            | "adj form of" => self.inflection_of_text(template),
+            "surname" => self.surname_text(template),
+            "given name" => self.given_name_text(template),
+            "place" => self.place_text(template),
+            "sense" | "s" => {
+                let parts: Vec<String> = positional
+                    .iter()
+                    .filter(|part| !part.is_empty())
+                    .map(|part| self.argument_text(part))
+                    .collect();
+                if parts.is_empty() {
+                    String::new()
+                } else {
+                    format!("({}):", parts.join(", "))
+                }
+            }
+            "taxfmt" => {
+                let taxon = positional.first().copied().unwrap_or_default();
+                let display = positional
+                    .get(2)
+                    .filter(|part| !part.is_empty())
+                    .copied()
+                    .unwrap_or(taxon);
+                if taxon.is_empty() {
+                    String::new()
+                } else {
+                    anchor(display, taxon)
+                }
+            }
+            "taxlink" => {
+                let taxon = positional.first().copied().unwrap_or_default();
+                let display = positional
+                    .get(2)
+                    .filter(|part| !part.is_empty())
+                    .copied()
+                    .unwrap_or(taxon);
+                normalize_typography(display)
+            }
+            "vern" => {
+                let name = positional.first().copied().unwrap_or_default();
+                let display = positional
+                    .get(1)
+                    .filter(|part| !part.is_empty())
+                    .copied()
+                    .unwrap_or(name);
+                let plural = named("pl").unwrap_or_default();
+                if name.is_empty() {
+                    String::new()
+                } else {
+                    anchor(&format!("{display}{plural}"), name)
+                }
+            }
+            "glossary" | "lg" => {
+                let term = positional.first().copied().unwrap_or_default();
+                let display = positional
+                    .get(1)
+                    .filter(|part| !part.is_empty())
+                    .copied()
+                    .unwrap_or(term);
+                self.argument_text(display)
+            }
+            "cap" | "U" => {
+                let term = positional.first().copied().unwrap_or_default();
+                if term.is_empty() {
+                    String::new()
+                } else {
+                    anchor(&ucfirst(term), term)
+                }
+            }
+            "..." | "nb..." => String::from("..."),
+            "," => {
+                if positional.first() == Some(&"and") {
+                    String::from(", and")
+                } else {
+                    String::from(",")
+                }
+            }
+            "'" => String::from("'"),
+            "sic" | "SIC" => String::from("(sic)"),
+            "smallcaps" | "smc" | "sup" | "sub" => {
+                let text = positional.first().copied().unwrap_or_default();
+                self.argument_text(text)
+            }
+            "IPAchar" => {
+                let parts: Vec<String> = positional
+                    .iter()
+                    .filter(|part| !part.is_empty())
+                    .map(|part| normalize_typography(part))
+                    .collect();
+                parts.join(", ")
+            }
+            "lang" => {
+                let text = positional.get(1).copied().unwrap_or_default();
+                self.argument_text(text)
+            }
+            "non-gloss" | "non-gloss definition" | "n-g" | "ng" | "ngd" => {
+                let text = positional.first().copied().unwrap_or_default();
+                self.argument_text(text)
+            }
+            "ux" | "uxi" | "usex" => {
+                let text = positional.get(1).copied().unwrap_or_default();
+                let rendered = self.argument_text(text);
+                if rendered.is_empty() {
+                    String::new()
+                } else {
+                    format!("\"{rendered}\"")
+                }
+            }
+            name if name.starts_with("quote-") => {
+                self.citation_text(template).unwrap_or_default()
+            }
             "form of" => {
                 let label = positional.get(1).copied().unwrap_or_default();
                 let target = positional.get(2).copied().unwrap_or_default();
@@ -732,7 +1022,8 @@ impl<'a> Renderer<'a> {
                     .filter(|d| !d.is_empty())
                     .copied()
                     .unwrap_or(target);
-                format!("{} of {}", capitalize_first(label), anchor(display, target))
+                let anchored = self.form_of_anchor(target, display);
+                format!("{} of {}", ucfirst(label), anchored)
             }
             name if form_of_name(name).is_some() => {
                 let label = form_of_name(name).expect("checked above");
@@ -742,9 +1033,10 @@ impl<'a> Renderer<'a> {
                     .filter(|d| !d.is_empty())
                     .copied()
                     .unwrap_or(target);
-                let mut text = format!("{label} {}", anchor(display, target));
+                let anchored = self.form_of_anchor(target, display);
+                let mut text = format!("{label} {anchored}");
                 if named("nocap").is_none() {
-                    text = capitalize_first(&text);
+                    text = ucfirst(&text);
                 }
                 if let Some(gloss) = named("t") {
                     let gloss = self.argument_text(gloss);
@@ -761,6 +1053,19 @@ impl<'a> Renderer<'a> {
         }
     }
 
+    /// A form-of target's anchor: embedded markup renders as it is,
+    /// a w: target strips to its page name, a plain pair anchors.
+    fn form_of_anchor(&mut self, target: &str, display: &str) -> String {
+        if target.contains("[[") || target.contains("{{") {
+            return self.argument_text(target);
+        }
+        if let Some(rest) = target.strip_prefix("w:") {
+            let display = display.strip_prefix("w:").unwrap_or(display);
+            return anchor(display, rest);
+        }
+        anchor(display, target)
+    }
+
     /// Anchored parts joined with " + ", the etymology convention.
     fn plus_joined(&mut self, parts: &[&str]) -> String {
         let anchored: Vec<String> = parts
@@ -769,6 +1074,1336 @@ impl<'a> Renderer<'a> {
             .map(|part| self.anchored_argument(part))
             .collect();
         anchored.join(" + ")
+    }
+
+    /// The comma-listed source languages of an etymology reference,
+    /// resolved through the vendored code map; an unknown code
+    /// renders verbatim and audits - the growth signal.
+    fn ety_language_names(&mut self, codes: &str, conjunction: &str) -> String {
+        let names: Vec<String> = codes
+            .split(',')
+            .map(str::trim)
+            .filter(|code| !code.is_empty())
+            .map(|code| match language_table().name(code) {
+                Some(name) => name.to_string(),
+                None => {
+                    self.audit("language_code_unknown", code.to_string());
+                    code.to_string()
+                }
+            })
+            .collect();
+        serial_join(&names, conjunction)
+    }
+
+    /// An anchored term reference: embedded wikilinks render as they
+    /// are; an alt displays against the term as target; inline
+    /// modifiers strip first.
+    fn ety_term_anchor(&mut self, term: &str, alt: &str) -> String {
+        let (base, _) = term_modifiers(term);
+        if base.contains("[[") {
+            return self.argument_text(&base);
+        }
+        let (alt_base, _) = term_modifiers(alt);
+        if alt_base.is_empty() {
+            anchor(&base, &base)
+        } else if alt_base.contains("[[") {
+            self.argument_text(&alt_base)
+        } else {
+            anchor(&alt_base, &base)
+        }
+    }
+
+    /// A rendered gloss parenthetical: ` ("gloss")`, or nothing.
+    fn gloss_text(&mut self, gloss: &str) -> String {
+        let rendered = self.argument_text(gloss);
+        if rendered.is_empty() {
+            String::new()
+        } else {
+            format!(" (\"{rendered}\")")
+        }
+    }
+
+    /// Wording applied around an etymology body: the prefix drops
+    /// under notext= and the whole lowercases under nocap=.
+    fn ety_wording(body: String, prefix: &str, notext: bool, nocap: bool) -> String {
+        let text = if notext || prefix.is_empty() {
+            body
+        } else {
+            format!("{prefix}{body}")
+        };
+        if nocap { lcfirst(&text) } else { text }
+    }
+
+    /// The der/bor/inh/cog family: "<Language> [term] ("gloss")",
+    /// with the complete-wording variants carrying a prefix.
+    /// langs_slot is 1 for the derivation family (slot 0 is the
+    /// entry language) and 0 for cog and m+.
+    fn ety_reference(
+        &mut self,
+        template: &Template,
+        langs_slot: usize,
+        prefix: &str,
+    ) -> String {
+        let template = normalize_numbered(template);
+        let named = |key: &str| -> Option<&str> {
+            template
+                .named
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+        let positional: Vec<&str> =
+            template.positional.iter().map(String::as_str).collect();
+        let langs = positional.get(langs_slot).copied().unwrap_or_default();
+        let conjunction = named("conj").unwrap_or("and").to_string();
+        let mut out = self.ety_language_names(langs, &conjunction);
+        let term = positional.get(langs_slot + 1).copied().unwrap_or_default();
+        let alt = positional
+            .get(langs_slot + 2)
+            .copied()
+            .filter(|value| !value.is_empty())
+            .or(named("alt"))
+            .unwrap_or_default();
+        if !term.is_empty() && term != "-" {
+            let anchored = self.ety_term_anchor(term, alt);
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(&anchored);
+        }
+        let gloss = positional
+            .get(langs_slot + 3)
+            .copied()
+            .filter(|value| !value.is_empty())
+            .or(named("t"))
+            .or(named("gloss"))
+            .unwrap_or_default();
+        out.push_str(&self.gloss_text(gloss));
+        Self::ety_wording(out, prefix, named("notext").is_some(), named("nocap").is_some())
+    }
+
+    /// The doublet family: anchored terms with per-index alt/gloss,
+    /// serial-joined, behind the given wording.
+    fn doublet_text(&mut self, template: &Template, prefix: &str) -> String {
+        let template = normalize_numbered(template);
+        let named = |key: &str| -> Option<&str> {
+            template
+                .named
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+        let mut terms: Vec<String> = Vec::new();
+        for (index, raw) in template.positional.iter().enumerate().skip(1) {
+            if raw.trim().is_empty() {
+                continue;
+            }
+            let alt = named(&format!("alt{index}")).unwrap_or_default().to_string();
+            let gloss = named(&format!("t{index}")).unwrap_or_default().to_string();
+            let mut rendered = self.ety_term_anchor(raw, &alt);
+            rendered.push_str(&self.gloss_text(&gloss));
+            terms.push(rendered);
+        }
+        let body = serial_join(&terms, "and");
+        Self::ety_wording(body, prefix, named("notext").is_some(), named("nocap").is_some())
+    }
+
+    /// The unknown/uncertain statements: a fixed word, title=
+    /// override, notext and nocap honored.
+    fn origin_statement(&mut self, template: &Template, default: &str) -> String {
+        let named = |key: &str| -> Option<&str> {
+            template
+                .named
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+        if named("notext").is_some() {
+            return String::new();
+        }
+        let text = match named("title") {
+            Some(title) => self.argument_text(title),
+            None => String::from(default),
+        };
+        if named("nocap").is_some() { lcfirst(&text) } else { text }
+    }
+
+    /// The etymon template: a data carrier that renders nothing
+    /// without text= (its own on-page behavior); with text=, the one
+    /// step the page itself carries renders - keyword wording plus
+    /// its etymons.
+    fn etymon_text(&mut self, template: &Template) -> String {
+        let named = |key: &str| -> Option<&str> {
+            template
+                .named
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+        if named("text").is_none() {
+            if named("tree").is_some() {
+                self.audit("etymon_tree_dropped", template_signature(template));
+            }
+            return String::new();
+        }
+        let entry_lang = template
+            .positional
+            .first()
+            .map(String::as_str)
+            .unwrap_or_default()
+            .to_string();
+        enum Wording {
+            Prefix(&'static str),
+            Join,
+            Skip,
+        }
+        let wording_of = |keyword: &str| -> Option<Wording> {
+            Some(match keyword {
+                "from" => Wording::Prefix("From "),
+                "der" | "derived" | "uder" => Wording::Prefix("Derived from "),
+                "inh" | "inherited" => Wording::Prefix("Inherited from "),
+                "bor" | "borrowed" => Wording::Prefix("Borrowed from "),
+                "lbor" => Wording::Prefix("Learned borrowing from "),
+                "slbor" => Wording::Prefix("Semi-learned borrowing from "),
+                "obor" => Wording::Prefix("Orthographic borrowing from "),
+                "ubor" => Wording::Prefix("Unadapted borrowing from "),
+                "calque" | "cal" | "clq" => Wording::Prefix("Calque of "),
+                "partial calque" | "pcal" => Wording::Prefix("Partial calque of "),
+                "semantic loan" | "sl" => Wording::Prefix("Semantic loan from "),
+                "influence" => Wording::Prefix("Influenced by "),
+                "blend" => Wording::Prefix("Blend of "),
+                "reduplication" | "redup" => Wording::Prefix("Reduplication of "),
+                "abbreviation" | "abbr" => Wording::Prefix("Abbreviation of "),
+                "syllabic abbreviation" | "sylabbr" => {
+                    Wording::Prefix("Syllabic abbreviation of ")
+                }
+                "acronym" | "acro" => Wording::Prefix("Acronym of "),
+                "initialism" | "init" => Wording::Prefix("Initialism of "),
+                "clipping" | "clip" => Wording::Prefix("Clipping of "),
+                "ellipsis" | "ellip" => Wording::Prefix("Ellipsis of "),
+                "univerbation" | "univ" => Wording::Prefix("Univerbation of "),
+                "back-formation" | "bf" => Wording::Prefix("Back-formation from "),
+                "deverbal" => Wording::Prefix("Deverbal from "),
+                "denominal" | "denom" => Wording::Prefix("Denominal from "),
+                "affix" | "af" => Wording::Join,
+                "afeq" | "root" => Wording::Skip,
+                _ => return None,
+            })
+        };
+        let mut groups: Vec<String> = Vec::new();
+        let mut keyword = String::from("from");
+        let mut keyword_uncertain = false;
+        let mut conjunction = String::from("or");
+        let mut terms: Vec<String> = Vec::new();
+        let mut flush = |renderer: &mut Self,
+                         keyword: &str,
+                         uncertain: bool,
+                         conjunction: &str,
+                         terms: &mut Vec<String>| {
+            if terms.is_empty() {
+                return;
+            }
+            let taken = std::mem::take(terms);
+            match wording_of(keyword) {
+                Some(Wording::Prefix(prefix)) => {
+                    let joined = serial_join(&taken, conjunction);
+                    let text = if uncertain {
+                        format!("Possibly {}{joined}", lcfirst(prefix))
+                    } else {
+                        format!("{prefix}{joined}")
+                    };
+                    groups.push(text);
+                }
+                Some(Wording::Join) => groups.push(taken.join(" + ")),
+                Some(Wording::Skip) => {}
+                None => {
+                    renderer.audit("etymon_keyword_unknown", keyword.to_string());
+                }
+            }
+        };
+        for raw in template.positional.iter().skip(1) {
+            if let Some(rest) = raw.strip_prefix(':') {
+                flush(self, &keyword, keyword_uncertain, &conjunction, &mut terms);
+                let (base, modifiers) = term_modifiers(rest);
+                keyword = base;
+                keyword_uncertain = modifiers.iter().any(|(name, _)| name == "unc");
+                conjunction = modifiers
+                    .iter()
+                    .find(|(name, _)| name == "conj")
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or_else(|| String::from("or"));
+                continue;
+            }
+            if raw.trim().is_empty() {
+                continue;
+            }
+            let (base, modifiers) = term_modifiers(raw);
+            let modifier = |key: &str| -> Option<&str> {
+                modifiers
+                    .iter()
+                    .find(|(name, _)| name == key)
+                    .map(|(_, value)| value.as_str())
+            };
+            let (code, term) = match base.split_once(':') {
+                Some((code, term)) if language_table().name(code).is_some() => {
+                    (code.to_string(), term.to_string())
+                }
+                _ => (entry_lang.clone(), base.clone()),
+            };
+            let mut rendered = String::new();
+            if code != entry_lang {
+                rendered = self.ety_language_names(&code, "and");
+            }
+            if term != "-" && !term.is_empty() {
+                let anchored =
+                    self.ety_term_anchor(&term, modifier("alt").unwrap_or_default());
+                if !rendered.is_empty() {
+                    rendered.push(' ');
+                }
+                rendered.push_str(&anchored);
+            }
+            if let Some(gloss) = modifier("t") {
+                let gloss = gloss.to_string();
+                rendered.push_str(&self.gloss_text(&gloss));
+            }
+            if !rendered.is_empty() {
+                terms.push(rendered);
+            }
+        }
+        flush(self, &keyword, keyword_uncertain, &conjunction, &mut terms);
+        groups.join(", ")
+    }
+
+    /// The inflection-of engine: grammar tags resolved through the
+    /// vendored map, "of [lemma]" closing; `//` multiparts, the
+    /// punctuation tags, and `;` set breaks per the documented
+    /// grammar.
+    fn inflection_of_text(&mut self, template: &Template) -> String {
+        let template = normalize_numbered(template);
+        let named = |key: &str| -> Option<&str> {
+            template
+                .named
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+        if named("enclitic").is_some() {
+            self.audit("form_of_arguments_unhandled", template_signature(&template));
+        }
+        let positional: Vec<&str> =
+            template.positional.iter().map(String::as_str).collect();
+        let lemmas_raw = positional.get(1).copied().unwrap_or_default();
+        let alt = positional
+            .get(2)
+            .copied()
+            .filter(|value| !value.is_empty())
+            .or(named("alt"))
+            .unwrap_or_default()
+            .to_string();
+        let mut lemmas: Vec<String> = Vec::new();
+        let pieces = split_modifier_commas(lemmas_raw);
+        for (index, piece) in pieces.iter().enumerate() {
+            if piece.trim().is_empty() {
+                continue;
+            }
+            let (_, modifiers) = term_modifiers(piece);
+            let piece_alt = if index == 0 && pieces.len() == 1 && !alt.is_empty() {
+                alt.clone()
+            } else {
+                modifiers
+                    .iter()
+                    .find(|(name, _)| name == "alt")
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or_default()
+            };
+            let mut rendered = self.ety_term_anchor(piece, &piece_alt);
+            if let Some((_, gloss)) =
+                modifiers.iter().find(|(name, _)| name == "t")
+            {
+                let gloss = gloss.clone();
+                rendered.push_str(&self.gloss_text(&gloss));
+            }
+            lemmas.push(rendered);
+        }
+        let mut sets: Vec<Vec<String>> = vec![Vec::new()];
+        for raw_tag in positional.iter().skip(3) {
+            if raw_tag.trim().is_empty() {
+                continue;
+            }
+            if *raw_tag == ";" {
+                sets.push(Vec::new());
+                continue;
+            }
+            sets.last_mut()
+                .expect("sets starts non-empty")
+                .extend(tag_table().resolve(raw_tag.trim()));
+        }
+        let joined_sets: Vec<String> = sets
+            .iter()
+            .filter(|set| !set.is_empty())
+            .map(|set| join_tags(set))
+            .collect();
+        let mut out = joined_sets.join("; ");
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str("of ");
+        out.push_str(&lemmas.join(", "));
+        if let Some(gloss) = named("t").or(named("gloss")) {
+            let gloss = gloss.to_string();
+            out.push_str(&self.gloss_text(&gloss));
+        }
+        if named("nocap").is_some() { out } else { ucfirst(&out) }
+    }
+
+    /// A comma-separated name-list value: each term optionally
+    /// "code:term" with inline modifiers; a foreign term renders
+    /// behind its language name, and include_language forces the
+    /// name even for English (the eq= convention).
+    fn name_list(
+        &mut self,
+        value: &str,
+        include_language: bool,
+        conjunction: &str,
+    ) -> (String, usize) {
+        let mut rendered: Vec<String> = Vec::new();
+        for piece in split_modifier_commas(value) {
+            if piece.trim().is_empty() {
+                continue;
+            }
+            let (base, modifiers) = term_modifiers(piece.trim());
+            let (code, term) = match base.split_once(':') {
+                Some((code, term)) if language_table().name(code).is_some() => {
+                    (code.to_string(), term.to_string())
+                }
+                _ => (String::from("en"), base.clone()),
+            };
+            let alt = modifiers
+                .iter()
+                .find(|(name, _)| name == "alt")
+                .map(|(_, value)| value.clone())
+                .unwrap_or_default();
+            let mut text = String::new();
+            if include_language || code != "en" {
+                text.push_str(&self.ety_language_names(&code, "and"));
+                text.push(' ');
+            }
+            text.push_str(&self.ety_term_anchor(&term, &alt));
+            if let Some((_, gloss)) = modifiers.iter().find(|(name, _)| name == "t") {
+                let gloss = gloss.clone();
+                text.push_str(&self.gloss_text(&gloss));
+            }
+            rendered.push(text);
+        }
+        let count = rendered.len();
+        (serial_join(&rendered, conjunction), count)
+    }
+
+    /// One from= piece's (prefix, suffix) wording, the Module:names
+    /// grammar: the category keywords, languages and families by
+    /// name, and code:term references.
+    fn name_from_piece(&mut self, piece: &str) -> (String, String) {
+        let trimmed = piece.trim();
+        match trimmed {
+            "surnames" | "given names" | "nicknames" | "place names"
+            | "common nouns" | "month names" => (
+                String::from("transferred from the "),
+                trimmed.trim_end_matches('s').to_string(),
+            ),
+            "patronymics" | "matronymics" | "coinages" => (
+                String::from("originating "),
+                format!("as a {}", trimmed.trim_end_matches('s')),
+            ),
+            "occupations" | "ethnonyms" => (
+                String::from("originating "),
+                format!("as an {}", trimmed.trim_end_matches('s')),
+            ),
+            "the Bible" => {
+                (String::from("originating "), String::from("from the Bible"))
+            }
+            _ => {
+                if trimmed.contains(':') {
+                    let (text, _) = self.name_list(trimmed, true, "and");
+                    (String::from("from "), text)
+                } else if trimmed.ends_with(" languages")
+                    || trimmed.ends_with(" Languages")
+                    || trimmed.ends_with(" lects")
+                    || trimmed.ends_with(" Lects")
+                {
+                    (String::from("from "), format!("the {trimmed}"))
+                } else {
+                    (String::from("from "), trimmed.to_string())
+                }
+            }
+        }
+    }
+
+    /// A from= value rendered whole: comma pieces group under shared
+    /// prefixes, and a " < " chain renders its tail as parenthesized
+    /// in-turn steps.
+    fn name_from_text(&mut self, values: &[String]) -> String {
+        let mut segments: Vec<(String, Vec<String>)> = Vec::new();
+        for value in values {
+            for piece in split_modifier_commas(value) {
+                if piece.trim().is_empty() {
+                    continue;
+                }
+                let chain: Vec<&str> = piece.split(" < ").collect();
+                if chain.len() == 1 {
+                    let (prefix, suffix) = self.name_from_piece(chain[0]);
+                    match segments.last_mut() {
+                        Some((last_prefix, suffixes)) if *last_prefix == prefix => {
+                            suffixes.push(suffix);
+                        }
+                        _ => segments.push((prefix, vec![suffix])),
+                    }
+                    continue;
+                }
+                let mut steps: Vec<String> = Vec::new();
+                for step in &chain {
+                    let (prefix, suffix) = self.name_from_piece(step);
+                    steps.push(format!("{prefix}{suffix}"));
+                }
+                let full = format!(
+                    "{} (in turn {})",
+                    steps[0],
+                    steps[1..].join(", in turn ")
+                );
+                segments.push((String::new(), vec![full]));
+            }
+        }
+        let rendered: Vec<String> = segments
+            .into_iter()
+            .map(|(prefix, suffixes)| {
+                format!("{prefix}{}", serial_join(&suffixes, "or"))
+            })
+            .collect();
+        serial_join(&rendered, "or")
+    }
+
+    /// The surname definition line, the Module:names assembly:
+    /// article, genders, adjective, "surname", then the qualifying
+    /// pieces in their documented order.
+    fn surname_text(&mut self, template: &Template) -> String {
+        let template = normalize_numbered(template);
+        let named = |key: &str| -> Option<&str> {
+            template
+                .named
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+        let typetext = |renderer: &mut Self, template: &Template, key: &str| -> String {
+            match template
+                .named
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+            {
+                Some(value) if !value.is_empty() => {
+                    format!("{} ", renderer.argument_text(value))
+                }
+                _ => String::new(),
+            }
+        };
+        let adj = template
+            .positional
+            .get(1)
+            .filter(|value| !value.is_empty())
+            .cloned();
+        let mut genders: Vec<&str> = Vec::new();
+        for gender in named("g").unwrap_or_default().split(',') {
+            match gender.trim() {
+                "" => {}
+                "m" | "male" => genders.push("male"),
+                "f" | "female" => genders.push("female"),
+                "c" | "common gender" | "common-gender" | "unisex" => {
+                    genders.push("common-gender")
+                }
+                _ => genders.push("unknown-gender"),
+            }
+        }
+        let article = match named("A") {
+            Some(article) => article.to_string(),
+            None => {
+                let bare = if genders.first() == Some(&"unknown-gender") {
+                    "an"
+                } else if genders.is_empty() {
+                    match &adj {
+                        Some(adj) => indefinite_article(adj),
+                        None => "a",
+                    }
+                } else {
+                    "a"
+                };
+                if named("nocap").is_some() {
+                    bare.to_string()
+                } else {
+                    ucfirst(bare)
+                }
+            }
+        };
+        let mut out = format!("{article} ");
+        if !genders.is_empty() {
+            out.push_str(&genders.join(" or "));
+            out.push(' ');
+        }
+        if let Some(adj) = &adj {
+            let adj = adj.clone();
+            out.push_str(&self.argument_text(&adj));
+            out.push(' ');
+        }
+        out.push_str("surname");
+        let mut need_comma = false;
+        let xlit = named_family(&template, "xlit");
+        if !xlit.is_empty() {
+            let (text, _) = self.name_list(&xlit.join(","), false, "and");
+            out.push_str(&format!(", {text}"));
+            need_comma = true;
+        }
+        let from = named_family(&template, "from");
+        if !from.is_empty() {
+            if need_comma {
+                out.push(',');
+            }
+            need_comma = true;
+            out.push(' ');
+            out.push_str(&typetext(self, &template, "fromtype"));
+            let text = self.name_from_text(&from);
+            out.push_str(&text);
+        }
+        let mut meanings: Vec<String> = named_family(&template, "meaning")
+            .iter()
+            .map(|meaning| format!("\"{}\"", self.argument_text(meaning)))
+            .collect();
+        let parent = named_family(&template, "parent");
+        if !parent.is_empty() {
+            let (text, _) = self.name_list(&parent.join(","), false, "and");
+            let child = match (genders.contains(&"male"), genders.contains(&"female")) {
+                (true, false) => "son",
+                (false, true) => "daughter",
+                _ => "son/daughter",
+            };
+            meanings.push(format!("\"{child} of {text}\""));
+        }
+        if !meanings.is_empty() {
+            if need_comma {
+                out.push(',');
+            }
+            need_comma = true;
+            out.push(' ');
+            out.push_str(&typetext(self, &template, "meaningtype"));
+            out.push_str(&format!("meaning {}", serial_join(&meanings, "or")));
+        }
+        if let Some(origin) = named("origin") {
+            if need_comma {
+                out.push(',');
+            }
+            need_comma = true;
+            let origin = origin.to_string();
+            out.push_str(&format!(" of {} origin", self.argument_text(&origin)));
+        }
+        if let Some(usage) = named("usage") {
+            if need_comma {
+                out.push(',');
+            }
+            let usage = usage.to_string();
+            out.push_str(&format!(" of {} usage", self.argument_text(&usage)));
+        }
+        for (family, label, conjunction) in [
+            ("varof", "variant of", "and"),
+            ("var", "variant of", "and"),
+            ("clipof", "clipping of", "and"),
+            ("blend", "blend of", "and"),
+            ("m", "masculine equivalent", "and"),
+            ("f", "feminine equivalent", "and"),
+        ] {
+            let values = named_family(&template, family);
+            if values.is_empty() {
+                continue;
+            }
+            let (text, _) = self.name_list(&values.join(","), false, conjunction);
+            out.push_str(&format!(", {label} {text}"));
+        }
+        let eq = named_family(&template, "eq");
+        if !eq.is_empty() {
+            let (text, _) = self.name_list(&eq.join(","), true, "or");
+            out.push_str(&format!(
+                ", {}equivalent to {text}",
+                typetext(self, &template, "eqtype")
+            ));
+        }
+        if let Some(addl) = named("addl") {
+            let addl = addl.to_string();
+            let rendered = self.argument_text(&addl);
+            if let Some(rest) = rendered.strip_prefix(';') {
+                out.push_str(&format!("; {}", rest.trim_start()));
+            } else if let Some(rest) = rendered.strip_prefix('_') {
+                out.push_str(&format!(" {rest}"));
+            } else if !rendered.is_empty() {
+                out.push_str(&format!(", {rendered}"));
+            }
+        }
+        let varform = named_family(&template, "varform");
+        if !varform.is_empty() {
+            let (text, count) = self.name_list(&varform.join(","), false, "and");
+            let plural = if count > 1 { "s" } else { "" };
+            out.push_str(&format!(
+                "; {}variant form{plural} {text}",
+                typetext(self, &template, "varformtype")
+            ));
+        }
+        out
+    }
+
+    /// The given-name definition line, the Module:names assembly:
+    /// diminutive-of leads when present, then genders, "given
+    /// name(s)", and the qualifying pieces in order.
+    fn given_name_text(&mut self, template: &Template) -> String {
+        let template = normalize_numbered(template);
+        let named = |key: &str| -> Option<&str> {
+            template
+                .named
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+        let typetext = |renderer: &mut Self, template: &Template, key: &str| -> String {
+            match template
+                .named
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+            {
+                Some(value) if !value.is_empty() => {
+                    format!("{} ", renderer.argument_text(value))
+                }
+                _ => String::new(),
+            }
+        };
+        const ANIMALS: [&str; 5] = ["dog", "cat", "cow", "horse", "animal"];
+        let gender_raw = template
+            .positional
+            .get(1)
+            .cloned()
+            .filter(|value| !value.is_empty())
+            .or_else(|| named("gender").map(str::to_string))
+            .unwrap_or_default();
+        let mut genders: Vec<String> = Vec::new();
+        let mut is_animal = false;
+        for piece in split_modifier_commas(&gender_raw) {
+            let (base, modifiers) = term_modifiers(piece.trim());
+            if base.is_empty() {
+                continue;
+            }
+            let display = modifiers
+                .iter()
+                .find(|(name, _)| name == "text")
+                .map(|(_, value)| value.replace('+', &base))
+                .unwrap_or_else(|| base.clone());
+            if ANIMALS.contains(&base.as_str()) {
+                is_animal = true;
+            }
+            genders.push(display);
+        }
+        let dimof: Vec<String> = [named_family(&template, "dimof"), named_family(&template, "dim")]
+            .concat();
+        let mut out = String::new();
+        let mut force_plural = false;
+        if !dimof.is_empty() {
+            out.push_str(&typetext(self, &template, "dimoftype"));
+            out.push_str(&typetext(self, &template, "dimtype"));
+            out.push_str("diminutive");
+            let xlit = named_family(&template, "xlit");
+            if !xlit.is_empty() {
+                let (text, _) = self.name_list(&xlit.join(","), false, "and");
+                out.push_str(&format!(", {text},"));
+            }
+            out.push_str(" of ");
+            if dimof.len() == 1 && dimof[0] == "-" {
+                force_plural = true;
+            } else {
+                out.push_str("the ");
+            }
+        }
+        if !is_animal && !genders.is_empty() {
+            out.push_str(&genders.join(" or "));
+            out.push(' ');
+        }
+        let plural = force_plural || {
+            let (_, count) = {
+                let joined = dimof.join(",");
+                if joined.is_empty() || joined == "-" {
+                    (String::new(), 0)
+                } else {
+                    (String::new(), split_modifier_commas(&joined).len())
+                }
+            };
+            count > 1
+        };
+        out.push_str(if plural { "given names" } else { "given name" });
+        let mut need_comma = false;
+        let bare_dash = dimof.len() == 1 && dimof[0] == "-";
+        if !dimof.is_empty() && !bare_dash {
+            let (text, _) = self.name_list(&dimof.join(","), false, "and");
+            out.push_str(&format!(" {text}"));
+            need_comma = !is_animal;
+        } else if dimof.is_empty() {
+            // With a diminutive-of, the xlit already rode inside the
+            // leading "diminutive, X, of" text.
+            let xlit = named_family(&template, "xlit");
+            if !xlit.is_empty() {
+                let (text, _) = self.name_list(&xlit.join(","), false, "and");
+                out.push_str(&format!(", {text}"));
+                need_comma = true;
+            }
+        }
+        if is_animal {
+            if need_comma {
+                out.push(',');
+            }
+            need_comma = true;
+            let gender_text = genders.join(" or ");
+            out.push_str(&format!(
+                " for {} {gender_text}",
+                indefinite_article(&gender_text)
+            ));
+        }
+        let from = named_family(&template, "from");
+        if !from.is_empty() {
+            if need_comma {
+                out.push(',');
+            }
+            need_comma = true;
+            out.push(' ');
+            out.push_str(&typetext(self, &template, "fromtype"));
+            let text = self.name_from_text(&from);
+            out.push_str(&text);
+        }
+        let meanings: Vec<String> = named_family(&template, "meaning")
+            .iter()
+            .map(|meaning| format!("\"{}\"", self.argument_text(meaning)))
+            .collect();
+        if !meanings.is_empty() {
+            if need_comma {
+                out.push(',');
+            }
+            need_comma = true;
+            out.push(' ');
+            out.push_str(&typetext(self, &template, "meaningtype"));
+            out.push_str(&format!("meaning {}", serial_join(&meanings, "or")));
+        }
+        if let Some(origin) = named("origin") {
+            if need_comma {
+                out.push(',');
+            }
+            need_comma = true;
+            let origin = origin.to_string();
+            out.push_str(&format!(" of {} origin", self.argument_text(&origin)));
+        }
+        if let Some(usage) = named("usage") {
+            if need_comma {
+                out.push(',');
+            }
+            let usage = usage.to_string();
+            out.push_str(&format!(" of {} usage", self.argument_text(&usage)));
+        }
+        for (family, label) in [
+            ("varof", "variant of"),
+            ("var", "variant of"),
+            ("clipof", "clipping of"),
+        ] {
+            let values = named_family(&template, family);
+            if values.is_empty() {
+                continue;
+            }
+            let (text, _) = self.name_list(&values.join(","), false, "and");
+            let label_type = format!("{family}type");
+            out.push_str(&format!(
+                ", {}{label} {text}",
+                typetext(self, &template, &label_type)
+            ));
+        }
+        let blend = named_family(&template, "blend");
+        if !blend.is_empty() {
+            let (text, _) = self.name_list(&blend.join(","), false, "and");
+            out.push_str(&format!(
+                ", {}blend of {text}",
+                typetext(self, &template, "blendtype")
+            ));
+        }
+        if let Some(popular) = named("popular") {
+            let popular = popular.to_string();
+            out.push_str(&format!(
+                ", {}popular {}",
+                typetext(self, &template, "populartype"),
+                self.argument_text(&popular)
+            ));
+        }
+        for (family, label) in [
+            ("m", "masculine equivalent"),
+            ("f", "feminine equivalent"),
+        ] {
+            let values = named_family(&template, family);
+            if values.is_empty() {
+                continue;
+            }
+            let (text, _) = self.name_list(&values.join(","), false, "and");
+            out.push_str(&format!(", {label} {text}"));
+        }
+        let eq = named_family(&template, "eq");
+        if !eq.is_empty() {
+            let (text, _) = self.name_list(&eq.join(","), true, "or");
+            out.push_str(&format!(
+                ", {}equivalent to {text}",
+                typetext(self, &template, "eqtype")
+            ));
+        }
+        if let Some(addl) = named("addl") {
+            let addl = addl.to_string();
+            let rendered = self.argument_text(&addl);
+            if let Some(rest) = rendered.strip_prefix(';') {
+                out.push_str(&format!("; {}", rest.trim_start()));
+            } else if let Some(rest) = rendered.strip_prefix('_') {
+                out.push_str(&format!(" {rest}"));
+            } else if !rendered.is_empty() {
+                out.push_str(&format!(", {rendered}"));
+            }
+        }
+        for (family, label) in [
+            ("varform", "variant form"),
+            ("dimform", "diminutive form"),
+        ] {
+            let values = named_family(&template, family);
+            if values.is_empty() {
+                continue;
+            }
+            let (text, count) = self.name_list(&values.join(","), false, "and");
+            let plural = if count > 1 { "s" } else { "" };
+            let label_type = format!("{family}type");
+            out.push_str(&format!(
+                "; {}{label}{plural} {text}",
+                typetext(self, &template, &label_type)
+            ));
+        }
+        let article = match named("A") {
+            Some(article) => article.to_string(),
+            None => {
+                let bare = indefinite_article(&out);
+                if named("nocap").is_some() {
+                    bare.to_string()
+                } else {
+                    ucfirst(bare)
+                }
+            }
+        };
+        format!("{article} {out}")
+    }
+
+    /// A placetype spec's display: slash-parted, aliases expanded,
+    /// recognized qualifiers canonicalized; returns the display and
+    /// the article override a qualifier carries.
+    fn placetype_display(&mut self, spec: &str) -> (String, String) {
+        let table = place_table();
+        let mut parts: Vec<String> = Vec::new();
+        let mut article = String::new();
+        for (index, part) in spec.split('/').enumerate() {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            if part == "and" || part == "or" {
+                parts.push(part.to_string());
+                continue;
+            }
+            let expanded = table.expand_alias(part).to_string();
+            // Leading recognized qualifiers display canonically; the
+            // remainder expands as its own alias.
+            let mut words: Vec<&str> = expanded.split(' ').collect();
+            let mut display_words: Vec<String> = Vec::new();
+            while words.len() > 1 {
+                let Some((display, qualifier_article)) = table.qualifier(words[0]) else {
+                    break;
+                };
+                if index == 0 && display_words.is_empty() && article.is_empty() {
+                    match qualifier_article {
+                        "the" => article = String::from("the"),
+                        "none" => article = String::from("none"),
+                        _ => {}
+                    }
+                }
+                display_words.push(display.to_string());
+                words.remove(0);
+            }
+            let reduced = table.expand_alias(&words.join(" ")).to_string();
+            display_words.push(reduced);
+            parts.push(display_words.join(" "));
+        }
+        let mut out = String::new();
+        let mut previous_connector = true;
+        for part in &parts {
+            if part == "and" || part == "or" {
+                out.push_str(&format!(" {part} "));
+                previous_connector = true;
+                continue;
+            }
+            if !previous_connector {
+                out.push_str(", ");
+            }
+            out.push_str(part);
+            previous_connector = false;
+        }
+        (out, article)
+    }
+
+    /// One holonym's display: alias-resolved location name, "the"
+    /// where taken, placetype prefix/suffix modifiers applied, and
+    /// the name anchored (a `:`-led name stays plain).
+    fn holonym_display(
+        &mut self,
+        type_spec: &str,
+        names: &str,
+        allow_the: bool,
+    ) -> String {
+        let table = place_table();
+        let mut type_parts = type_spec.split(':');
+        let raw_type = type_parts.next().unwrap_or_default().trim();
+        let modifiers: Vec<&str> = type_parts.map(str::trim).collect();
+        let full_type = table.expand_alias(raw_type).to_string();
+        let resolved = table.placetype_resolved(&full_type);
+        let mut rendered: Vec<String> = Vec::new();
+        let name_list = split_modifier_commas(names);
+        for (index, raw_name) in name_list.iter().enumerate() {
+            let raw_name = raw_name.trim();
+            if raw_name.is_empty() {
+                continue;
+            }
+            // A langcode: prefix names a foreign form; a bare colon
+            // suppresses the anchor.
+            let (no_anchor, name) = match raw_name.split_once(':') {
+                Some(("", rest)) => (true, rest.to_string()),
+                Some((code, rest)) if language_table().name(code).is_some() => {
+                    (false, rest.to_string())
+                }
+                _ => (false, raw_name.to_string()),
+            };
+            let location = table.location(&name);
+            let display_name = match location {
+                Some(row) if !row.display_as.is_empty() => row.display_as.clone(),
+                Some(row) if row.display_expand && !row.alias_of.is_empty() => {
+                    row.alias_of.clone()
+                }
+                _ => name.clone(),
+            };
+            let takes_the = allow_the || index > 0 || modifiers.contains(&"the");
+            let the = takes_the && table.holonym_takes_the(&full_type, &name);
+            let mut text = String::new();
+            let anchored = if no_anchor || display_name.contains("[[") {
+                self.argument_text(&display_name)
+            } else {
+                anchor(&display_name, &display_name)
+            };
+            let affix_type = if modifiers.contains(&"noaff") {
+                ""
+            } else if let Some(explicit) = modifiers
+                .iter()
+                .find(|m| matches!(**m, "suf" | "Suf" | "pref" | "Pref"))
+            {
+                explicit
+            } else {
+                resolved.affix_type.as_str()
+            };
+            let affix_word = if resolved.affix.is_empty() {
+                full_type.clone()
+            } else {
+                resolved.affix.clone()
+            };
+            let already_affixed = display_name
+                .to_lowercase()
+                .contains(&affix_word.to_lowercase());
+            match affix_type {
+                "suf" | "Suf" if !already_affixed => {
+                    if the {
+                        text.push_str("the ");
+                    }
+                    let word = if affix_type == "Suf" {
+                        ucfirst(&affix_word)
+                    } else {
+                        affix_word.clone()
+                    };
+                    text.push_str(&format!("{anchored} {word}"));
+                }
+                "pref" | "Pref" if !already_affixed => {
+                    let word = if affix_type == "Pref" {
+                        ucfirst(&affix_word)
+                    } else {
+                        affix_word.clone()
+                    };
+                    text.push_str(&format!("the {word} of "));
+                    if the {
+                        text.push_str("the ");
+                    }
+                    text.push_str(&anchored);
+                }
+                _ => {
+                    if the {
+                        text.push_str("the ");
+                    }
+                    text.push_str(&anchored);
+                }
+            }
+            rendered.push(text);
+        }
+        serial_join(&rendered, "and")
+    }
+
+    /// A raw prose fragment appended with its boundary spaces kept
+    /// (inline rendering trims, which would fuse fragments onto
+    /// their neighboring markers).
+    fn spaced_fragment(&mut self, raw: &str, out: &mut String) {
+        let rendered = self.argument_text(raw);
+        if rendered.is_empty() {
+            if raw.chars().any(char::is_whitespace)
+                && !out.is_empty()
+                && !out.ends_with(' ')
+            {
+                out.push(' ');
+            }
+            return;
+        }
+        if raw.starts_with(char::is_whitespace)
+            && !out.is_empty()
+            && !out.ends_with(' ')
+        {
+            out.push(' ');
+        }
+        out.push_str(&rendered);
+        if raw.ends_with(char::is_whitespace) {
+            out.push(' ');
+        }
+    }
+
+    /// A single-spec place description: `<<placetype>>` and
+    /// `<<type/name>>` markers replaced inside the raw text.
+    fn place_single_spec(&mut self, spec: &str) -> String {
+        let mut out = String::new();
+        let mut rest = spec;
+        while let Some(open) = rest.find("<<") {
+            let before = rest[..open].to_string();
+            if !before.is_empty() {
+                self.spaced_fragment(&before, &mut out);
+            }
+            let Some(close) = rest[open..].find(">>").map(|c| open + c) else {
+                let tail = rest[open..].to_string();
+                self.spaced_fragment(&tail, &mut out);
+                return out;
+            };
+            let inner = rest[open + 2..close].to_string();
+            match inner.split_once('/') {
+                Some((type_spec, names)) => {
+                    let text = self.holonym_display(type_spec, names, false);
+                    out.push_str(&text);
+                }
+                None => {
+                    let (display, _) = self.placetype_display(&inner);
+                    out.push_str(&display);
+                }
+            }
+            rest = &rest[close + 2..];
+        }
+        if !rest.is_empty() {
+            let rest = rest.to_string();
+            self.spaced_fragment(&rest, &mut out);
+        }
+        out
+    }
+
+    /// The place definition line: article and placetype, holonyms
+    /// under the comma algorithm, restarts, and the extra-information
+    /// tails. def= replaces the whole definition.
+    fn place_text(&mut self, template: &Template) -> String {
+        let template = normalize_numbered(template);
+        let named = |key: &str| -> Option<&str> {
+            template
+                .named
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+        if let Some(definition) = named("def") {
+            let definition = definition.to_string();
+            return self.argument_text(&definition);
+        }
+        let pieces: Vec<&str> = template
+            .positional
+            .iter()
+            .skip(1)
+            .map(String::as_str)
+            .collect();
+        let mut out = String::new();
+        let mut expect_placetype = true;
+        let mut preposition = String::new();
+        let mut seen_holonym = false;
+        let mut previous_raw = false;
+        let mut pending_join: Option<String> = None;
+        let mut first_segment = true;
+        for piece in pieces {
+            let piece = piece.trim();
+            if piece.is_empty() {
+                continue;
+            }
+            if piece.starts_with('@') {
+                self.audit("place_arguments_unhandled", template_signature(&template));
+                continue;
+            }
+            // A `;` (or `;text`) restarts the description.
+            if piece == ";" || piece == ";;" || (piece.starts_with(';') && !piece.starts_with("; ")) {
+                let join = if piece == ";" {
+                    String::from("; ")
+                } else if piece == ";;" {
+                    String::from(" ")
+                } else {
+                    let joiner = &piece[1..];
+                    if joiner.chars().next().is_some_and(char::is_alphabetic) {
+                        format!(" {joiner} ")
+                    } else {
+                        format!("{joiner} ")
+                    }
+                };
+                pending_join = Some(join);
+                expect_placetype = true;
+                seen_holonym = false;
+                previous_raw = false;
+                first_segment = false;
+                preposition.clear();
+                continue;
+            }
+            if expect_placetype {
+                if let Some(join) = pending_join.take() {
+                    out.push_str(&join);
+                }
+                if piece.contains("<<") {
+                    let text = self.place_single_spec(piece);
+                    out.push_str(&text);
+                    // Mixed format: later holonyms join with no
+                    // inserted preposition.
+                    seen_holonym = true;
+                    previous_raw = false;
+                } else {
+                    let (mut display, article_override) = self.placetype_display(piece);
+                    // A restarted description continues mid-sentence:
+                    // its article stays lowercase.
+                    let article = match named("a") {
+                        Some(article) => format!("{article} "),
+                        None => match article_override.as_str() {
+                            "the" if first_segment => String::from("The "),
+                            "the" => String::from("the "),
+                            "none" => {
+                                if first_segment {
+                                    display = ucfirst(&display);
+                                }
+                                String::new()
+                            }
+                            _ if first_segment => {
+                                format!("{} ", ucfirst(indefinite_article(&display)))
+                            }
+                            _ => format!("{} ", indefinite_article(&display)),
+                        },
+                    };
+                    let first_type = piece.split('/').next().unwrap_or_default();
+                    let resolved = place_table()
+                        .placetype_resolved(place_table().expand_alias(first_type));
+                    preposition = if resolved.preposition.is_empty() {
+                        String::from("in")
+                    } else {
+                        resolved.preposition.clone()
+                    };
+                    out.push_str(&article);
+                    out.push_str(&display);
+                }
+                expect_placetype = false;
+                continue;
+            }
+            match piece.split_once('/') {
+                Some((type_spec, names)) if !type_spec.trim().is_empty() => {
+                    // Raw text before the first holonym carries its
+                    // own preposition; the placetype's inserts only
+                    // when holonyms follow the placetype directly.
+                    let joiner = if previous_raw {
+                        String::from(" ")
+                    } else if !seen_holonym {
+                        if preposition.is_empty() {
+                            String::from(" ")
+                        } else {
+                            format!(" {preposition} ")
+                        }
+                    } else {
+                        String::from(", ")
+                    };
+                    let first_position = !seen_holonym && !previous_raw;
+                    let text = self.holonym_display(type_spec, names, first_position);
+                    out.push_str(&joiner);
+                    out.push_str(&text);
+                    seen_holonym = true;
+                    previous_raw = false;
+                }
+                _ => {
+                    // Raw connector text; `and` and `in` and a
+                    // *-led piece suppress the comma.
+                    let stripped = piece.strip_prefix('*').unwrap_or(piece);
+                    let no_comma = previous_raw
+                        || !seen_holonym
+                        || piece.starts_with('*')
+                        || stripped == "and"
+                        || stripped == "in"
+                        || stripped.starts_with("and ")
+                        || stripped.starts_with("in ");
+                    let joiner = if no_comma { " " } else { ", " };
+                    let stripped = stripped.to_string();
+                    out.push_str(joiner);
+                    out.push_str(&self.argument_text(&stripped));
+                    previous_raw = true;
+                }
+            }
+        }
+        for (key, label) in [
+            ("caplc", "capital and largest city"),
+            ("capital", "capital"),
+            ("largest city", "largest city"),
+            ("seat", "seat"),
+            ("shire town", "shire town"),
+            ("official", "official name"),
+            ("modern", "modern name"),
+        ] {
+            let values = named_family(&template, key);
+            if values.is_empty() {
+                continue;
+            }
+            let rendered: Vec<String> = values
+                .iter()
+                .map(|value| {
+                    let trimmed = value.trim();
+                    let name = trimmed.strip_prefix(':').unwrap_or(trimmed);
+                    if name.contains("[[") {
+                        let name = name.to_string();
+                        self.argument_text(&name)
+                    } else {
+                        anchor(name, name)
+                    }
+                })
+                .collect();
+            out.push_str(&format!("; {label}: {}", rendered.join(", ")));
+        }
+        if let Some(addl) = named("addl") {
+            let addl = addl.to_string();
+            let rendered = self.argument_text(&addl);
+            if let Some(rest) = rendered.strip_prefix(';') {
+                out.push_str(&format!("; {}", rest.trim_start()));
+            } else if !rendered.is_empty() {
+                out.push_str(&format!(", {rendered}"));
+            }
+        }
+        out
     }
 
     /// A citation line off a quote-family template: italicized title
@@ -1908,6 +3543,8 @@ fn render_list_section(
                                 items.push(format!("- {anchored}"));
                             }
                         }
+                    } else if is_silent_template(template.name.as_str()) {
+                        // Metadata in list-section paragraph position.
                     } else {
                         renderer.audit("template_unhandled", template.name.clone());
                     }
@@ -1944,6 +3581,9 @@ fn render_pos(renderer: &mut Renderer<'_>, section: &Section<'_>, level: usize) 
                     // The word-to-article signal, kept in the audit
                     // for the spidering service.
                     renderer.audit("wikipedia_pointer", template_signature(template));
+                } else if is_silent_template(name) {
+                    // Metadata carries no document meaning in
+                    // paragraph position either.
                 } else {
                     renderer.audit("template_unhandled", template.name.clone());
                 }
@@ -1977,6 +3617,18 @@ fn render_pos(renderer: &mut Renderer<'_>, section: &Section<'_>, level: usize) 
                     match template.name.as_str() {
                         "syn" | "synonyms" => collect_sense_items(template, &mut synonyms),
                         "ant" | "antonyms" => collect_sense_items(template, &mut antonyms),
+                        "ux" | "uxi" | "usex" => {
+                            let text = template
+                                .positional
+                                .get(1)
+                                .cloned()
+                                .unwrap_or_default();
+                            let rendered = renderer.argument_text(&text);
+                            if !rendered.is_empty() {
+                                renderer.lines.push(format!("   - \"{rendered}\""));
+                            }
+                        }
+                        name if is_silent_template(name) => {}
                         other => renderer.audit("sense_line_dropped", other.to_string()),
                     }
                 }
@@ -1987,6 +3639,16 @@ fn render_pos(renderer: &mut Renderer<'_>, section: &Section<'_>, level: usize) 
                     if template.name.starts_with("quote-") {
                         if let Some(citation) = renderer.citation_text(template) {
                             renderer.lines.push(format!("   - {citation}"));
+                        }
+                    } else if matches!(template.name.as_str(), "ux" | "uxi" | "usex") {
+                        let text = template
+                            .positional
+                            .get(1)
+                            .cloned()
+                            .unwrap_or_default();
+                        let rendered = renderer.argument_text(&text);
+                        if !rendered.is_empty() {
+                            renderer.lines.push(format!("   - \"{rendered}\""));
                         }
                     } else {
                         renderer.audit("quote_line_dropped", template.name.clone());

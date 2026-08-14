@@ -15,6 +15,7 @@ pub(crate) mod ucd;
 pub(crate) mod value;
 pub(crate) mod wikicorpus;
 pub(crate) mod wikidoc;
+pub(crate) mod wikivocab;
 pub(crate) mod wikimedia;
 pub(crate) mod wikitext;
 pub(crate) mod wikixml;
@@ -86,6 +87,16 @@ pub(crate) use crate::wikimedia::{
     wikimedia_page,
     wikimedia_parse,
 };
+pub(crate) use crate::wikivocab::{
+    indefinite_article,
+    language_table,
+    lcfirst,
+    place_table,
+    serial_join,
+    tag_table,
+    term_modifiers,
+    ucfirst,
+};
 #[allow(unused_imports)]
 pub(crate) use crate::value::{
     epoch_seconds,
@@ -119,5 +130,6 @@ mod tests {
     mod wikicorpus;
     mod wikidoc;
     mod wikitext;
+    mod wikivocab;
     mod wikixml;
 }

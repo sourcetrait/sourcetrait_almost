@@ -298,3 +298,229 @@ fn typography_normalizes_in_rendered_text() {
     let document = render_word_document(&[page("x", text)]).expect("render");
     assert!(document.markdown.contains("From \"so - called\" use."));
 }
+
+fn ety_doc(line: &str, title: &str) -> String {
+    let text = format!("==English==\n\n===Etymology===\n{line}\n");
+    render_word_document(&[page(title, &text)]).expect("render").markdown
+}
+
+#[test]
+fn etymology_references_render_language_and_term() {
+    assert!(ety_doc("From {{der|en|la|verbum}}.", "word")
+        .contains("From Latin [verbum]."));
+    assert!(ety_doc("{{bor+|en|fr|mot}}.", "word")
+        .contains("Borrowed from French [mot]."));
+    assert!(ety_doc("{{inh+|en|enm|two}}.", "two")
+        .contains("Inherited from Middle English [two]."));
+    assert!(ety_doc("From {{uder|en|la|cubitus||elbow}}.", "cubit")
+        .contains("From Latin [cubitus] (\"elbow\")."));
+    assert!(ety_doc("{{lbor|en|la|aberratio|t=wandering}}.", "aberration")
+        .contains("Learned borrowing from Latin [aberratio] (\"wandering\")."));
+    assert!(ety_doc("Compare {{cog|ca,oc,pt,es|salar}}.", "saler").contains(
+        "Compare Catalan, Occitan, Portuguese and Spanish [salar]."
+    ));
+    assert!(ety_doc("Cognate with the {{cog|en|-}} name {{m|en|Leonidas}}.", "x")
+        .contains("Cognate with the English name [Leonidas]."));
+    assert!(ety_doc("From {{der|en|la|femina|alt=fēmina}}.", "female")
+        .contains("From Latin [fēmina](femina)."));
+    assert!(ety_doc("From {{m+|ang|earc}}.", "ark")
+        .contains("From Old English [earc]."));
+}
+
+#[test]
+fn unknown_language_codes_render_verbatim_and_audit() {
+    let text = "==English==\n\n===Etymology===\nFrom {{der|en|LL.|word}}.\n";
+    let document = render_word_document(&[page("x", text)]).expect("render");
+    assert!(document.markdown.contains("From LL. [word]."));
+    assert!(document
+        .audit
+        .iter()
+        .any(|row| row.class == "language_code_unknown" && row.detail == "LL."));
+}
+
+#[test]
+fn doublet_unknown_and_formation_statements_render() {
+    assert!(ety_doc("{{doublet|en|fire}}.", "pyre").contains("Doublet of [fire]."));
+    assert!(ety_doc("{{doublet|en|advoke|avouch|avow}}.", "avocate")
+        .contains("Doublet of [advoke], [avouch] and [avow]."));
+    assert!(ety_doc("{{doublet|en|frail|t1=weak}}.", "fragile")
+        .contains("Doublet of [frail] (\"weak\")."));
+    assert!(ety_doc("{{unk|en}}.", "x").contains("Unknown."));
+    assert!(ety_doc("Origin {{unk|en|nocap=1}}.", "x").contains("Origin unknown."));
+    assert!(ety_doc("{{unc|en}}.", "x").contains("Uncertain."));
+    assert!(ety_doc("{{back-form|en|editor}}.", "edit")
+        .contains("Back-formation from [editor]."));
+    assert!(ety_doc("{{surf|en|ignore|-ance}}.", "ignorance")
+        .contains("By surface analysis, [ignore] + [-ance]."));
+    assert!(ety_doc("{{calque|en|de|Weltanschauung}}.", "worldview")
+        .contains("Calque of German [Weltanschauung]."));
+}
+
+#[test]
+fn etymon_renders_nothing_bare_and_one_step_with_text() {
+    let bare = "==English==\n\n===Etymology===\n{{etymon|en|id=x|inh|enm:fader}}\nFrom prose.\n";
+    let document = render_word_document(&[page("father", bare)]).expect("render");
+    assert!(!document.markdown.contains("fader"));
+    assert!(document.audit.iter().all(|row| row.class != "template_unhandled"));
+    assert!(ety_doc("{{etymon|en|id=b|:bor|fr:bouquet|text=+}}", "bouquet")
+        .contains("Borrowed from French [bouquet]"));
+    assert!(ety_doc("{{ety|en|id=b|:af|un-|happy|text=+}}", "unhappy")
+        .contains("[un-] + [happy]"));
+}
+
+#[test]
+fn inflection_of_renders_resolved_tags() {
+    let text = "==English==\n\n===Verb===\n{{head|en|verb form}}\n\n# {{infl of|en|amar||3|s|pres|act|ind}}\n";
+    let document = render_word_document(&[page("aman", text)]).expect("render");
+    assert!(
+        document
+            .markdown
+            .contains("1. Third-person singular present active indicative of [amar]"),
+        "got: {}",
+        document.markdown
+    );
+    let text = "==English==\n\n===Noun===\n{{head|en|noun form}}\n\n# {{noun form of|en|word||p}}\n";
+    let document = render_word_document(&[page("words", text)]).expect("render");
+    assert!(
+        document.markdown.contains("1. Plural of [word]"),
+        "got: {}",
+        document.markdown
+    );
+    let text = "==English==\n\n===Noun===\n{{head|en|noun form}}\n\n# {{infl of|en|путь||gen//dat|s|;|nom//acc|p}}\n";
+    let document = render_word_document(&[page("пути", text)]).expect("render");
+    assert!(
+        document
+            .markdown
+            .contains("1. Genitive/dative singular; nominative/accusative plural of [путь]"),
+        "got: {}",
+        document.markdown
+    );
+}
+
+fn sense_doc(line: &str, title: &str) -> String {
+    let text =
+        format!("==English==\n\n===Noun===\n{{{{en-noun}}}}\n\n{line}\n");
+    render_word_document(&[page(title, &text)]).expect("render").markdown
+}
+
+#[test]
+fn surname_and_given_name_definitions_render() {
+    assert!(sense_doc("# {{surname|en}}.", "Weber").contains("1. A surname."));
+    assert!(sense_doc("# {{surname|en|English}}.", "Weber")
+        .contains("1. An English surname."));
+    assert!(sense_doc("# {{surname|en|from=patronymics}}.", "Johnson")
+        .contains("1. A surname originating as a patronymic."));
+    assert!(sense_doc("# {{surname|en|g=m|from=Irish}}.", "Murphy")
+        .contains("1. A male surname from Irish."));
+    assert!(sense_doc("# {{surname|en|from=Slavic languages}}.", "Halkin")
+        .contains("1. A surname from the Slavic languages."));
+    assert!(sense_doc("# {{given name|en|male}}.", "Amber")
+        .contains("1. A male given name."));
+    assert!(sense_doc("# {{given name|en|female|from=Hebrew|m=Daniel}}.", "Danielle")
+        .contains("1. A female given name from Hebrew, masculine equivalent [Daniel]."));
+    assert!(
+        sense_doc("# {{given name|en|male|dimof=Barnabas,Bernard}}.", "Barney")
+            .contains("1. A diminutive of the male given names [Barnabas] and [Bernard]."),
+    );
+    assert!(sense_doc("# {{given name|en|unisex|from=surnames}}.", "Taylor")
+        .contains("1. A unisex given name transferred from the surname."));
+}
+
+#[test]
+fn place_definitions_render_the_documented_shapes() {
+    assert!(sense_doc("# {{place|en|city|p/Ontario|c/Canada}}.", "Toronto")
+        .contains("1. A city in [Ontario], [Canada]."));
+    assert!(sense_doc("# {{place|en|country|cont/Europe}}.", "Germany")
+        .contains("1. A country in [Europe]."));
+    assert!(sense_doc("# {{place|en|city|c/Netherlands}}.", "Amsterdam")
+        .contains("1. A city in the [Netherlands]."));
+    assert!(sense_doc("# {{place|en|county|s/Virginia|c/United States}}.", "Fairfax")
+        .contains("1. A county of [Virginia], [United States]."));
+    assert!(sense_doc("# {{place|en|country|in central|cont/Europe}}.", "Germany")
+        .contains("1. A country in central [Europe]."));
+    assert!(sense_doc("# {{place|en|river|c/USA|and|c/Canada}}.", "Columbia")
+        .contains("1. A river in the [United States] and [Canada]."));
+    assert!(sense_doc("# {{place|en|river|c/Ukraine,Belarus,Poland}}.", "Bug")
+        .contains("1. A river in [Ukraine], [Belarus] and [Poland]."));
+    assert!(
+        sense_doc("# {{place|en|city|in northeastern|s/Pennsylvania|c/United States}}.", "Scranton")
+            .contains("1. A city in northeastern [Pennsylvania], [United States]."),
+    );
+    assert!(sense_doc("# {{place|en|capital city|c:pref/Georgia}}.", "Tbilisi")
+        .contains("1. A capital city of the country of [Georgia]."));
+    assert!(
+        sense_doc("# {{place|en|country|in southern|cont/Europe|caplc=Rome}}.", "Italy")
+            .contains(
+                "1. A country in southern [Europe]; capital and largest city: [Rome]."
+            ),
+    );
+    assert!(sense_doc(
+        "# {{place|en|A <<neighborhood>> in <<city/Istanbul>>, <<c/Turkey>>}}.",
+        "Fener"
+    )
+    .contains("1. A neighborhood in [Istanbul], [Turkey]."));
+    let two = sense_doc(
+        "# {{place|en|city/state capital|s/Rio de Janeiro|c/Brazil|;|former capital city|of|c/Brazil}}.",
+        "Rio",
+    );
+    assert!(
+        two.contains(
+            "1. A city, state capital in [Rio de Janeiro], [Brazil]; \
+             a former capital city of [Brazil]."
+        ),
+        "got: {two}"
+    );
+}
+
+#[test]
+fn sense_tax_and_inline_helpers_render() {
+    let text = "==English==\n\n===Noun===\n{{en-noun}}\n\n# A fish.\n\n====Synonyms====\n* {{sense|an oath}} {{l|en|promise}}\n";
+    let document = render_word_document(&[page("word", text)]).expect("render");
+    assert!(
+        document.markdown.contains("- (an oath): [promise]"),
+        "got: {}",
+        document.markdown
+    );
+    assert!(sense_doc("# The pike, {{taxfmt|Esox lucius|species}}.", "pike")
+        .contains("1. The pike, [Esox lucius]."));
+    assert!(sense_doc("# A {{taxlink|Felis silvestris|species}} cat.", "cat")
+        .contains("1. A Felis silvestris cat."));
+    assert!(sense_doc("# The {{vern|northern pike}}.", "pike")
+        .contains("1. The [northern pike]."));
+    assert!(sense_doc("# See {{cap|autumn}}.", "fall")
+        .contains("1. See [Autumn](autumn)."));
+    assert!(sense_doc("# {{n-g|A placeholder name.}}", "thing")
+        .contains("1. A placeholder name."));
+    assert!(sense_doc("# {{lang|fr|mot}} use.", "word").contains("1. mot use."));
+}
+
+#[test]
+fn quotation_helpers_and_examples_render() {
+    let text = "==English==\n\n===Noun===\n{{en-noun}}\n\n# A pet.\n#: {{ux|en|The '''dog''' barked.}}\n#* {{quote-book|en|title=Dogs|passage=a {{...}} dog}}\n";
+    let document = render_word_document(&[page("dog", text)]).expect("render");
+    assert!(
+        document.markdown.contains("   - \"The **dog** barked.\""),
+        "got: {}",
+        document.markdown
+    );
+    assert!(
+        document.markdown.contains("   - *Dogs*: \"a ... dog\""),
+        "got: {}",
+        document.markdown
+    );
+}
+
+#[test]
+fn silent_metadata_files_no_audit_anywhere() {
+    let text = "==English==\n\n===Etymology===\n{{root|en|ine-pro|*bher-}}\nFrom use.\n\n===Noun===\n{{en-noun}}\n\n# A sense. {{C|en|Dogs}}\n\n{{cln|en|nouns}}\n\n====Synonyms====\n{{topics|en|animals}}\n* {{l|en|hound}}\n";
+    let document = render_word_document(&[page("dog", text)]).expect("render");
+    assert!(
+        document
+            .audit
+            .iter()
+            .all(|row| row.class != "template_unhandled"),
+        "audit: {:?}",
+        document.audit
+    );
+    assert!(!document.markdown.contains("ine-pro"));
+}

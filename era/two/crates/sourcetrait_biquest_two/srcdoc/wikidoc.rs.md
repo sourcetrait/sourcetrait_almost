@@ -99,6 +99,137 @@ English content) are the corpus emitter's .empty.md convention with
 the document_empty audit class - skippable by suffix, existence
 known (TheUser).
 
+## The etymology reference family (fn ety_reference and kin)
+
+Designed against the snapshot's own template documentation
+(derived/borrowed/inherited/cognate and the +/lbor/ubor/doublet/
+calque/unknown/surface-analysis pages, fetched from the pinned
+dump). One engine carries the whole family because the grammar is
+one grammar: a source-language slot (comma-listable, conj=-joined),
+a term, an alt display, a gloss at t=/gloss=/the next positional.
+The der/bor/inh family carries the entry language in slot 1 and the
+source in slot 2; cog and m+ drop the entry language, which is the
+langs_slot parameter. The complete-wording variants (bor+, inh+,
+der+, lbor, ubor, slbor, obor, calque, doublet, unknown) differ
+only in prefix, notext=, and nocap=. uder renders exactly as der -
+its difference is a cleanup category. A term of `-` or empty shows
+the language name alone (the term-request UI is wiki maintenance,
+not document content).
+
+Language codes resolve through the vendored map; an unknown code
+renders verbatim and audits language_code_unknown - the accent-map
+growth pattern. The legacy dotted codes (LL., VL.) are gone from
+the snapshot's own data (the canonical-name JSONs and the etymology
+data module carry name aliases only), so they resolve nowhere and
+the audit is the correct outcome.
+
+## etymon renders nothing (fn etymon_text)
+
+The etymon template is a data carrier: on the live site it displays
+NOTHING unless text= (vote-gated per language) or tree= is set, so
+the ~60k ety/etymon instances render empty here with no audit. With
+text=, only the one step the page itself carries can render - the
+chain modes (++, *, :lang) traverse OTHER pages' etymon data, which
+a single-page renderer cannot reach - so every text mode renders
+the immediate step: keyword wording (the :kw derivation keywords
+map to the same wordings as the standalone templates) plus its
+etymons. <unc> prefixes "Possibly"; :af joins with " + "; :root and
+:afeq are invisible by the template's own contract; an unknown
+keyword audits etymon_keyword_unknown. tree= without text= audits
+etymon_tree_dropped - a tree is a visual we cannot carry.
+
+## The inflection-tag engine (fn inflection_of_text)
+
+inflection of (infl of) plus its p=-presetting siblings (noun form
+of, verb form of, adj form of) MUST match before the generic
+" of"-shape rule, or they render "Inflection of [x]" with the
+grammar tags silently dropped - the exact defect this engine
+replaced. Tags resolve through the vendored map (data/1 + data/2 +
+lang-data/en): shortcuts expand recursively (list-valued ones to
+several tags), `//` multiparts join their parts' displays with a
+slash, punctuation tags carry the documented spacing (closers
+attach left, openers right, slash and hyphen both), and `;` breaks
+tag sets, joined "; " with the lemma once at the end. An unknown
+tag renders verbatim - the documented spell-it-out convention, the
+freeze-form posture again. Comma-separated lemmas carry inline
+<mod:value> modifiers; t/alt render, the rest (tr/ts/g/id/sc/pos)
+drop. enclitic= audits with the signature. Capitalization follows
+the form-of family convention (ucfirst unless nocap) for corpus
+uniformity, though the site renders these lowercase.
+
+## The name family (fn surname_text, fn given_name_text)
+
+Assembled from Module:names' own display builders, read from the
+snapshot - the piece order, comma discipline (the first qualifying
+piece attaches bare, later ones take the comma via need_comma), and
+the from= grammar are the Lua's: category keywords (surnames/given
+names/nicknames/place names/common nouns/month names transfer "from
+the <singular>"; patronymics/matronymics/coinages originate "as a";
+occupations/ethnonyms "as an"; the Bible "from the Bible"), language
+and family names render bare ("from French", "from the Slavic
+languages"), code:term references render "from <Language> [term]",
+and " < " chains render the tail as in-turn steps - parenthesized
+here where the Lua brackets them, because square brackets are the
+anchor syntax. eq= defaults terms to English and always shows the
+language name (the Lua's include-langname join); m=/f=/varof= and
+kin default to the entry language and show it only when foreign.
+The gender article: unknown-gender takes "an", otherwise the
+adjective decides, otherwise "a" - and given-name genders include
+the animal set, which renders "for a dog" after the noun rather
+than "dog given name" before it.
+
+## The place engine (fn place_text and kin)
+
+Designed against Template:place/documentation plus the two data
+modules (placetypes, locations), all from the snapshot. The
+vendored data carries exactly the render keys: placetype aliases,
+qualifier displays with their article overrides (largest -> "the",
+several -> none), per-placetype preposition/affix/fallback/
+holonym_use_the resolved through the fallback chain at load, the
+placename article rows and translated the-patterns (Lua ^/$
+patterns become prefix/suffix rows; [Rr] classes expand), and the
+locations that carry article or alias data. Location display
+semantics were measured the hard way: display = true means the
+display CANONICALIZES to the alias target (c/USA renders "United
+States"); a string value displays that string; a bare alias_of
+categorizes only and keeps its written form (c/Czechia renders
+"Czechia") - the first reading (keep-display flag) was backwards
+and two tests caught it.
+
+The comma algorithm is the documented one: no comma before the
+first holonym, none after raw text, none before and/in or a *-led
+piece, comma otherwise. The placetype's preposition inserts only
+when a holonym directly follows the placetype - raw text carries
+its own preposition ("in central", "of") and suppresses both the
+insertion and first-position "the". "the" attaches to a holonym
+only in first position, within a grouped name list past the first,
+or under :pref/:Pref/:the modifiers; affix defaults (oblast ->
+"Oblast" Suf) skip when the name already contains the affix word.
+`;` restarts keep their article lowercase (mid-sentence). The
+single-spec format re-renders text runs through spaced_fragment
+because inline rendering trims - the boundary spaces around
+<<markers>> would otherwise fuse. Extra-information tails (capital=,
+caplc=, seat=, ...) render as "; label: [X]" lists. @-directives
+audit with the signature.
+
+## The straggler set
+
+Mechanical classes the audit tally surfaced beside the families:
+{{...}}/nb... render "..." (the quotation elision; bracketed
+on-site, but brackets are the anchor syntax here); quote-* books
+cited inline (etymology prose) route through the same citation
+engine as #* lines; ux/uxi/usex render as quoted example lines
+under #: and #* and inline as quoted text; sense renders its
+"(gloss):" prefix; taxfmt anchors (its precondition is an existing
+entry) while taxlink renders plain (its precondition is a missing
+one); cap/U anchor a capitalized display against the lowercase
+target; same-page #section links render display text alone and
+mid-target sections strip to the page name. SILENT_TEMPLATES is
+the handled-as-nothing set, and the three template positions (in
+prose, POS paragraphs, list-section paragraphs) all consult it -
+the C/cln/topics class was auditing template_unhandled from
+paragraph positions while inline occurrences were silent.
+
 ## The accent-code map
 
 Third-party data we do not control, so it is carried, never
