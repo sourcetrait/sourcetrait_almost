@@ -46,16 +46,26 @@ fn table() -> CharacterTable {
     }
     rows.push(row(0x0041, 1, false, 0x0061)); // A -> a
     rows.push(row(0x0044, 1, false, 0x0064)); // D -> d
+    rows.push(row(0x004D, 1, false, 0x006D)); // M -> m
+    rows.push(row(0x004E, 1, false, 0x006E)); // N -> n
+    rows.push(row(0x004F, 1, false, 0x006F)); // O -> o
+    rows.push(row(0x0053, 1, false, 0x0073)); // S -> s
     rows.push(row(0x0061, 0, false, 0x0061)); // a
+    rows.push(row(0x0063, 0, false, 0x0063)); // c
     rows.push(row(0x0064, 0, false, 0x0064)); // d
     rows.push(row(0x0065, 0, false, 0x0065)); // e
+    rows.push(row(0x0066, 0, false, 0x0066)); // f
     rows.push(row(0x0067, 0, false, 0x0067)); // g
+    rows.push(row(0x0068, 0, false, 0x0068)); // h
     rows.push(row(0x0069, 0, false, 0x0069)); // i
+    rows.push(row(0x006C, 0, false, 0x006C)); // l
+    rows.push(row(0x006D, 0, false, 0x006D)); // m
     rows.push(row(0x006E, 0, false, 0x006E)); // n
     rows.push(row(0x006F, 0, false, 0x006F)); // o
     rows.push(row(0x0072, 0, false, 0x0072)); // r
     rows.push(row(0x0073, 0, false, 0x0073)); // s
     rows.push(row(0x0074, 0, false, 0x0074)); // t
+    rows.push(row(0x0075, 0, false, 0x0075)); // u
     rows.push(row(0x2019, 3, false, 0x2019)); // typographic apostrophe
     CharacterTable::from_rows(rows, categories)
 }
@@ -359,6 +369,152 @@ fn unassigned_refuses_and_assigned_controls_lex_as_unicode() {
     let pieces = boundary_pieces(&table, "dog\u{0001}").expect("control lexes");
     let last = pieces.last().expect("pieces");
     assert_eq!((last.text, last.kind), ("\u{0001}", PieceKind::Unicode));
+}
+
+#[test]
+fn dictionary_misses_decompose_to_fewest_tokens_longest_at_the_end() {
+    let table = table();
+    let buckets = BucketTable::new();
+    // Every distractor cover is admitted so the criteria decide:
+    // nu + shell (2 tokens, tail 5) beats nus + hell (2 tokens,
+    // tail 4) beats nu + sh + ell (3 tokens).
+    let admitted: Vec<String> = ["ell", "hell", "nu", "nus", "sh", "shell"]
+        .iter()
+        .map(|word| String::from(*word))
+        .collect();
+    let segmenter = Segmenter::new(&table, &buckets, &admitted);
+    let dictionary_offset =
+        CHARACTER_OFFSET + table.assigned_count() as u32 + buckets.count() as u32;
+    let tokens = segmenter.segment("nushell").expect("segments");
+    let shape: Vec<(u32, Layer)> = tokens.iter().map(|t| (t.id, t.layer)).collect();
+    assert_eq!(
+        shape,
+        [
+            (dictionary_offset + 2, Layer::Dictionary), // nu
+            (dictionary_offset + 5, Layer::Dictionary), // shell
+        ]
+    );
+}
+
+#[test]
+fn decomposition_falls_back_per_character_where_no_row_covers() {
+    let table = table();
+    let buckets = BucketTable::new();
+    let admitted = vec![String::from("nu"), String::from("shell")];
+    let segmenter = Segmenter::new(&table, &buckets, &admitted);
+    let tokens = segmenter.segment("nushellg").expect("segments");
+    let layers: Vec<Layer> = tokens.iter().map(|t| t.layer).collect();
+    assert_eq!(
+        layers,
+        [Layer::Dictionary, Layer::Dictionary, Layer::Character]
+    );
+    // A miss nothing covers still character-splits whole.
+    let tokens = segmenter.segment("dog").expect("segments");
+    assert!(tokens.iter().all(|t| t.layer == Layer::Character));
+}
+
+#[test]
+fn decomposed_pieces_carry_their_own_case() {
+    let table = table().with_simple_case(&[('n', 'N')]);
+    let buckets = BucketTable::new();
+    let admitted = vec![String::from("nu"), String::from("shell")];
+    let segmenter = Segmenter::new(&table, &buckets, &admitted);
+    let pairs = segmenter.segment_pieces("Nushell").expect("segments");
+    let texts: Vec<(&str, Layer)> = pairs
+        .iter()
+        .map(|(token, text)| (text.as_str(), token.layer))
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            ("nu", Layer::Dictionary),
+            ("<|capitalized|>", Layer::Keyword),
+            ("shell", Layer::Dictionary),
+        ]
+    );
+}
+
+#[test]
+fn camel_boundaries_override_the_cover_criteria() {
+    let table = table().with_simple_case(&[('a', 'A'), ('o', 'O')]);
+    let buckets = BucketTable::new();
+    let admitted: Vec<String> = ["an", "ant", "one", "tone"]
+        .iter()
+        .map(|word| String::from(*word))
+        .collect();
+    let segmenter = Segmenter::new(&table, &buckets, &admitted);
+    // an + tone carries the longer end piece, but the camel
+    // boundaries name the intent: ant + one.
+    let pairs = segmenter.segment_pieces("AntOne").expect("segments");
+    let texts: Vec<(&str, Layer)> = pairs
+        .iter()
+        .map(|(token, text)| (text.as_str(), token.layer))
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            ("ant", Layer::Dictionary),
+            ("<|capitalized|>", Layer::Keyword),
+            ("one", Layer::Dictionary),
+            ("<|capitalized|>", Layer::Keyword),
+        ]
+    );
+    // Caseless, the criteria decide: the longer end match wins.
+    let pairs = segmenter.segment_pieces("antone").expect("segments");
+    let texts: Vec<&str> = pairs.iter().map(|(_, text)| text.as_str()).collect();
+    assert_eq!(texts, ["an", "tone"]);
+}
+
+#[test]
+fn cased_overlays_spend_word_combinations_where_they_tie_or_reduce() {
+    // Every letter carries its uppercase map, so MicroSoft is
+    // neither capitalized nor uppercased and takes CASED.
+    let table = table().with_simple_case(&[
+        ('m', 'M'), ('s', 'S'), ('i', 'I'), ('c', 'C'),
+        ('r', 'R'), ('o', 'O'), ('f', 'F'), ('t', 'T'),
+    ]);
+    let buckets = BucketTable::new();
+    let admitted = vec![
+        String::from("micro"),
+        String::from("microsoft"),
+        String::from("soft"),
+    ];
+    let segmenter = Segmenter::new(&table, &buckets, &admitted);
+    // MicroSoft is neither capitalized nor uppercased, so the row
+    // takes CASED - and the overlay covers as two capitalized words
+    // (four tokens) instead of nine characters.
+    let pairs = segmenter.segment_pieces("MicroSoft").expect("segments");
+    let texts: Vec<(&str, Layer)> = pairs
+        .iter()
+        .map(|(token, text)| (text.as_str(), token.layer))
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            ("microsoft", Layer::Dictionary),
+            ("<|cased|>", Layer::Keyword),
+            ("micro", Layer::Dictionary),
+            ("<|capitalized|>", Layer::Keyword),
+            ("soft", Layer::Dictionary),
+            ("<|capitalized|>", Layer::Keyword),
+        ]
+    );
+}
+
+#[test]
+fn cased_overlays_keep_characters_where_no_combination_ties() {
+    let table = table().with_simple_case(&[
+        ('m', 'M'), ('s', 'S'), ('i', 'I'), ('c', 'C'),
+        ('r', 'R'), ('o', 'O'), ('f', 'F'), ('t', 'T'),
+    ]);
+    let buckets = BucketTable::new();
+    // Without the subword rows, the overlay has no cover to spend.
+    let admitted = vec![String::from("microsoft")];
+    let segmenter = Segmenter::new(&table, &buckets, &admitted);
+    let pairs = segmenter.segment_pieces("MicroSoft").expect("segments");
+    let layers: Vec<Layer> = pairs.iter().map(|(token, _)| token.layer).collect();
+    assert_eq!(layers.len(), 11);
+    assert!(layers[2..].iter().all(|&layer| layer == Layer::Character));
 }
 
 #[test]

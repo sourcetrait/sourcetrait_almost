@@ -1,14 +1,14 @@
-//! The dictionary layer's source: a wiktextract English dump, streamed.
+//! The dictionary layer's source: the raw enwiktionary dump, derived
+//! through the WikimediaDumpTool's own renderer.
 use crate::*;
 
-use std::io::BufRead;
-
-use crate::lexer::whole_candidate_folded;
 use crate::ucd::CharacterTable;
+use crate::wikiderive::derive_dump;
 
 /// The vendored English word set (folded, single-piece, sorted),
-/// extracted from the wiktextract dump; the CC BY-SA attribution is
-/// at docs/licenses/wiktionary/. Re-vendor via `tokenizer dictionary`.
+/// derived from the raw enwiktionary dump; the CC BY-SA attribution
+/// is at docs/licenses/wiktionary/. Re-vendor via `tokenizer
+/// dictionary`.
 const ENGLISH_WORDS: &str = include_str!("../data/words/english.txt");
 
 /// The embedded English word list, file order (alphabetical).
@@ -20,95 +20,17 @@ pub(crate) fn embedded_words() -> Vec<String> {
         .collect()
 }
 
-/// The fields read off one wiktextract entry; the rest is skipped.
-#[derive(serde::Deserialize)]
-struct Entry {
-    #[serde(default)]
-    word: Option<String>,
-    #[serde(default)]
-    lang_code: Option<String>,
-    #[serde(default)]
-    forms: Vec<Form>,
-}
-
-#[derive(serde::Deserialize)]
-struct Form {
-    #[serde(default)]
-    form: Option<String>,
-}
-
-/// What one extraction pass counted.
-#[derive(Default)]
-struct DictionaryTally {
-    entries_read: usize,
-    non_english: usize,
-    headwords_seen: usize,
-    forms_seen: usize,
-    not_single_piece: usize,
-    single_code_point: usize,
-    refused_characters: usize,
-}
-
-/// `biquest tokenizer dictionary`: dump to the folded word-set artifact.
+/// `biquest tokenizer dictionary`: the raw dump to the folded
+/// word-set artifact - English-bearing ns0 titles plus the head
+/// engines' derived forms, each an admissible connected candidate.
 pub(crate) fn tokenizer_dictionary(args: &TokenizerDictionaryArgs) -> BiquestResult<()> {
     let started = std::time::Instant::now();
     let table = CharacterTable::embedded()?;
-    let file = fs::File::open(&args.dump)?;
-    let reader = io::BufReader::with_capacity(1 << 20, file);
+    let derivation = derive_dump(&table, &args.source, true)?;
 
-    let mut words: HashSet<String> = HashSet::new();
-    let mut tally = DictionaryTally::default();
-    for (index, line) in reader.lines().enumerate() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let entry: Entry = match serde_json::from_str(&line) {
-            Ok(entry) => entry,
-            Err(e) => snafu::whatever!("{}:{}: JSON parse failed: {e}", args.dump.display(), index + 1),
-        };
-        tally.entries_read += 1;
-        if entry.lang_code.as_deref() != Some("en") {
-            tally.non_english += 1;
-            continue;
-        }
-        let mut candidates: Vec<&str> = Vec::new();
-        if let Some(word) = &entry.word {
-            tally.headwords_seen += 1;
-            candidates.push(word);
-        }
-        for form in &entry.forms {
-            if let Some(form) = &form.form {
-                tally.forms_seen += 1;
-                candidates.push(form);
-            }
-        }
-        for candidate in candidates {
-            match whole_candidate_folded(&table, candidate) {
-                Some(folded) => {
-                    words.insert(folded);
-                }
-                None => {
-                    if candidate.chars().any(|c| table.index_of(c as u32).is_none()) {
-                        tally.refused_characters += 1;
-                    } else if candidate.chars().count() == 1 {
-                        tally.single_code_point += 1;
-                    } else {
-                        tally.not_single_piece += 1;
-                    }
-                }
-            }
-        }
-    }
-    snafu::ensure_whatever!(
-        !words.is_empty(),
-        "{}: no admissible words found",
-        args.dump.display()
-    );
-
-    let mut sorted: Vec<&String> = words.iter().collect();
+    let mut sorted: Vec<&String> = derivation.words.iter().collect();
     sorted.sort();
-    let mut payload = String::with_capacity(words.len() * 10);
+    let mut payload = String::with_capacity(derivation.words.len() * 10);
     for word in &sorted {
         payload.push_str(word);
         payload.push('\n');
@@ -120,17 +42,20 @@ pub(crate) fn tokenizer_dictionary(args: &TokenizerDictionaryArgs) -> BiquestRes
     }
     fs::write(&args.out, payload)?;
 
+    let tally = &derivation.tally;
     let provenance = harness::nu::Value::record(
         harness::nu::record! {
-            "dump" => v_str(&args.dump.display().to_string()),
-            "entries_read" => v_int(tally.entries_read as i64),
-            "non_english" => v_int(tally.non_english as i64),
-            "headwords_seen" => v_int(tally.headwords_seen as i64),
+            "source" => v_str(&args.source.display().to_string()),
+            "pages_read" => v_int(tally.pages_read as i64),
+            "ns0_pages" => v_int(tally.ns0_pages as i64),
+            "redirect_pages" => v_int(tally.redirect_pages as i64),
+            "english_pages" => v_int(tally.english_pages as i64),
+            "no_entry_pages" => v_int(tally.no_entry_pages as i64),
+            "parse_failures" => v_int(tally.parse_failures as i64),
+            "titles_admitted" => v_int(tally.titles_admitted as i64),
             "forms_seen" => v_int(tally.forms_seen as i64),
-            "not_single_piece" => v_int(tally.not_single_piece as i64),
-            "single_code_point" => v_int(tally.single_code_point as i64),
-            "refused_characters" => v_int(tally.refused_characters as i64),
-            "words" => v_int(words.len() as i64),
+            "forms_admitted" => v_int(tally.forms_admitted as i64),
+            "words" => v_int(derivation.words.len() as i64),
             "biquest_version" => v_str(env!("CARGO_PKG_VERSION")),
             "extracted_at" => v_int(epoch_seconds()),
         },
@@ -140,9 +65,9 @@ pub(crate) fn tokenizer_dictionary(args: &TokenizerDictionaryArgs) -> BiquestRes
 
     let summary = harness::nu::Value::record(
         harness::nu::record! {
-            "entries_read" => v_int(tally.entries_read as i64),
-            "words" => v_int(words.len() as i64),
-            "not_single_piece" => v_int(tally.not_single_piece as i64),
+            "pages_read" => v_int(tally.pages_read as i64),
+            "english_pages" => v_int(tally.english_pages as i64),
+            "words" => v_int(derivation.words.len() as i64),
             "out" => v_str(&args.out.display().to_string()),
             "seconds" => v_float(started.elapsed().as_secs_f64()),
         },

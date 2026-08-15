@@ -35,21 +35,6 @@ whitespace runs to single spaces makes every row single-line by
 construction; `condensed_line` still guards, refusing a multi-line
 rendering rather than writing it.
 
-## struct DumpSide / fn absorb
-
-One streamed pass, the dictionary pass's shape. The word set uses the
-same `single_piece_folded` filter as `tokenizer dictionary`, which is
-what makes `spellings.nuonl` exactly the vendored word set (verified
-1,003,288 both). Definitions key (folded word, pos) and merge senses
-across etymology-split entries; each sense keeps its LAST gloss,
-because wiktextract glosses refine parent-to-child and the last is
-the sense's own (the earlier elements repeat the parent sense).
-Inflection links come from both directions the dump encodes: entry
-`forms` (lemma-side) and sense `form_of` (form-side). A form_of lemma
-can name an entry the dump never headwords, so written links are
-post-filtered closed over the word set (190 dropped on the current
-dump).
-
 ## fn condensed_line / fn write_lines
 
 One hoisted EngineState for the whole build: the harness helpers
@@ -60,6 +45,14 @@ style keeps the big files smallest.
 ## fn associations_build
 
 UCD classes first (cheap, from the embedded table), then the dump
-pass. ~8 s release over the 3.2 GB dump, ~185 MB written. The
-provenance record carries every count the verification pass compares
-against.
+pass through the provenance derivation (wikiderive - the shared
+one-pass walker `tokenizer dictionary` also rides, which is what
+keeps `spellings.nuonl` exactly the word-set artifact). Definitions
+key (folded word, lowercased POS section name) and merge senses
+across a word's fold-matched pages; senses are our own rendered
+gloss lines, so each line is already its most specific self.
+Inflection links come from both directions the derivation encodes:
+head-derived forms (lemma-side) and definitional form-of targets
+(form-side). A form-of lemma can name a term outside the word set,
+so written links are post-filtered closed over it. The provenance
+record carries every count the verification pass compares against.

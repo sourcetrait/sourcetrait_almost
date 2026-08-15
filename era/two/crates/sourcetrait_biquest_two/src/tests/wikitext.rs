@@ -307,9 +307,34 @@ fn multibyte_content_scans_safely() {
 }
 
 #[test]
-fn unterminated_structure_faults_loudly() {
-    assert!(parse_blocks("{{never closes").is_err());
-    assert!(parse_blocks("[[never closes").is_err());
-    assert!(parse_blocks("<ref>never closes").is_err());
-    assert!(parse_blocks("{| never closes").is_err());
+fn unterminated_structure_degrades_to_literal_text() {
+    // The MediaWiki behavior: an unterminated construct renders as
+    // literal text and the page survives - one broken construct must
+    // never fail a whole page (the here-page class).
+    let blocks = parse_blocks("a {{never closes").expect("parse");
+    let Block::Paragraph { content } = &blocks[0] else {
+        panic!("expected paragraph");
+    };
+    assert_eq!(text_of(content), "a {{never closes");
+    let blocks = parse_blocks("[[never closes").expect("parse");
+    let Block::Paragraph { content } = &blocks[0] else {
+        panic!("expected paragraph");
+    };
+    assert_eq!(text_of(content), "[[never closes");
+    let blocks = parse_blocks("<ref>never closes").expect("parse");
+    let Block::Paragraph { content } = &blocks[0] else {
+        panic!("expected paragraph");
+    };
+    assert_eq!(text_of(content), "<ref>never closes");
+    let blocks = parse_blocks("x <nowiki>never closes").expect("parse");
+    let Block::Paragraph { content } = &blocks[0] else {
+        panic!("expected paragraph");
+    };
+    assert_eq!(text_of(content), "x <nowiki>never closes");
+    // An unterminated table swallows to the end as a table block.
+    let blocks = parse_blocks("{| never closes\n| cell").expect("parse");
+    let Block::Table { source } = &blocks[0] else {
+        panic!("expected table, got {:?}", blocks[0]);
+    };
+    assert!(source.contains("| cell"));
 }

@@ -28,12 +28,13 @@ pub(crate) struct Document {
 }
 
 /// The part-of-speech section names of the English section taxonomy.
-const POS_NAMES: [&str; 24] = [
+const POS_NAMES: [&str; 26] = [
     "Adjective", "Adverb", "Article", "Conjunction", "Contraction",
-    "Determiner", "Infix", "Interjection", "Letter", "Noun", "Numeral",
-    "Particle", "Phrase", "Postposition", "Prefix", "Preposition",
-    "Pronoun", "Proper noun", "Proverb", "Punctuation mark", "Suffix",
-    "Symbol", "Verb", "Interfix",
+    "Determiner", "Infix", "Interjection", "Letter", "Noun", "Number",
+    "Numeral", "Particle", "Phrase", "Postposition", "Prefix",
+    "Preposition", "Prepositional phrase", "Pronoun", "Proper noun",
+    "Proverb", "Punctuation mark", "Suffix", "Symbol", "Verb",
+    "Interfix",
 ];
 
 /// Sections dropped whole, audited.
@@ -43,9 +44,10 @@ const DROP_SECTIONS: [&str; 6] = [
 ];
 
 /// POS subsections rendered as anchored lists.
-const LIST_SECTIONS: [&str; 6] = [
+const LIST_SECTIONS: [&str; 12] = [
     "Synonyms", "Antonyms", "Derived terms", "Related terms",
-    "Collocations", "Coordinate terms",
+    "Collocations", "Coordinate terms", "Hypernyms", "Hyponyms",
+    "Meronyms", "Holonyms", "Troponyms", "Paronyms",
 ];
 
 /// Third-party data carried in, never hardcoded (TheUser's ruling):
@@ -94,33 +96,165 @@ fn accent_table() -> &'static AccentTable {
     })
 }
 
-/// The regular English plural (and third-person singular): +es after
-/// a sibilant ending, consonant-y to -ies, else +s.
-pub(crate) fn regular_plural(word: &str) -> String {
-    let lower = word.to_lowercase();
-    if ["s", "x", "z", "ch", "sh"].iter().any(|end| lower.ends_with(end)) {
-        return format!("{word}es");
-    }
-    if let Some(stem) = consonant_y_stem(word) {
-        return format!("{stem}ies");
-    }
-    format!("{word}s")
+// --------------------------------------------------------------------
+// The default inflection engine, mirroring Module:en-utilities'
+// add_suffix (read from the pinned dump): case-sensitive lowercase
+// phonology, y as a vowel, qu (and sometimes gu) collapsing to the
+// bare consonant, and doubling read off the final segment.
+
+/// The module's vowel test: y counts as a vowel, and the ligature
+/// vowels ride the set (pæan reads vowel-final).
+fn is_vowel(c: char) -> bool {
+    matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'y' | 'æ' | 'ø' | 'œ')
 }
 
-/// Whether a lemma has the doubling shape: consonants, one vowel,
-/// one final consonant not in w/x/y/h (the en-verb C*VC rule).
-fn doubles_final(word: &str) -> bool {
-    let lower = word.to_lowercase();
+/// The module's normalize: lowercase, diacritics stripped (crêpe
+/// reads crepe before the phonology), with `qu` (and `gu` when
+/// `collapse_gu`) before a vowel collapsing to the bare consonant.
+/// `followed` supplies the context character(s) after the word so a
+/// word-final `qu` still collapses against its suffix.
+fn normalize_stem(word: &str, followed: &str, collapse_gu: bool) -> String {
+    use unicode_normalization::char::is_combining_mark;
+    use unicode_normalization::UnicodeNormalization;
+    let lower: String = format!("{}{}", word.to_lowercase(), followed)
+        .nfd()
+        .filter(|&c| !is_combining_mark(c))
+        .collect();
     let chars: Vec<char> = lower.chars().collect();
-    let Some((&last, body)) = chars.split_last() else { return false };
-    if !last.is_ascii_alphabetic() || "aeiouwxyh".contains(last) {
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let c = chars[index];
+        let collapsible = c == 'q' || (collapse_gu && c == 'g');
+        if collapsible
+            && chars.get(index + 1) == Some(&'u')
+            && chars.get(index + 2).copied().is_some_and(is_vowel)
+        {
+            out.push(c);
+            index += 2;
+            continue;
+        }
+        out.push(c);
+        index += 1;
+    }
+    for _ in 0..followed.chars().count() {
+        out.pop();
+    }
+    out
+}
+
+/// The y-to-i stem for s/d suffixes, or None to keep the word whole.
+/// `ey_to_i` enables the -er/-est rules: -eey keeps its e, -ey
+/// converts iff the base is polysyllabic (a vowel or digit anywhere:
+/// cliquey -> cliqui, grey stays), and gu collapses so roguy -> rogui.
+fn final_y_to_i(word: &str, ey_to_i: bool) -> Option<String> {
+    let base_y = word.strip_suffix('y')?;
+    if base_y.ends_with("ee") {
+        return Some(format!("{base_y}i"));
+    }
+    if ey_to_i && let Some(base) = base_y.strip_suffix('e') {
+        if base.ends_with('-') {
+            return Some(format!("{base}i"));
+        }
+        let normalized = normalize_stem(base, "ey", true);
+        let polysyllabic = match normalized.chars().last() {
+            Some('y') => normalized
+                .chars()
+                .rev()
+                .nth(1)
+                .is_some_and(|c| c.is_alphanumeric()),
+            _ => normalized
+                .chars()
+                .any(|c| is_vowel(c) || c.is_ascii_digit()),
+        };
+        return if polysyllabic { Some(format!("{base}i")) } else { None };
+    }
+    if base_y.ends_with('-') {
+        return Some(format!("{base_y}i"));
+    }
+    let normalized = normalize_stem(base_y, "y", ey_to_i);
+    match normalized.chars().last() {
+        Some(c)
+            if !is_vowel(c)
+                && !c.is_whitespace()
+                && !c.is_ascii_punctuation() =>
+        {
+            Some(format!("{base_y}i"))
+        }
+        _ => None,
+    }
+}
+
+/// Whether the plural/3sg takes epenthetic -es (the module's
+/// sibilant set, case-sensitive): s/x/z, [csz]h+, dg, consonant-j,
+/// and a word-initial u (double-u -> double-ues).
+fn takes_es(word: &str) -> bool {
+    if word.ends_with('s')
+        || word.ends_with('x')
+        || word.ends_with('z')
+        || word.ends_with('ß')
+    {
+        return true;
+    }
+    if word.ends_with('h') {
+        let trimmed = word.trim_end_matches('h');
+        return trimmed.ends_with('c')
+            || trimmed.ends_with('s')
+            || trimmed.ends_with('z');
+    }
+    if word.ends_with('g') && word.len() >= 2 && word.as_bytes()[word.len() - 2] == b'd'
+    {
+        return true;
+    }
+    let mut rev = word.chars().rev();
+    if rev.next() == Some('j') {
+        return rev.next().is_some_and(|c| c.is_alphabetic() && !is_vowel(c));
+    }
+    if word == "u" {
+        return true;
+    }
+    if word.ends_with('u') {
+        let before = word.chars().rev().nth(1);
+        return before.is_some_and(|c| !c.is_alphanumeric() && c != '\'');
+    }
+    false
+}
+
+/// The module's double_final_consonant shape: the raw final char is
+/// a lowercase doubling consonant, and the normalized stem's final
+/// segment (after a space or hyphen) reads [initial][vowel] where
+/// initial is empty, exactly y, or a vowel-free run of letters and
+/// punctuation. An uppercase segment never doubles.
+fn doubles_final(word: &str) -> bool {
+    let Some(last) = word.chars().last() else { return false };
+    if !matches!(
+        last,
+        'b' | 'c' | 'd' | 'f' | 'g' | 'j' | 'k' | 'l' | 'm' | 'n' | 'p' | 'q'
+            | 'r' | 's' | 't' | 'v' | 'z'
+    ) {
         return false;
     }
-    let Some((&vowel, head)) = body.split_last() else { return false };
-    if !"aeiou".contains(vowel) {
+    let stem = &word[..word.len() - last.len_utf8()];
+    let raw_segment = stem.rsplit(['-', ' ']).next().unwrap_or(stem);
+    if raw_segment.chars().any(|c| c.is_uppercase()) {
         return false;
     }
-    head.iter().all(|&c| c.is_ascii_alphabetic() && !"aeiou".contains(c))
+    let normalized = normalize_stem(stem, &last.to_string(), true);
+    let segment = normalized
+        .rsplit(['-', ' '])
+        .next()
+        .unwrap_or(normalized.as_str());
+    let chars: Vec<char> = segment.chars().collect();
+    let Some((&vowel, head)) = chars.split_last() else { return false };
+    if !is_vowel(vowel) {
+        return false;
+    }
+    if head.is_empty() || head == ['y'] {
+        return true;
+    }
+    head.iter().all(|&c| {
+        (c.is_alphabetic() || c.is_ascii_punctuation()) && !is_vowel(c)
+    })
 }
 
 /// The word with its final consonant doubled before a suffix.
@@ -131,21 +265,67 @@ fn doubled(word: &str, suffix: &str) -> String {
     }
 }
 
-/// The regular present participle (the en-verb exact rules): -ie to
-/// -ying, -ue drops the e, consonant-e drops the e, C*VC doubles,
-/// else +ing.
+/// The s-form engine behind the plural and the third-person
+/// singular: y-to-i takes -es, the sibilant set takes -es (the verb
+/// doubling first: quiz -> quizzes), else -s. A proper noun keeps
+/// its -y (the Gettys).
+fn s_form(word: &str, proper: bool, verb: bool) -> String {
+    // The plural of a possessive pluralizes the base and re-adds the
+    // possessive (greengrocer's -> greengrocers').
+    if !verb && let Some(base) = word.strip_suffix("'s") {
+        let plural = s_form(base, proper, false);
+        let possessive = if plural.ends_with('s') { "'" } else { "'s" };
+        return format!("{plural}{possessive}");
+    }
+    if !proper && let Some(stem) = final_y_to_i(word, false) {
+        return format!("{stem}es");
+    }
+    if takes_es(word) {
+        if verb && doubles_final(word) {
+            return doubled(word, "es");
+        }
+        return format!("{word}es");
+    }
+    format!("{word}s")
+}
+
+/// The regular noun plural (the module's s.plural: no doubling).
+pub(crate) fn regular_plural(word: &str) -> String {
+    s_form(word, false, false)
+}
+
+/// The regular third-person singular (s.verb: doubling on -es).
+pub(crate) fn verb_s_form(word: &str) -> String {
+    s_form(word, false, true)
+}
+
+/// The regular present participle (the module's ing rules): -ie to
+/// -ying unless after y, silent e drops after ue or vowel+consonant,
+/// the doubling shape doubles, else +ing.
 pub(crate) fn regular_participle(word: &str) -> String {
-    let lower = word.to_lowercase();
-    if lower.ends_with("ie") {
-        return format!("{}ying", &word[..word.len() - 2]);
+    if let Some(stem) = word.strip_suffix("ie") {
+        let before = word.chars().rev().nth(2);
+        if before.is_some_and(|c| {
+            c != 'y' && c != 'Y' && !c.is_whitespace() && !c.is_ascii_punctuation()
+        }) {
+            return format!("{stem}ying");
+        }
+        return format!("{word}ing");
     }
-    if lower.ends_with("ue") {
-        return format!("{}ing", &word[..word.len() - 1]);
-    }
-    if lower.ends_with('e') {
-        let before = lower.chars().rev().nth(1);
-        if before.is_some_and(|c| c.is_ascii_alphabetic() && !"aeiouy".contains(c)) {
-            return format!("{}ing", &word[..word.len() - 1]);
+    if let Some(base) = word.strip_suffix('e') {
+        let silent = word.ends_with("ue") || {
+            let normalized = normalize_stem(base, "e", true);
+            let chars: Vec<char> = normalized.chars().collect();
+            let trailing_consonants =
+                chars.iter().rev().take_while(|&&c| !is_vowel(c)).count();
+            trailing_consonants >= 1
+                && chars
+                    .get(chars.len().wrapping_sub(trailing_consonants + 1))
+                    .copied()
+                    .is_some_and(is_vowel)
+        };
+        if silent {
+            return format!("{base}ing");
         }
         return format!("{word}ing");
     }
@@ -155,15 +335,14 @@ pub(crate) fn regular_participle(word: &str) -> String {
     format!("{word}ing")
 }
 
-/// The regular past (the en-verb exact rules): e takes +d,
-/// consonant-y takes -ied, C*VC doubles, else +ed.
+/// The regular past (the module's d rules): y-to-i takes -ied, a
+/// final e takes -d, the doubling shape doubles, else +ed.
 pub(crate) fn regular_past(word: &str) -> String {
-    let lower = word.to_lowercase();
-    if lower.ends_with('e') {
-        return format!("{word}d");
+    if let Some(stem) = final_y_to_i(word, false) {
+        return format!("{stem}ed");
     }
-    if let Some(stem) = consonant_y_stem(word) {
-        return format!("{stem}ied");
+    if word.ends_with('e') {
+        return format!("{word}d");
     }
     if doubles_final(word) {
         return doubled(word, "ed");
@@ -171,41 +350,36 @@ pub(crate) fn regular_past(word: &str) -> String {
     format!("{word}ed")
 }
 
-/// An -er/-est graded form (the en-adj rules): e drops, consonant-y
-/// and consonant-ey become -i-, C*VC doubles, else the bare suffix.
+/// The irregular graded pairs the module hardcodes; a selector
+/// grading "well" must yield better/best, never weller.
+fn irregular_graded(word: &str, suffix: &str) -> Option<String> {
+    let (comparative, superlative) = match word.to_lowercase().as_str() {
+        "well" | "good" => ("better", "best"),
+        "bad" | "badly" => ("worse", "worst"),
+        "far" => ("further", "furthest"),
+        _ => return None,
+    };
+    Some(String::from(if suffix == "er" { comparative } else { superlative }))
+}
+
+/// An -er/-est graded form (the module's r/st.superlative rules):
+/// irregulars first, then y/ey-to-i (+ier/+iest), a final e takes
+/// the bare -r/-st, the doubling shape doubles, else -er/-est.
 fn graded_form(word: &str, suffix: &str) -> String {
-    let lower = word.to_lowercase();
-    if lower.ends_with('e') {
-        return format!("{}{suffix}", &word[..word.len() - 1]);
+    if let Some(irregular) = irregular_graded(word, suffix) {
+        return irregular;
     }
-    if lower.ends_with("ey") {
-        let head_end = word.len() - 2;
-        let before = lower.chars().rev().nth(2);
-        if before.is_some_and(|c| c.is_ascii_alphabetic() && !"aeiou".contains(c)) {
-            return format!("{}i{suffix}", &word[..head_end]);
-        }
+    if let Some(stem) = final_y_to_i(word, true) {
+        return format!("{stem}{suffix}");
     }
-    if let Some(stem) = consonant_y_stem(word) {
-        return format!("{stem}i{suffix}");
+    if word.ends_with('e') {
+        let bare = if suffix == "er" { "r" } else { "st" };
+        return format!("{word}{bare}");
     }
     if doubles_final(word) {
         return doubled(word, suffix);
     }
     format!("{word}{suffix}")
-}
-
-/// The stem before a consonant-y ending, or None.
-fn consonant_y_stem(word: &str) -> Option<&str> {
-    let lower = word.to_lowercase();
-    let mut chars = lower.chars().rev();
-    if chars.next() != Some('y') {
-        return None;
-    }
-    let before = chars.next()?;
-    if "aeiou".contains(before) {
-        return None;
-    }
-    Some(&word[..word.len() - 1])
 }
 
 /// One inflected form: its text plus rendered label text, from the
@@ -214,6 +388,23 @@ fn consonant_y_stem(word: &str) -> Option<&str> {
 struct SpecForm {
     text: String,
     labels: Vec<String>,
+}
+
+/// Embedded wikilinks flattened to their display text.
+fn flatten_wikilinks(text: &str) -> String {
+    let mut text = text.to_string();
+    while let Some(open) = text.find("[[") {
+        let Some(close) = text[open..].find("]]").map(|c| open + c) else {
+            break;
+        };
+        let inner = &text[open + 2..close];
+        let display = match inner.rsplit_once('|') {
+            Some((_, display)) => display,
+            None => inner,
+        };
+        text = format!("{}{display}{}", &text[..open], &text[close + 2..]);
+    }
+    text
 }
 
 impl SpecForm {
@@ -225,18 +416,7 @@ impl SpecForm {
     /// parenthetical. Embedded wikilinks flatten to their display
     /// text - the whole form is the anchor.
     fn rendered(&self) -> String {
-        let mut text = self.text.clone();
-        while let Some(open) = text.find("[[") {
-            let Some(close) = text[open..].find("]]").map(|c| open + c) else {
-                break;
-            };
-            let inner = &text[open + 2..close];
-            let display = match inner.rsplit_once('|') {
-                Some((_, display)) => display,
-                None => inner,
-            };
-            text = format!("{}{display}{}", &text[..open], &text[close + 2..]);
-        }
+        let text = flatten_wikilinks(&self.text);
         if self.labels.is_empty() {
             format!("[{text}]")
         } else {
@@ -504,6 +684,15 @@ fn form_of_aliases() -> &'static Vec<(String, String)> {
     })
 }
 
+/// " of"-shaped templates whose relation is semantic rather than a
+/// form variant: they render through the shape rule but their
+/// targets are not inflection-link lemmas.
+const SEMANTIC_OF_LABELS: [&str; 10] = [
+    "synonym of", "antonym of", "hypernym of", "hyponym of",
+    "cohyponym of", "coordinate of", "homophone of",
+    "female equivalent of", "male equivalent of", "gender equivalent of",
+];
+
 /// The full "<label> of" name a definitional form-of template
 /// renders under: an alias expansion, or the name itself when it
 /// already ends in " of" (the generic shape; `form of` itself
@@ -578,16 +767,77 @@ fn anchor(display: &str, target: &str) -> String {
     }
 }
 
-/// The renderer over one page's English subtree.
+/// The renderer over one page's English subtree. Beside the markdown
+/// it collects the derived DATA the render presents - inflected
+/// forms, per-POS senses, and form-of lemma targets - so the
+/// provenance derivation reads exactly what the document shows.
 struct Renderer<'a> {
     page_title: &'a str,
     lines: Vec<String>,
     audit: Vec<AuditRow>,
+    /// Every inflected form the head engines put in a parenthetical.
+    forms: Vec<String>,
+    /// (pos section name, rendered gloss) per numbered sense line.
+    senses: Vec<(String, String)>,
+    /// The lemma targets of definitional form-of renders.
+    form_of_lemmas: Vec<String>,
 }
 
 impl<'a> Renderer<'a> {
     fn new(page_title: &'a str) -> Self {
-        Self { page_title, lines: Vec::new(), audit: Vec::new() }
+        Self {
+            page_title,
+            lines: Vec::new(),
+            audit: Vec::new(),
+            forms: Vec::new(),
+            senses: Vec::new(),
+            form_of_lemmas: Vec::new(),
+        }
+    }
+
+    /// Record one presented inflected form, wikilinks flattened.
+    fn record_form(&mut self, text: &str) {
+        let flat = flatten_wikilinks(text);
+        let flat = flat.trim();
+        if !flat.is_empty() && !flat.contains("{{") {
+            self.forms.push(flat.to_string());
+        }
+    }
+
+    /// Record a definitional form-of render's lemma target: inline
+    /// modifiers strip, every wikilink flattens to its TARGET (the
+    /// resource is the lemma), a section suffix strips; w:-referents
+    /// and template-bearing targets are not lemmas. A multiword
+    /// result survives here and drops at the admission filter -
+    /// truncating it to its first word would fabricate a link.
+    fn record_form_of(&mut self, raw: &str) {
+        let (base, _) = term_modifiers(raw);
+        let base = base.trim();
+        if base.is_empty() || base.starts_with("w:") || base.contains("{{") {
+            return;
+        }
+        let mut text = String::new();
+        let mut rest = base;
+        while let Some(open) = rest.find("[[") {
+            text.push_str(&rest[..open]);
+            let Some(close) = rest[open..].find("]]").map(|c| open + c) else {
+                text.push_str(&rest[open..]);
+                rest = "";
+                break;
+            };
+            let inner = &rest[open + 2..close];
+            let target = match inner.split_once('|') {
+                Some((target, _)) => target,
+                None => inner,
+            };
+            text.push_str(target);
+            rest = &rest[close + 2..];
+        }
+        text.push_str(rest);
+        let text = text.split('#').next().unwrap_or_default().trim();
+        if !text.is_empty() {
+            self.form_of_lemmas.push(text.to_string());
+        }
     }
 
     /// Details sanitize to single NUON-line-safe lines here, the one
@@ -1132,6 +1382,7 @@ impl<'a> Renderer<'a> {
                     .filter(|d| !d.is_empty())
                     .copied()
                     .unwrap_or(term);
+                self.record_form_of(term);
                 let anchored = self.form_of_anchor(term, alt);
                 let (label, degree) = if name == "en-superlative of" {
                     ("Superlative form of", "most")
@@ -1148,6 +1399,7 @@ impl<'a> Renderer<'a> {
                     .filter(|d| !d.is_empty())
                     .copied()
                     .unwrap_or(target);
+                self.record_form_of(target);
                 let anchored = self.form_of_anchor(target, display);
                 format!("{} of {}", ucfirst(label), anchored)
             }
@@ -1159,6 +1411,9 @@ impl<'a> Renderer<'a> {
                     .filter(|d| !d.is_empty())
                     .copied()
                     .unwrap_or(target);
+                if !SEMANTIC_OF_LABELS.contains(&label.as_str()) {
+                    self.record_form_of(target);
+                }
                 let anchored = self.form_of_anchor(target, display);
                 let mut text = format!("{label} {anchored}");
                 if named("nocap").is_none() {
@@ -1190,6 +1445,46 @@ impl<'a> Renderer<'a> {
             return anchor(display, rest);
         }
         anchor(display, target)
+    }
+
+    /// Record a name-list value's terms (the surname and given-name
+    /// variant families) as form-of lemmas: comma pieces, English or
+    /// bare terms only, inline modifiers stripped.
+    fn record_name_form_of(&mut self, value: &str) {
+        for piece in split_modifier_commas(value) {
+            let (base, _) = term_modifiers(piece.trim());
+            if base.is_empty() {
+                continue;
+            }
+            match base.split_once(':') {
+                Some((code, term)) if language_table().name(code).is_some() => {
+                    if code == "en" {
+                        self.record_form_of(term);
+                    }
+                }
+                _ => self.record_form_of(&base),
+            }
+        }
+    }
+
+    /// Record a name-list value's terms as variant FORMS of this
+    /// word (the varform and dimform families run the reverse
+    /// direction: the listed name is a form of the entry).
+    fn record_name_forms(&mut self, value: &str) {
+        for piece in split_modifier_commas(value) {
+            let (base, _) = term_modifiers(piece.trim());
+            if base.is_empty() {
+                continue;
+            }
+            match base.split_once(':') {
+                Some((code, term)) if language_table().name(code).is_some() => {
+                    if code == "en" {
+                        self.record_form(term);
+                    }
+                }
+                _ => self.record_form(&base),
+            }
+        }
     }
 
     /// Anchored parts joined with " + ", the etymology convention.
@@ -1532,6 +1827,7 @@ impl<'a> Renderer<'a> {
             if piece.trim().is_empty() {
                 continue;
             }
+            self.record_form_of(piece);
             let (_, modifiers) = term_modifiers(piece);
             let piece_alt = if index == 0 && pieces.len() == 1 && !alt.is_empty() {
                 alt.clone()
@@ -2068,6 +2364,13 @@ impl<'a> Renderer<'a> {
             if values.is_empty() {
                 continue;
             }
+            // A variant or clipping IS a form of its target; the
+            // gender equivalents are semantic and stay unrecorded.
+            if matches!(family, "varof" | "var" | "clipof") {
+                for value in &values {
+                    self.record_name_form_of(value);
+                }
+            }
             let (text, _) = self.name_list(&values.join(","), false, conjunction);
             out.push_str(&format!(", {label} {text}"));
         }
@@ -2092,6 +2395,9 @@ impl<'a> Renderer<'a> {
         }
         let varform = named_family(&template, "varform");
         if !varform.is_empty() {
+            for value in &varform {
+                self.record_name_forms(value);
+            }
             let (text, count) = self.name_list(&varform.join(","), false, "and");
             let plural = if count > 1 { "s" } else { "" };
             out.push_str(&format!(
@@ -2154,6 +2460,12 @@ impl<'a> Renderer<'a> {
         }
         let dimof: Vec<String> = [named_family(&template, "dimof"), named_family(&template, "dim")]
             .concat();
+        // A diminutive is a form of the names it shortens.
+        for value in &dimof {
+            if value != "-" {
+                self.record_name_form_of(value);
+            }
+        }
         let mut out = String::new();
         let mut force_plural = false;
         if !dimof.is_empty() {
@@ -2263,6 +2575,9 @@ impl<'a> Renderer<'a> {
             if values.is_empty() {
                 continue;
             }
+            for value in &values {
+                self.record_name_form_of(value);
+            }
             let (text, _) = self.name_list(&values.join(","), false, "and");
             let label_type = format!("{family}type");
             out.push_str(&format!(
@@ -2323,6 +2638,9 @@ impl<'a> Renderer<'a> {
             let values = named_family(&template, family);
             if values.is_empty() {
                 continue;
+            }
+            for value in &values {
+                self.record_name_forms(value);
             }
             let (text, count) = self.name_list(&values.join(","), false, "and");
             let plural = if count > 1 { "s" } else { "" };
@@ -2902,15 +3220,16 @@ impl<'a> Renderer<'a> {
                     "!" => unattested = true,
                     "?" => return None,
                     "+" | "^" => plurals.push(SpecForm {
-                        text: regular_plural(&title),
+                        text: s_form(&title, proper, false),
                         labels,
                     }),
                     "++" => {
-                        let lower = title.to_lowercase();
-                        let text = if lower.ends_with('s') || lower.ends_with('z') {
+                        // The module's ++ plural: a final s/z/x
+                        // doubles before -es.
+                        let text = if title.ends_with(['s', 'z', 'x']) {
                             doubled(&title, "es")
                         } else {
-                            regular_plural(&title)
+                            s_form(&title, proper, false)
                         };
                         plurals.push(SpecForm { text, labels });
                     }
@@ -2918,7 +3237,12 @@ impl<'a> Renderer<'a> {
                     "s" => plurals.push(SpecForm { text: format!("{title}s"), labels }),
                     "es" => plurals.push(SpecForm { text: format!("{title}es"), labels }),
                     "ies" => {
-                        let stem = title.strip_suffix('y').unwrap_or(&title);
+                        // -ey words take -ies whole (whiskey ->
+                        // whiskies); otherwise the -y drops.
+                        let stem = title
+                            .strip_suffix("ey")
+                            .or_else(|| title.strip_suffix('y'))
+                            .unwrap_or(&title);
                         plurals.push(SpecForm { text: format!("{stem}ies"), labels });
                     }
                     _ => plurals.push(form),
@@ -2946,12 +3270,18 @@ impl<'a> Renderer<'a> {
             pieces.push(String::from("plural only"));
             let singulars = collect_family("sg");
             if !singulars.is_empty() {
+                for form in &singulars {
+                    self.record_form(&form.text);
+                }
                 let rendered: Vec<String> =
                     singulars.iter().map(SpecForm::rendered).collect();
                 pieces.push(format!("singular {}", rendered.join(" or ")));
             }
             let attributives = collect_family("attr");
             if !attributives.is_empty() {
+                for form in &attributives {
+                    self.record_form(&form.text);
+                }
                 let rendered: Vec<String> =
                     attributives.iter().map(SpecForm::rendered).collect();
                 pieces.push(format!("attributive {}", rendered.join(" or ")));
@@ -2972,7 +3302,19 @@ impl<'a> Renderer<'a> {
         } else if !plurals.is_empty() {
             pieces.push(plural_piece(&plurals));
         } else if !proper {
-            pieces.push(format!("plural [{}]", regular_plural(&title)));
+            let plural = regular_plural(&title);
+            self.record_form(&plural);
+            pieces.push(format!("plural [{plural}]"));
+        }
+        // The presented plural forms, as data (the branches above
+        // present `plurals` whenever it is non-empty and neither
+        // plural-only nor unattested).
+        if !plural_only && !unattested {
+            let recorded: Vec<String> =
+                plurals.iter().map(|form| form.text.clone()).collect();
+            for text in recorded {
+                self.record_form(&text);
+            }
         }
         if pieces.is_empty() {
             return None;
@@ -3013,10 +3355,19 @@ impl<'a> Renderer<'a> {
             SpecForm { text: format!("{text}{suffix_rest}"), labels }
         };
         match (base, slot) {
-            ("+" | "^", 0) => vec![with_labels(regular_plural(&word), None)],
+            ("+" | "^", 0) => vec![with_labels(verb_s_form(&word), None)],
             ("+" | "^", 1) => vec![with_labels(regular_participle(&word), None)],
             ("+" | "^", _) => vec![with_labels(regular_past(&word), None)],
-            ("++", 0) => vec![with_labels(regular_plural(&word), None)],
+            ("++", 0) => {
+                // The module's ++ s-form: a final s/z/x doubles
+                // before -es; anything else takes the default.
+                let text = if word.ends_with(['s', 'z', 'x']) {
+                    doubled(&word, "es")
+                } else {
+                    verb_s_form(&word)
+                };
+                vec![with_labels(text, None)]
+            }
             ("++", 1) => vec![with_labels(doubled(&word, "ing"), None)],
             ("++", _) => vec![with_labels(doubled(&word, "ed"), None)],
             ("+!", 0) => vec![with_labels(format!("{word}s"), None)],
@@ -3028,7 +3379,7 @@ impl<'a> Renderer<'a> {
                 with_labels(format!("{word}'d"), None),
                 with_labels(format!("{word}'ed"), None),
             ],
-            ("+l", 0) => vec![with_labels(regular_plural(&word), None)],
+            ("+l", 0) => vec![with_labels(verb_s_form(&word), None)],
             ("+l", 1) => vec![
                 with_labels(format!("{word}ing"), Some("US")),
                 with_labels(doubled(&word, "ing"), Some("UK")),
@@ -3117,7 +3468,7 @@ impl<'a> Renderer<'a> {
                     }
                     let derived = if text.is_empty() || text == "+" || text == "^" {
                         match slot {
-                            0 => regular_plural(&word),
+                            0 => verb_s_form(&word),
                             1 => regular_participle(&word),
                             _ => regular_past(&word),
                         }
@@ -3251,7 +3602,17 @@ impl<'a> Renderer<'a> {
     /// Render the four verb slots to the parenthetical; an absent or
     /// past-equal participle folds into the combined piece, and an
     /// explicitly defective one leaves the past standing alone.
-    fn verb_pieces(&self, slots: Vec<Vec<SpecForm>>, participle_defective: bool) -> String {
+    fn verb_pieces(
+        &mut self,
+        slots: Vec<Vec<SpecForm>>,
+        participle_defective: bool,
+    ) -> String {
+        for slot in &slots {
+            for form in slot {
+                let text = form.text.clone();
+                self.record_form(&text);
+            }
+        }
         let join = |forms: &[SpecForm]| -> String {
             forms
                 .iter()
@@ -3492,11 +3853,21 @@ impl<'a> Renderer<'a> {
         }
         if !comparatives.is_empty() {
             pieces.push(format!("comparative {}", join(&comparatives)));
+            let recorded: Vec<String> =
+                comparatives.iter().map(|form| form.text.clone()).collect();
+            for text in recorded {
+                self.record_form(&text);
+            }
         }
         if !superlatives.is_empty()
             && (!not_comparable || !comparatives.is_empty() || !sup_specs.is_empty())
         {
             pieces.push(format!("superlative {}", join(&superlatives)));
+            let recorded: Vec<String> =
+                superlatives.iter().map(|form| form.text.clone()).collect();
+            for text in recorded {
+                self.record_form(&text);
+            }
         }
         if pieces.is_empty() {
             return None;
@@ -3525,12 +3896,14 @@ impl<'a> Renderer<'a> {
                     && !form.is_empty()
                     && let Some(last) = pieces.last_mut()
                 {
+                    self.record_form(form);
                     let anchored = self.anchored_argument(form);
                     last.1.push(anchored);
                 }
             } else if !name.is_empty() {
                 let forms = match form {
                     Some(form) if !form.is_empty() => {
+                        self.record_form(form);
                         vec![self.anchored_argument(form)]
                     }
                     _ => Vec::new(),
@@ -3654,10 +4027,13 @@ impl<'a> Renderer<'a> {
         let parenthetical = match (parenthetical, named("abbr")) {
             (parenthetical, None) => parenthetical,
             (parenthetical, Some(abbr)) => {
-                let rendered: Vec<String> = spec_forms(abbr, &title)
-                    .iter()
-                    .map(SpecForm::rendered)
-                    .collect();
+                let forms = spec_forms(abbr, &title);
+                for form in &forms {
+                    let text = form.text.clone();
+                    self.record_form(&text);
+                }
+                let rendered: Vec<String> =
+                    forms.iter().map(SpecForm::rendered).collect();
                 let piece = format!("abbreviation {}", rendered.join(" or "));
                 Some(match parenthetical {
                     Some(inner) => {
@@ -3979,6 +4355,9 @@ fn render_pos(renderer: &mut Renderer<'_>, section: &Section<'_>, level: usize) 
             let number = counters[depth - 1];
             let indent = "   ".repeat(depth - 1);
             let text = renderer.inline_text(content);
+            if !text.is_empty() {
+                renderer.senses.push((section.name.clone(), text.clone()));
+            }
             renderer.lines.push(format!("{indent}{number}. {text}"));
             continue;
         }
@@ -4096,6 +4475,78 @@ pub(crate) fn order_word_pages(word: &str, pages: &mut Vec<WikiPage>) {
         };
         (rank, page.title.clone())
     });
+}
+
+/// One page's derived data: what the render presents, as data - the
+/// provenance derivation's per-page unit.
+pub(crate) struct PageDerivation {
+    /// Whether the page carries an English h2 section.
+    pub(crate) has_english: bool,
+    /// Whether the English subtree carries the `no entry` soft
+    /// redirect - the wiki's own declaration that no English entry
+    /// exists, so the title is not a vocabulary word.
+    pub(crate) no_entry: bool,
+    /// The head engines' inflected forms, render order.
+    pub(crate) forms: Vec<String>,
+    /// (pos section name, rendered gloss) per numbered sense line.
+    pub(crate) senses: Vec<(String, String)>,
+    /// Definitional form-of lemma targets, render order.
+    pub(crate) form_of_lemmas: Vec<String>,
+}
+
+/// Whether a block list carries the English h2.
+fn has_english_section(blocks: &[Block]) -> bool {
+    blocks.iter().any(|block| {
+        matches!(block, Block::Heading { level: 2, content }
+            if heading_name(content) == "English")
+    })
+}
+
+/// Whether the English subtree carries the `no entry` template. It
+/// sits directly under the English heading, before any section, so
+/// the section walk never sees it - this scan does.
+fn english_no_entry(blocks: &[Block]) -> bool {
+    let mut inside = false;
+    for block in blocks {
+        match block {
+            Block::Heading { level: 2, content } => {
+                inside = heading_name(content) == "English";
+            }
+            Block::Paragraph { content } | Block::ListItem { content, .. }
+                if inside =>
+            {
+                let hit = content.iter().any(|inline| {
+                    matches!(inline, Inline::Template(template)
+                        if template.name == "no entry"
+                            || template.name == "noentry")
+                });
+                if hit {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Derive one page's data through the document renderer, so the data
+/// equals what the rendered document presents.
+pub(crate) fn derive_page(page: &WikiPage) -> BiquestResult<PageDerivation> {
+    let blocks = parse_blocks(&page.text)?;
+    let has_english = has_english_section(&blocks);
+    let no_entry = has_english && english_no_entry(&blocks);
+    let mut renderer = Renderer::new(&page.title);
+    if has_english && !no_entry {
+        render_page(&mut renderer, &blocks)?;
+    }
+    Ok(PageDerivation {
+        has_english,
+        no_entry,
+        forms: renderer.forms,
+        senses: renderer.senses,
+        form_of_lemmas: renderer.form_of_lemmas,
+    })
 }
 
 /// Render a word's page set into its one markdown document: the

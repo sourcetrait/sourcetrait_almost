@@ -17,6 +17,23 @@ fn regular_inflections_follow_the_default_rules() {
     assert_eq!(regular_past("love"), "loved");
     assert_eq!(regular_past("try"), "tried");
     assert_eq!(regular_past("pass"), "passed");
+    // Doubling reads the final segment of a hyphenated lemma, y as
+    // the vowel, and qu as a consonant unit.
+    assert_eq!(regular_past("booby-trap"), "booby-trapped");
+    assert_eq!(regular_participle("bitch-slap"), "bitch-slapping");
+    assert_eq!(regular_past("gyp"), "gypped");
+    assert_eq!(regular_participle("quop"), "quopping");
+    assert_eq!(regular_past("visit"), "visited");
+    // The phonology is case-sensitive (acronyms stay regular),
+    // diacritics strip before it, and quy converts.
+    assert_eq!(regular_plural("DMZ"), "DMZs");
+    assert_eq!(regular_plural("APY"), "APYs");
+    assert_eq!(regular_past("XOR"), "XORed");
+    assert_eq!(regular_participle("crêpe"), "crêping");
+    assert_eq!(regular_plural("soliloquy"), "soliloquies");
+    assert_eq!(regular_plural("guy"), "guys");
+    // The possessive plural re-adds its suffix after the base.
+    assert_eq!(regular_plural("greengrocer's"), "greengrocers'");
 }
 
 const PAGE_TEXT: &str = "==English==\n\n===Etymology===\nA {{blend|en|alpha|beta|nocap=1}}.\n\n===Noun===\n{{en-noun}}\n\n# {{lb|en|informal}} A [[pet]], with [[friend]]s.\n#: {{syn|en|hound<q:x>|pooch}}\n#* {{quote-book|en|year=2001|title=Dogs|passage=the '''dog''' ran}}\n\n====Derived terms====\n{{col|en||dog days|dogged}}\n\n====Translations====\n{{trans-top|x}}\n* Finnish: {{t|fi|koira}}\n{{trans-bottom}}\n\n===Anagrams===\n* {{anagrams|en|a=dgo|god}}\n\n==Finnish==\n\n===Noun===\n{{fi-noun}}\n\n# ignored\n";
@@ -117,6 +134,9 @@ fn noun_specs_derive_the_documented_plurals() {
         .contains("(plural [trees] or [treen] (obsolete))"));
     assert!(pos_doc("Noun", "{{en-noun|p|attr=pant}}", "pants")
         .contains("(plural only, attributive [pant])"));
+    // A proper noun keeps its -y under the default plural.
+    assert!(pos_doc("Proper noun", "{{en-prop|+}}", "Abby")
+        .contains("(plural [Abbys])"));
 }
 
 #[test]

@@ -232,7 +232,7 @@ pub(crate) fn parse_blocks(text: &str) -> BiquestResult<Vec<Block>> {
             continue;
         }
         if trimmed.starts_with("{|") {
-            blocks.push(table_block(&mut cursor)?);
+            blocks.push(table_block(&mut cursor));
             continue;
         }
         if trimmed.starts_with("----") {
@@ -278,15 +278,15 @@ fn heading_of(line: &str) -> BiquestResult<Option<Block>> {
 }
 
 /// Capture a `{|`..`|}` table raw, nesting-aware, delimiters
-/// included.
-fn table_block(cursor: &mut Cursor<'_>) -> BiquestResult<Block> {
+/// included. A table that never closes swallows to the end - the
+/// MediaWiki behavior - rather than failing the page.
+fn table_block(cursor: &mut Cursor<'_>) -> Block {
     let start = cursor.position;
     let mut depth = 0usize;
     loop {
-        snafu::ensure_whatever!(
-            !cursor.done(),
-            "a table opened at byte {start} never closes"
-        );
+        if cursor.done() {
+            return Block::Table { source: cursor.text[start..].to_string() };
+        }
         let line = cursor.line_rest().trim_start();
         if line.starts_with("{|") {
             depth += 1;
@@ -296,7 +296,7 @@ fn table_block(cursor: &mut Cursor<'_>) -> BiquestResult<Block> {
                 let line_end = cursor.position + cursor.line_rest().len();
                 let source = cursor.text[start..line_end].to_string();
                 cursor.consume_line();
-                return Ok(Block::Table { source });
+                return Block::Table { source };
             }
         }
         cursor.consume_line();
@@ -340,13 +340,34 @@ fn parse_inlines(
             continue;
         }
         if cursor.starts_with("{{") {
-            flush(&mut pending, &mut inlines);
-            inlines.push(Inline::Template(parse_template(cursor)?));
+            // An unterminated construct is literal text on-site, so a
+            // failed parse restores the cursor and keeps the opener as
+            // text rather than failing the page.
+            let saved = cursor.position;
+            match parse_template(cursor) {
+                Ok(template) => {
+                    flush(&mut pending, &mut inlines);
+                    inlines.push(Inline::Template(template));
+                }
+                Err(_) => {
+                    cursor.position = saved + 2;
+                    pending.push_str("{{");
+                }
+            }
             continue;
         }
         if cursor.starts_with("[[") {
-            flush(&mut pending, &mut inlines);
-            inlines.push(Inline::Link(parse_link(cursor)?));
+            let saved = cursor.position;
+            match parse_link(cursor) {
+                Ok(link) => {
+                    flush(&mut pending, &mut inlines);
+                    inlines.push(Inline::Link(link));
+                }
+                Err(_) => {
+                    cursor.position = saved + 2;
+                    pending.push_str("[[");
+                }
+            }
             continue;
         }
         if byte == b'[' {
@@ -381,18 +402,38 @@ fn parse_inlines(
             continue;
         }
         if cursor.starts_with("<nowiki>") {
-            flush(&mut pending, &mut inlines);
-            cursor.position += "<nowiki>".len();
-            let Some(end) = cursor.find("</nowiki>") else {
-                snafu::whatever!("a nowiki span never closes");
-            };
-            inlines.push(Inline::Nowiki(cursor.text[cursor.position..end].to_string()));
-            cursor.position = end + "</nowiki>".len();
+            let opener_end = cursor.position + "<nowiki>".len();
+            match cursor.text[opener_end..]
+                .find("</nowiki>")
+                .map(|offset| opener_end + offset)
+            {
+                Some(end) => {
+                    flush(&mut pending, &mut inlines);
+                    inlines.push(Inline::Nowiki(
+                        cursor.text[opener_end..end].to_string(),
+                    ));
+                    cursor.position = end + "</nowiki>".len();
+                }
+                None => {
+                    // Unterminated: the opener is literal text.
+                    pending.push('<');
+                    cursor.position += 1;
+                }
+            }
             continue;
         }
         if cursor.starts_with("<ref") {
-            flush(&mut pending, &mut inlines);
-            inlines.push(parse_ref(cursor)?);
+            let saved = cursor.position;
+            match parse_ref(cursor) {
+                Ok(reference) => {
+                    flush(&mut pending, &mut inlines);
+                    inlines.push(reference);
+                }
+                Err(_) => {
+                    cursor.position = saved + 1;
+                    pending.push('<');
+                }
+            }
             continue;
         }
         if byte == b'<' {

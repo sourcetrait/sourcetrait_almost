@@ -1,11 +1,12 @@
 # lexer.rs
 
 The Quill content lexer. Lexer-style, never BPE: nothing merges across
-a class edge, every piece is explicit, and the two-level rule is
-absolute for words - dictionary hit or character split, nothing
-between. The morphology middle a BPE would learn is deliberately
-absent; the expansion loop (a frequent unknown earns a row) replaces
-it.
+a class edge, every piece is explicit, and word resolution is
+dictionary hit, decomposition cover, or character split. The
+morphology middle a BPE would learn is deliberately absent; the
+expansion loop (a frequent unknown earns a row) replaces it, and the
+decomposition cover bridges the gap for compounds the dictionary has
+not yet earned rows for.
 
 ## the operator block and the id layout
 
@@ -97,15 +98,54 @@ stay structurally unreachable because a space is never a connector.
 Resolution is the longest-first ladder of cheap lookups: the full
 candidate as one row; on a miss with edges, the core with the edge
 apostrophes as character tokens; on a core miss, each word part
-resolves whole-or-char-split and connectors take their character
-rows. Nothing regresses on a miss by construction - the parts rung
-IS the pre-design behavior. There is still no partial or
-longest-prefix match inside a word run; inflected forms are entries
-themselves. The segmenter consults whatever word set it was built
-with (admitted in production, the embedded full set on the test
-surface) - the ladder is dictionary-agnostic. segment_pieces keeps
-each token's text: a dictionary token's text is the FOLDED,
+resolves whole, then through the decomposition cover, then
+char-split, and connectors take their character rows. Nothing
+regresses on a miss by construction - the cover's floor is the
+character split. The segmenter consults whatever word set it was
+built with (admitted in production, the embedded full set on the
+test surface) - the ladder is dictionary-agnostic. segment_pieces
+keeps each token's text: a dictionary token's text is the FOLDED,
 apostrophe-normalized row identity, not the surface spelling.
+
+### fn decompose_cover / fn cover_beats / fn camel_cover
+
+TheUser's design, three criteria in order: cover the missed part
+with dictionary rows; among covers, fewest tokens wins (nu + sh +
+ell loses at three); ties prefer the longer match at the END,
+because English wording is prefix-oriented - the tail carries the
+root - so nushell covers as nu + shell (tail 5) over nus + hell
+(tail 4). A position no row covers is one character token, and a
+character counts as a token in the comparison, which is what makes
+the cover strictly better than the char split it replaces. Dynamic
+programming over suffixes: the tie-break is end-anchored, so the
+suffix-optimal choice composes and the DP is sound. Each covered
+span maps back onto the cased surface (the simple fold is
+one-to-one per character) and carries its own postfix case
+operator, so Nushell reads nu CAPITALIZED shell.
+
+Camel casing overrides the criteria outright (TheUser): the case
+transitions mark the INTENDED boundaries, so when every camel
+segment resolves as a case-classified row, that segmentation is the
+cover even where the criteria would pick another - AntOne reads
+ant + one though an + tone carries the longer tail, LabRat reads
+lab + rat, and an uppercase run breaks before its last capital
+(HTTPServer reads http UPPERCASED server CAPITALIZED). Any segment
+that fails to resolve abandons the camel path whole and the
+criteria decide.
+
+### fn cased_overlay / fn overlay_beats
+
+TheUser's combination design for the CASED overlay: the overlay may
+spend dictionary tokens with case operators wherever the total ties
+or beats the character run - MicroSoft reads microsoft CASED micro
+CAPITALIZED soft CAPITALIZED, six tokens against eleven - and a tie
+prefers the words (dOg reads dog CASED d og CAPITALIZED at three
+either way). The cover prices in TOKENS (an operated span costs
+two), reusing the end-anchored tie-break. The decode contract
+keeps the row-length bound but measures it in DECODED characters:
+a character piece counts one, a word piece its own row length, its
+optional operator shaping the rendered surface - which is also how
+encode_runs walks past an overlay without re-encoding it.
 
 Case is folded at lookup and the emitted id is always the folded row;
 the surface rides POSTFIX case tokens (TheUser's design - the match

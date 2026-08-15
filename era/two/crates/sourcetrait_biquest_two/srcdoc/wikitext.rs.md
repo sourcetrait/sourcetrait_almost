@@ -53,9 +53,15 @@ tree - wikitext and markdown share the toggle model, so the renderer
 maps runs directly; the apostrophe-run rule is 2/3/5 with extras as
 leading text (four apostrophes = one literal plus bold), covering
 the corpus without MediaWiki's full disambiguation pathology.
-Unterminated templates, links, refs, and tables fault loudly; the
-document stage catches per page and files audit rows instead of
-letting a broken page leak.
+
+Unterminated templates, links, refs, and nowiki spans degrade to
+LITERAL TEXT (cursor restored, opener kept, scan continues), and an
+unterminated table swallows to the end as a table block - the
+MediaWiki behavior. The fail-loud posture this replaced cost whole
+pages: one unclosed construct anywhere failed the page, and the 68
+casualties included "here" and "Celsius" - top-frequency words
+silently missing from the corpus and the vocabulary. One broken
+construct is one construct's damage, never a page's.
 
 ## fn scan_segments
 

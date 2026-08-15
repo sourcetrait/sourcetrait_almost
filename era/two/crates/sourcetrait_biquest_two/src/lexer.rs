@@ -1,6 +1,7 @@
 //! The Quill content lexer: connected candidates resolved by the
-//! dictionary - full, then core, then parts - with repetition riding
-//! banded operators and keyboard rows.
+//! dictionary - full, then core, then parts, then the longest-match
+//! decomposition - with repetition riding banded operators and
+//! keyboard rows.
 use crate::*;
 
 use crate::bucket::BucketTable;
@@ -314,6 +315,82 @@ pub(crate) fn whole_candidate_folded(
     Some(connected.full)
 }
 
+/// One piece of a decomposition cover: a dictionary span over the
+/// folded text, or a single uncovered character.
+#[derive(Debug, Clone, Copy)]
+struct CoverPiece {
+    start: usize,
+    end: usize,
+    word: bool,
+}
+
+/// One camel-cover piece: a case-classified dictionary span.
+#[derive(Debug, Clone, Copy)]
+struct CamelPiece {
+    start: usize,
+    end: usize,
+    id: u32,
+    operator: Option<u32>,
+}
+
+/// One piece of a CASED overlay cover: a case-classified dictionary
+/// span (its id and operator), or one surface character.
+#[derive(Debug, Clone, Copy)]
+struct OverlayPiece {
+    start: usize,
+    end: usize,
+    /// The span's dictionary id and case operator; None is a
+    /// character piece.
+    word: Option<(u32, Option<u32>)>,
+}
+
+impl OverlayPiece {
+    /// The wire tokens this piece costs: a bare word 1, an operated
+    /// word 2, a character 1.
+    fn cost(&self) -> usize {
+        match self.word {
+            Some((_, Some(_))) => 2,
+            _ => 1,
+        }
+    }
+}
+
+/// Whether overlay cover `a` beats `b`: fewer wire tokens, then the
+/// longer piece toward the end - the decomposition criteria priced
+/// in tokens, because an operated span costs two.
+fn overlay_beats(a: &[OverlayPiece], b: &[OverlayPiece]) -> bool {
+    let cost_a: usize = a.iter().map(OverlayPiece::cost).sum();
+    let cost_b: usize = b.iter().map(OverlayPiece::cost).sum();
+    if cost_a != cost_b {
+        return cost_a < cost_b;
+    }
+    for (piece_a, piece_b) in a.iter().rev().zip(b.iter().rev()) {
+        let length_a = piece_a.end - piece_a.start;
+        let length_b = piece_b.end - piece_b.start;
+        if length_a != length_b {
+            return length_a > length_b;
+        }
+    }
+    false
+}
+
+/// Whether cover `a` beats cover `b` (TheUser's criteria): fewer
+/// tokens first, then the longer match toward the END - English is
+/// prefix-heavy, so the tail carries the root.
+fn cover_beats(a: &[CoverPiece], b: &[CoverPiece]) -> bool {
+    if a.len() != b.len() {
+        return a.len() < b.len();
+    }
+    for (piece_a, piece_b) in a.iter().rev().zip(b.iter().rev()) {
+        let length_a = piece_a.end - piece_a.start;
+        let length_b = piece_b.end - piece_b.start;
+        if length_a != length_b {
+            return length_a > length_b;
+        }
+    }
+    false
+}
+
 /// Which layer resolved a token; the id spells it too, this names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Layer {
@@ -436,6 +513,165 @@ impl<'a> Segmenter<'a> {
         }
     }
 
+    /// The CASED overlay's word-combination cover (TheUser's design):
+    /// spend dictionary tokens with case operators inside the overlay
+    /// wherever that ties or beats the character run - MicroSoft
+    /// reads microsoft CASED micro CAPITALIZED soft CAPITALIZED, six
+    /// tokens against eleven. A span is admissible when its folded
+    /// slice is a row whose surface slice classifies bare,
+    /// capitalized, or uppercased; None means no combination ties the
+    /// character overlay.
+    fn cased_overlay(
+        &self,
+        folded: &[char],
+        surface: &[char],
+    ) -> Option<Vec<OverlayPiece>> {
+        if folded.len() != surface.len() {
+            return None;
+        }
+        let length = folded.len();
+        let mut best: Vec<Option<Vec<OverlayPiece>>> = vec![None; length + 1];
+        best[length] = Some(Vec::new());
+        for start in (0..length).rev() {
+            let mut chosen: Option<Vec<OverlayPiece>> = None;
+            let consider = |piece: OverlayPiece,
+                            best: &[Option<Vec<OverlayPiece>>],
+                            chosen: &mut Option<Vec<OverlayPiece>>| {
+                let Some(tail) = &best[piece.end] else { return };
+                let mut candidate = Vec::with_capacity(tail.len() + 1);
+                candidate.push(piece);
+                candidate.extend(tail.iter().copied());
+                let better = match chosen {
+                    None => true,
+                    Some(current) => overlay_beats(&candidate, current),
+                };
+                if better {
+                    *chosen = Some(candidate);
+                }
+            };
+            consider(
+                OverlayPiece { start, end: start + 1, word: None },
+                &best,
+                &mut chosen,
+            );
+            for end in (start + 2)..=length {
+                let text: String = folded[start..end].iter().collect();
+                let Some(&id) = self.word_ids.get(&text) else { continue };
+                let cased: String = surface[start..end].iter().collect();
+                let Some(operator) = self.case_operator(&cased, &text) else {
+                    continue;
+                };
+                consider(
+                    OverlayPiece { start, end, word: Some((id, operator)) },
+                    &best,
+                    &mut chosen,
+                );
+            }
+            best[start] = chosen;
+        }
+        let cover = best[0].take()?;
+        let cost: usize = cover.iter().map(OverlayPiece::cost).sum();
+        // The character overlay costs one token per character; a
+        // combination must tie or reduce (TheUser), and a tie
+        // prefers the words.
+        if cost <= length && cover.iter().any(|piece| piece.word.is_some()) {
+            Some(cover)
+        } else {
+            None
+        }
+    }
+
+    /// Camel-case boundaries in a missed surface mark the intended
+    /// word boundaries (TheUser): when every camel segment resolves
+    /// as a case-classified row, that combination IS the cover,
+    /// preferred over the token-count criteria - AntOne reads
+    /// ant + one even where an + tone would tie.
+    fn camel_cover(&self, folded: &[char], surface: &[char]) -> Option<Vec<CamelPiece>> {
+        if folded.len() != surface.len() {
+            return None;
+        }
+        let length = surface.len();
+        let mut boundaries: Vec<usize> = vec![0];
+        for index in 1..length {
+            let previous_upper = surface[index - 1].is_uppercase();
+            // A lower-to-upper transition starts a segment; inside an
+            // uppercase run, the last capital before a lowercase does
+            // (HTTPServer reads HTTP + Server).
+            let boundary = surface[index].is_uppercase()
+                && (!previous_upper
+                    || surface.get(index + 1).is_some_and(|c| c.is_lowercase()));
+            if boundary {
+                boundaries.push(index);
+            }
+        }
+        if boundaries.len() < 2 {
+            return None;
+        }
+        boundaries.push(length);
+        let mut pieces = Vec::with_capacity(boundaries.len() - 1);
+        for pair in boundaries.windows(2) {
+            let (start, end) = (pair[0], pair[1]);
+            if end - start < 2 {
+                return None;
+            }
+            let text: String = folded[start..end].iter().collect();
+            let &id = self.word_ids.get(&text)?;
+            let cased: String = surface[start..end].iter().collect();
+            let operator = self.case_operator(&cased, &text)?;
+            pieces.push(CamelPiece { start, end, id, operator });
+        }
+        Some(pieces)
+    }
+
+    /// The best decomposition cover of a folded dictionary miss
+    /// (TheUser's design): fewest tokens, ties preferring the longer
+    /// match at the end - nushell covers as nu + shell, never
+    /// nus + hell (shorter tail) or nu + sh + ell (more tokens). A
+    /// position no row covers falls back to its character. Dynamic
+    /// programming over suffixes; the end-anchored tie-break makes
+    /// the suffix-optimal choice compose.
+    fn decompose_cover(&self, folded_chars: &[char]) -> Vec<CoverPiece> {
+        let length = folded_chars.len();
+        let mut best: Vec<Option<Vec<CoverPiece>>> = vec![None; length + 1];
+        best[length] = Some(Vec::new());
+        for start in (0..length).rev() {
+            let mut chosen: Option<Vec<CoverPiece>> = None;
+            let consider = |piece: CoverPiece,
+                                best: &[Option<Vec<CoverPiece>>],
+                                chosen: &mut Option<Vec<CoverPiece>>| {
+                let Some(tail) = &best[piece.end] else { return };
+                let mut candidate = Vec::with_capacity(tail.len() + 1);
+                candidate.push(piece);
+                candidate.extend(tail.iter().copied());
+                let better = match chosen {
+                    None => true,
+                    Some(current) => cover_beats(&candidate, current),
+                };
+                if better {
+                    *chosen = Some(candidate);
+                }
+            };
+            consider(
+                CoverPiece { start, end: start + 1, word: false },
+                &best,
+                &mut chosen,
+            );
+            for end in (start + 2)..=length {
+                let candidate: String =
+                    folded_chars[start..end].iter().collect();
+                if self.word_ids.contains_key(&candidate) {
+                    consider(
+                        CoverPiece { start, end, word: true },
+                        &best,
+                        &mut chosen,
+                    );
+                }
+            }
+            best[start] = chosen;
+        }
+        best[0].take().unwrap_or_default()
+    }
+
     /// Encode runs of an identical non-word, non-digit token through
     /// the magnitude bands (canonical, deterministic):
     ///
@@ -462,22 +698,30 @@ impl<'a> Segmenter<'a> {
         let mut index = 0usize;
         while index < raw.len() {
             let (token, text) = &raw[index];
-            // A CASED overlay is exactly the row's length in
-            // character tokens and never run-encodes: the length
-            // bound IS the decode contract.
+            // A CASED overlay is bounded by the row's length in
+            // DECODED characters and never run-encodes: a character
+            // piece counts one, a word piece its own row length, and
+            // a case operator nothing. The length bound IS the
+            // decode contract.
             if token.layer == Layer::Keyword && token.id == KEYWORD_CASED {
-                let overlay_length = out
+                let overlay_chars = out
                     .last()
                     .and_then(|(row, _)| self.row_length(row.id))
                     .unwrap_or(0);
                 out.push((*token, text.clone()));
                 index += 1;
-                for _ in 0..overlay_length {
-                    if index < raw.len() {
-                        let (overlay, overlay_text) = &raw[index];
-                        out.push((*overlay, overlay_text.clone()));
-                        index += 1;
+                let mut consumed = 0usize;
+                while consumed < overlay_chars && index < raw.len() {
+                    let (overlay, overlay_text) = &raw[index];
+                    match overlay.layer {
+                        Layer::Character => consumed += 1,
+                        Layer::Dictionary => {
+                            consumed += self.row_length(overlay.id).unwrap_or(1);
+                        }
+                        _ => {}
                     }
+                    out.push((*overlay, overlay_text.clone()));
+                    index += 1;
                 }
                 continue;
             }
@@ -583,6 +827,24 @@ impl<'a> Segmenter<'a> {
             tokens.push((Token { id, layer: Layer::Dictionary }, kept));
             let kept = if keep_text { String::from(CASED_ALIAS) } else { String::new() };
             tokens.push((Token { id: KEYWORD_CASED, layer: Layer::Keyword }, kept));
+            // The overlay spends word tokens where a combination ties
+            // or beats the character run (TheUser's design).
+            let folded_chars: Vec<char> = folded.chars().collect();
+            let surface_chars: Vec<char> = cased.chars().collect();
+            if let Some(pieces) = self.cased_overlay(&folded_chars, &surface_chars) {
+                for piece in pieces {
+                    match piece.word {
+                        Some((word_id, operator)) => {
+                            let text: String = folded_chars[piece.start..piece.end]
+                                .iter()
+                                .collect();
+                            push_word(tokens, word_id, operator, &text);
+                        }
+                        None => push_char(tokens, surface_chars[piece.start])?,
+                    }
+                }
+                return Ok(());
+            }
             for c in cased.chars() {
                 push_char(tokens, c)?;
             }
@@ -649,8 +911,66 @@ impl<'a> Segmenter<'a> {
                                 }
                             },
                             None => {
-                                for c in surface.chars() {
-                                    push_char(&mut tokens, c)?;
+                                // The decomposition cover: dictionary
+                                // subwords where they exist, characters
+                                // where they do not. The simple fold is
+                                // one-to-one per character, so spans map
+                                // onto the cased surface. Camel casing
+                                // marks the intended boundaries and wins
+                                // outright when its segments all resolve.
+                                let folded_chars: Vec<char> = folded.chars().collect();
+                                let surface_chars: Vec<char> = surface.chars().collect();
+                                let aligned =
+                                    folded_chars.len() == surface_chars.len();
+                                if aligned
+                                    && let Some(pieces) = self
+                                        .camel_cover(&folded_chars, &surface_chars)
+                                {
+                                    for piece in pieces {
+                                        let text: String = folded_chars
+                                            [piece.start..piece.end]
+                                            .iter()
+                                            .collect();
+                                        push_word(
+                                            &mut tokens,
+                                            piece.id,
+                                            piece.operator,
+                                            &text,
+                                        );
+                                    }
+                                    continue;
+                                }
+                                for piece in self.decompose_cover(&folded_chars) {
+                                    if !piece.word {
+                                        let c = if aligned {
+                                            surface_chars[piece.start]
+                                        } else {
+                                            folded_chars[piece.start]
+                                        };
+                                        push_char(&mut tokens, c)?;
+                                        continue;
+                                    }
+                                    let text: String = folded_chars
+                                        [piece.start..piece.end]
+                                        .iter()
+                                        .collect();
+                                    let id = self.word_ids[&text];
+                                    if !aligned {
+                                        push_word(&mut tokens, id, None, &text);
+                                        continue;
+                                    }
+                                    let cased: String = surface_chars
+                                        [piece.start..piece.end]
+                                        .iter()
+                                        .collect();
+                                    match self.case_operator(&cased, &text) {
+                                        Some(operator) => {
+                                            push_word(&mut tokens, id, operator, &text);
+                                        }
+                                        None => {
+                                            push_cased(&mut tokens, id, &text, &cased)?;
+                                        }
+                                    }
                                 }
                             }
                         }

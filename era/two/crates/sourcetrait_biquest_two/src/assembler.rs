@@ -889,39 +889,87 @@ impl<'a> Assembler<'a> {
                 continue;
             }
             if after == Some(KEYWORD_CASED) {
-                // The overlay is exactly the row's length in
-                // character tokens, each folding to the row's own
-                // character - the canonicality the encoder emits.
+                // The overlay is bounded by the row's length in
+                // DECODED characters. A character token folds to its
+                // row character; a dictionary token stands in for its
+                // folded slice, its optional case operator shaping
+                // the rendered surface (TheUser's combination
+                // design: microsoft CASED micro CAPITALIZED soft
+                // CAPITALIZED).
                 let word = self.dictionary_row_text(id, position)?.to_string();
+                let expected: Vec<char> = word.chars().collect();
+                let mut consumed = 0usize;
                 let mut cursor = position + 2;
                 let character_offset = KEYWORD_PAGE_SIZE;
                 let keyboard_offset =
                     character_offset + self.table.assigned_count() as u32;
-                for expected in word.chars() {
-                    let Some(&char_id) = wire.get(cursor) else {
+                let dictionary_offset =
+                    keyboard_offset + self.buckets.count() as u32;
+                let reserve_offset = dictionary_offset + self.admitted.len() as u32;
+                while consumed < expected.len() {
+                    let Some(&overlay_id) = wire.get(cursor) else {
                         snafu::whatever!(
                             "wire fault at token {cursor}: a cased overlay ends \
                              before its row's length"
                         );
                     };
-                    snafu::ensure_whatever!(
-                        char_id >= character_offset && char_id < keyboard_offset,
-                        "wire fault at token {cursor}: a cased overlay wants \
-                         character tokens"
-                    );
-                    let row = &self.table.rows[(char_id - character_offset) as usize];
-                    let Some(c) = char::from_u32(row.code_point) else {
-                        snafu::whatever!(
-                            "wire fault at token {cursor}: unrenderable code point"
+                    if overlay_id >= character_offset && overlay_id < keyboard_offset {
+                        let row =
+                            &self.table.rows[(overlay_id - character_offset) as usize];
+                        let Some(c) = char::from_u32(row.code_point) else {
+                            snafu::whatever!(
+                                "wire fault at token {cursor}: unrenderable code point"
+                            );
+                        };
+                        snafu::ensure_whatever!(
+                            self.table.fold(c) == Some(expected[consumed]),
+                            "wire fault at token {cursor}: a cased overlay character \
+                             does not fold to its row's character"
                         );
-                    };
-                    snafu::ensure_whatever!(
-                        self.table.fold(c) == Some(expected),
-                        "wire fault at token {cursor}: a cased overlay character \
-                         does not fold to its row's character"
+                        interior.push(c);
+                        consumed += 1;
+                        cursor += 1;
+                        continue;
+                    }
+                    if overlay_id >= dictionary_offset && overlay_id < reserve_offset {
+                        let text = self.admitted
+                            [(overlay_id - dictionary_offset) as usize]
+                            .clone();
+                        let piece_length = text.chars().count();
+                        let matches_slice = consumed + piece_length <= expected.len()
+                            && text
+                                .chars()
+                                .zip(expected[consumed..consumed + piece_length].iter())
+                                .all(|(piece_char, &slice_char)| piece_char == slice_char);
+                        snafu::ensure_whatever!(
+                            matches_slice,
+                            "wire fault at token {cursor}: a cased overlay word does \
+                             not match its row's slice"
+                        );
+                        let operator = wire.get(cursor + 1).copied();
+                        if operator == Some(KEYWORD_UPPERCASED) {
+                            for c in text.chars() {
+                                interior.push(self.upper_char(c));
+                            }
+                            cursor += 2;
+                        } else if operator == Some(KEYWORD_CAPITALIZED) {
+                            let mut chars = text.chars();
+                            if let Some(first) = chars.next() {
+                                interior.push(self.upper_char(first));
+                                interior.push_str(chars.as_str());
+                            }
+                            cursor += 2;
+                        } else {
+                            interior.push_str(&text);
+                            cursor += 1;
+                        }
+                        consumed += piece_length;
+                        continue;
+                    }
+                    snafu::whatever!(
+                        "wire fault at token {cursor}: a cased overlay wants \
+                         character or dictionary tokens"
                     );
-                    interior.push(c);
-                    cursor += 1;
                 }
                 position = cursor;
                 continue;

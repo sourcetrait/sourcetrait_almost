@@ -5,6 +5,44 @@ The document renderer, fixture-anchored: the microsoft standard
 typography) is the acceptance surface, and the render is
 byte-identical to it.
 
+## The data-collection side (fn derive_page, the record_ methods)
+
+The provenance derivation (wikiderive) reads its data off THIS
+renderer rather than a parallel extractor, so the derived data
+equals what the rendered document presents by construction - the
+property the wiktextract retirement rests on. Three collectors ride
+the Renderer: `forms` records at exactly the points the head
+engines put a form into a parenthetical (the noun plural branches
+including the bare-en-noun default, all four verb slots in
+verb_pieces - the single point both the angle-bracket and slot
+grammars flow through - the graded comparative/superlative pieces,
+the head pairwise forms, abbr=); `senses` records each numbered
+gloss line under its POS section name at the line's own push, any
+depth, empty lines excluded; `form_of_lemmas` records the
+definitional form-of targets (the shape-rule family, form of, the
+inflection-of engine's comma lemmas, the en- degree pair) with
+modifiers stripped, EVERY wikilink resolving to its TARGET (the
+resource is the lemma; truncating a multiword wikilinked target to
+its first link fabricated aa -> antioxidant links - the whole text
+flattens and a multiword result drops at admission), w:-referents
+and template-bearing targets skipped, and the SEMANTIC_OF_LABELS
+set (synonym of and kin) excluded - those render through the shape
+rule but their relation is not a form variant. Forms flatten
+wikilinks to display text - the same flatten SpecForm::rendered
+uses, extracted as flatten_wikilinks. Branches that present nothing
+record nothing: plural-only and unattested nouns do not record
+their unpresented plurals, and a `?` spec returns before any
+recording.
+
+derive_page also reports the `no entry` soft redirect (detected by
+a subtree scan, because the template sits BEFORE the first h3 and
+the section walk never sees pre-section content): an English
+section whose content is the wiki's own "no English entry exists"
+declaration admits nothing - the SI-unit spelling-variant families
+(atto-candela and thousands of siblings) are this class, and
+wiktextract's silence about them was the pos-less entry, not a
+loss.
+
 ## Policy, ruled
 
 - Source italics flatten everywhere, in-passage work titles included
@@ -20,6 +58,17 @@ byte-identical to it.
 - Page-set merge order: the word's own casing first, the capitalized
   form second, the rest title-sorted; the first page's title is the
   h1 (linux = pages linux + Linux under "# linux").
+
+## The section taxonomy grows audit-driven
+
+POS_NAMES carries Prepositional phrase and Number beside the
+standard set - the acceptance diff surfaced ~150 definition keys
+whose sections fell through to prose rendering (aamof's
+prepositional phrase, the spelled-number pages' Number sections).
+LIST_SECTIONS carries the whole -nym family (Hypernyms, Hyponyms,
+Meronyms, Holonyms, Troponyms, Paronyms) - the section_unhandled
+tally ranked them at ~7k dropped sections, and they are the same
+anchored-list shape as Synonyms.
 
 ## Faithfulness boundaries
 
@@ -43,12 +92,19 @@ why bare `head` is handled silently rather than audited.
 
 Load-bearing details the doc pages pin:
 
-- The default derivations are the en-verb exact rules: C*VC (the
-  whole lemma consonants + one vowel + one final consonant not in
-  w/x/y/h) doubles before -ed/-ing, -ie becomes -ying, -ue and
-  consonant-e drop the e, vowel-e (toe, see, dye) keeps it. The
-  en-adj doc omits doubling for -er/-est but the module doubles, so
-  graded_form does too.
+- The default derivations are the en-verb exact rules: C*VC doubles
+  before -ed/-ing, -ie becomes -ying, -ue and consonant-e drop the
+  e, vowel-e (toe, see, dye) keeps it. The en-adj doc omits doubling
+  for -er/-est but the module doubles, so graded_form does too. The
+  C*VC test reads the FINAL SEGMENT of a hyphenated or multiword
+  lemma, counts y as the vowel, and reads qu as a consonant unit -
+  the acceptance diff caught the whole-lemma form producing
+  booby-traped/baby-siting/gyped/quoped against the module's
+  booby-trapped class. The graded selectors resolve the irregular
+  pairs first (well/good -> better/best, bad -> worse/worst, far ->
+  further/furthest): the diff's weller-brought-up class. The |ies
+  plural spec strips -ey whole (whiskey -> whiskies, the gooneies
+  catch).
 - Slot-one special indicators (^ ++ +l +! +' and the * multiword
   forms) become the defaults for later verb slots; `+` is always
   equivalent to a blank slot; slot 4 absent or past-equal folds

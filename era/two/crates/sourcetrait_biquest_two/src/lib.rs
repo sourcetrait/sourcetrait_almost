@@ -14,6 +14,7 @@ pub(crate) mod trainer;
 pub(crate) mod ucd;
 pub(crate) mod value;
 pub(crate) mod wikicorpus;
+pub(crate) mod wikiderive;
 pub(crate) mod wikidoc;
 pub(crate) mod wikivocab;
 pub(crate) mod wikimedia;
@@ -128,6 +129,7 @@ mod tests {
     mod trainer;
     mod value;
     mod wikicorpus;
+    mod wikiderive;
     mod wikidoc;
     mod wikitext;
     mod wikivocab;

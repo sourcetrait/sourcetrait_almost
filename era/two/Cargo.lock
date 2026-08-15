@@ -7938,7 +7938,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_biquest_two"
-version = "0.0.0-14"
+version = "0.0.0-15"
 dependencies = [
  "bzip2 0.6.1",
  "clap",
@@ -7953,6 +7953,7 @@ dependencies = [
  "sourcetrait_lib_quest_harness_two",
  "sourcetrait_lib_quest_llm_two",
  "tokenizers 0.23.1",
+ "unicode-normalization",
 ]
 
 [[package]]

@@ -2,11 +2,9 @@
 //! artifact the matrix build and stage-zero corpus read.
 use crate::*;
 
-use std::io::BufRead;
 use std::io::Write;
 
 use crate::bucket::BucketTable;
-use crate::lexer::whole_candidate_folded;
 use crate::lexer::BEGIN_REPEAT_ALIAS;
 use crate::lexer::CAPITALIZED_ALIAS;
 use crate::lexer::CASED_ALIAS;
@@ -72,166 +70,6 @@ impl AbstractConcept {
 /// to single spaces, ends trimmed.
 pub(crate) fn sanitize_gloss(gloss: &str) -> String {
     gloss.split_whitespace().collect::<Vec<&str>>().join(" ")
-}
-
-/// The fields read off one wiktextract entry for the store; the rest
-/// is skipped.
-#[derive(serde::Deserialize)]
-pub(crate) struct Entry {
-    #[serde(default)]
-    word: Option<String>,
-    #[serde(default)]
-    lang_code: Option<String>,
-    #[serde(default)]
-    pos: Option<String>,
-    #[serde(default)]
-    forms: Vec<Form>,
-    #[serde(default)]
-    senses: Vec<Sense>,
-}
-
-#[derive(serde::Deserialize)]
-struct Form {
-    #[serde(default)]
-    form: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct Sense {
-    #[serde(default)]
-    glosses: Vec<String>,
-    #[serde(default)]
-    form_of: Vec<FormOf>,
-}
-
-#[derive(serde::Deserialize)]
-struct FormOf {
-    #[serde(default)]
-    word: Option<String>,
-}
-
-/// What the dump pass counted.
-#[derive(Default)]
-pub(crate) struct AssociationsTally {
-    pub(crate) entries_read: usize,
-    pub(crate) non_english: usize,
-    pub(crate) senses_kept: usize,
-    pub(crate) links_from_forms: usize,
-    pub(crate) links_from_form_of: usize,
-}
-
-/// The dump-side accumulation: spellings, definitions, inflections.
-pub(crate) struct DumpSide<'a> {
-    table: &'a CharacterTable,
-    /// Every folded single-piece word: headwords and forms, the
-    /// dictionary pass's exact set.
-    pub(crate) words: HashSet<String>,
-    /// (word, pos) to its accumulated sense glosses, dump order.
-    pub(crate) definitions: HashMap<(String, String), Vec<String>>,
-    /// (form, lemma) links, both folded single-piece, form != lemma.
-    pub(crate) links: HashSet<(String, String)>,
-    pub(crate) tally: AssociationsTally,
-}
-
-impl<'a> DumpSide<'a> {
-    pub(crate) fn new(table: &'a CharacterTable) -> Self {
-        Self {
-            table,
-            words: HashSet::new(),
-            definitions: HashMap::new(),
-            links: HashSet::new(),
-            tally: AssociationsTally::default(),
-        }
-    }
-
-    /// Absorb one entry: headword and forms into the word set, a form
-    /// linking to its headword lemma; each sense's most specific
-    /// gloss (the last: wiktextract glosses refine parent-to-child)
-    /// as a definition, and a form_of sense linking this entry to
-    /// its lemma.
-    pub(crate) fn absorb(&mut self, entry: &Entry) {
-        self.tally.entries_read += 1;
-        if entry.lang_code.as_deref() != Some("en") {
-            self.tally.non_english += 1;
-            return;
-        }
-        let headword = entry
-            .word
-            .as_deref()
-            .and_then(|word| whole_candidate_folded(self.table, word));
-        if let Some(word) = &headword {
-            self.words.insert(word.clone());
-        }
-        for form in &entry.forms {
-            let Some(form) = &form.form else { continue };
-            let Some(folded) = whole_candidate_folded(self.table, form) else {
-                continue;
-            };
-            self.words.insert(folded.clone());
-            if let Some(lemma) = &headword
-                && folded != *lemma
-                && self.links.insert((folded, lemma.clone()))
-            {
-                self.tally.links_from_forms += 1;
-            }
-        }
-        let Some(word) = headword else { return };
-        let mut senses: Vec<String> = Vec::new();
-        for sense in &entry.senses {
-            if let Some(gloss) = sense.glosses.last() {
-                let clean = sanitize_gloss(gloss);
-                if !clean.is_empty() {
-                    senses.push(clean);
-                }
-            }
-            for form_of in &sense.form_of {
-                let Some(lemma) = &form_of.word else { continue };
-                let Some(lemma) = whole_candidate_folded(self.table, lemma) else {
-                    continue;
-                };
-                if lemma != word && self.links.insert((word.clone(), lemma)) {
-                    self.tally.links_from_form_of += 1;
-                }
-            }
-        }
-        let Some(pos) = entry.pos.as_deref().filter(|pos| !pos.is_empty()) else {
-            return;
-        };
-        if senses.is_empty() {
-            return;
-        }
-        self.tally.senses_kept += senses.len();
-        self.definitions
-            .entry((word, pos.to_string()))
-            .or_default()
-            .extend(senses);
-    }
-}
-
-/// Stream the dump through one DumpSide.
-fn extract_dump<'a>(table: &'a CharacterTable, dump: &Path) -> BiquestResult<DumpSide<'a>> {
-    let file = fs::File::open(dump)?;
-    let reader = io::BufReader::with_capacity(1 << 20, file);
-    let mut side = DumpSide::new(table);
-    for (index, line) in reader.lines().enumerate() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let entry: Entry = match serde_json::from_str(&line) {
-            Ok(entry) => entry,
-            Err(e) => {
-                snafu::whatever!("{}:{}: JSON parse failed: {e}", dump.display(), index + 1)
-            }
-        };
-        side.absorb(&entry);
-    }
-    snafu::ensure_whatever!(
-        !side.words.is_empty(),
-        "{}: no admissible words found",
-        dump.display()
-    );
-    Ok(side)
 }
 
 /// One value as one condensed NUON line; a value that renders wide
@@ -484,7 +322,7 @@ fn family_rows(
 }
 
 /// `biquest associations build`: the whole store from the embedded
-/// UCD and a wiktextract dump, one class per file under --out.
+/// UCD and the raw enwiktionary dump, one class per file under --out.
 pub(crate) fn associations_build(args: &AssociationsBuildArgs) -> BiquestResult<()> {
     let started = std::time::Instant::now();
     let table = CharacterTable::embedded()?;
@@ -526,7 +364,7 @@ pub(crate) fn associations_build(args: &AssociationsBuildArgs) -> BiquestResult<
         ),
     )?;
 
-    let side = extract_dump(&table, &args.dump)?;
+    let side = crate::wikiderive::derive_dump(&table, &args.source, true)?;
 
     let mut words: Vec<&String> = side.words.iter().collect();
     words.sort();
@@ -590,10 +428,12 @@ pub(crate) fn associations_build(args: &AssociationsBuildArgs) -> BiquestResult<
 
     let provenance = harness::nu::Value::record(
         harness::nu::record! {
-            "dump" => v_str(&args.dump.display().to_string()),
+            "source" => v_str(&args.source.display().to_string()),
             "unicode_assigned" => v_int(table.assigned_count() as i64),
-            "entries_read" => v_int(side.tally.entries_read as i64),
-            "non_english" => v_int(side.tally.non_english as i64),
+            "pages_read" => v_int(side.tally.pages_read as i64),
+            "english_pages" => v_int(side.tally.english_pages as i64),
+            "no_entry_pages" => v_int(side.tally.no_entry_pages as i64),
+            "parse_failures" => v_int(side.tally.parse_failures as i64),
             "spelling_rows" => v_int(spelling_rows as i64),
             "definition_rows" => v_int(definition_rows as i64),
             "senses_kept" => v_int(side.tally.senses_kept as i64),
@@ -620,7 +460,8 @@ pub(crate) fn associations_build(args: &AssociationsBuildArgs) -> BiquestResult<
 
     let summary = harness::nu::Value::record(
         harness::nu::record! {
-            "entries_read" => v_int(side.tally.entries_read as i64),
+            "pages_read" => v_int(side.tally.pages_read as i64),
+            "english_pages" => v_int(side.tally.english_pages as i64),
             "spelling_rows" => v_int(spelling_rows as i64),
             "definition_rows" => v_int(definition_rows as i64),
             "inflection_rows" => v_int(inflection_rows as i64),

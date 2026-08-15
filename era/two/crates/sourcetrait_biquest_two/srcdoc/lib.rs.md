@@ -10,7 +10,8 @@ is new: the ImagineQuestTokenizer modules (`ucd`, `lexer`,
 `dictionary`, `ledger`, with `corpus` as the shared file walker), the
 ImagineQuestAssociations store (`associations`), and the
 WikimediaDumpTool (`wikimedia` for the verbs, `wikixml` for the XML
-page layer over the raw dumps).
+page layer over the raw dumps, `wikiderive` for the provenance
+derivation both artifact verbs ride).
 
 The llm and harness deps stay: the harness carries the nu data core the
 artifacts ride on, and the llm lib carries the model core plus the

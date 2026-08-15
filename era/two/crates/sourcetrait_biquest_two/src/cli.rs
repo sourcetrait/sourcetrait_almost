@@ -269,16 +269,17 @@ pub(crate) struct DisassembleArgs {
 
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum AssociationsCommand {
-    /// Build the whole store from the embedded UCD and a wiktextract
-    /// dump.
+    /// Build the whole store from the embedded UCD and the raw
+    /// enwiktionary dump.
     Build(AssociationsBuildArgs),
 }
 
 #[derive(Debug, clap::Args)]
 pub(crate) struct AssociationsBuildArgs {
-    /// The wiktextract English dump (.jsonl, decompressed).
+    /// The enwiktionary page source: an export .xml or a
+    /// pages-articles dump (.xml.bz2), streamed whole.
     #[arg(long)]
-    pub(crate) dump: PathBuf,
+    pub(crate) source: PathBuf,
     /// The store directory; the class files land inside it.
     #[arg(long)]
     pub(crate) out: PathBuf,
@@ -320,7 +321,7 @@ pub(crate) struct MatrixBuildArgs {
 pub(crate) enum TokenizerCommand {
     /// Report the embedded character layer's shape.
     Ucd,
-    /// Extract the folded connected-word set from a wiktextract dump.
+    /// Extract the folded connected-word set from the raw dump.
     Dictionary(TokenizerDictionaryArgs),
     /// Measure Quill tokens against the checkpoint tokenizer.
     Ledger(TokenizerLedgerArgs),
@@ -328,9 +329,10 @@ pub(crate) enum TokenizerCommand {
 
 #[derive(Debug, clap::Args)]
 pub(crate) struct TokenizerDictionaryArgs {
-    /// The wiktextract English dump (.jsonl, decompressed).
+    /// The enwiktionary page source: an export .xml or a
+    /// pages-articles dump (.xml.bz2), streamed whole.
     #[arg(long)]
-    pub(crate) dump: PathBuf,
+    pub(crate) source: PathBuf,
     /// The word-set artifact: one folded word per line, sorted.
     #[arg(long)]
     pub(crate) out: PathBuf,
