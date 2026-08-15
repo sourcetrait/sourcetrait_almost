@@ -69,6 +69,7 @@ pub(crate) use crate::cli::{
     WiktionaryCommand,
     WiktionaryCorpusArgs,
     WiktionaryDocumentArgs,
+    WiktionaryRailroadArgs,
 };
 pub(crate) use crate::dictionary::tokenizer_dictionary;
 pub(crate) use crate::doc::doc_cli;
@@ -82,7 +83,10 @@ pub(crate) use crate::trainer::{
     trainer_init,
     trainer_train,
 };
-pub(crate) use crate::wikicorpus::wiktionary_corpus;
+pub(crate) use crate::wikicorpus::{
+    wiktionary_corpus,
+    wiktionary_railroad,
+};
 pub(crate) use crate::wikimedia::{
     wikimedia_normalize,
     wikimedia_page,

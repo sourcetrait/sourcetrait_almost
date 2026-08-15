@@ -71,6 +71,26 @@ pub(crate) enum WiktionaryCommand {
     Corpus(WiktionaryCorpusArgs),
     /// A word's markdown document from its fold-matched page set.
     Document(WiktionaryDocumentArgs),
+    /// The corpus built into a railroad: one page per word document.
+    Railroad(WiktionaryRailroadArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct WiktionaryRailroadArgs {
+    /// The corpus tree the pages copy from (the sharded documents).
+    #[arg(long)]
+    pub(crate) corpus: PathBuf,
+    /// The page liquid template (wiktionary.page.quill.liquid); the
+    /// per-page wire measurements ride its rendered frame.
+    #[arg(long)]
+    pub(crate) page_template: PathBuf,
+    /// A standing railroad to build into; absent lays a fresh one.
+    #[arg(long)]
+    pub(crate) railroad: Option<PathBuf>,
+    /// A dictionary word file (file order = id order); absent = the
+    /// embedded full English set.
+    #[arg(long)]
+    pub(crate) words: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Subcommand)]

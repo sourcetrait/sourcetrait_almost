@@ -7,7 +7,11 @@ use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::io::Write;
 
+use crate::assembler::Assembler;
+use crate::assembler::SyntaxTable;
+use crate::bucket::BucketTable;
 use crate::dictionary::read_words_ordered;
+use crate::lexer::Segmenter;
 use crate::ucd::CharacterTable;
 use crate::wikidoc::order_word_pages;
 use crate::wikidoc::render_word_document;
@@ -268,6 +272,215 @@ pub(crate) fn wiktionary_corpus(args: &WiktionaryCorpusArgs) -> BiquestResult<()
             "audit_rows" => v_int(audit_rows as i64),
             "blocks_read" => v_int(blocks_read as i64),
             "out" => v_str(&args.out.display().to_string()),
+            "seconds" => v_float(started.elapsed().as_secs_f64()),
+        },
+        span(),
+    );
+    println!("{}", harness::nu::to_nuon_text(&summary)?);
+    Ok(())
+}
+
+/// The template's content placeholder, replaced with the fill.
+const CONTENT_PLACEHOLDER: &str = "{{ content }}";
+/// The template's page placeholder, replaced inline.
+const PAGE_PLACEHOLDER: &str = "{{ page }}";
+/// The widest page field the corpus can produce, so the measured
+/// frame overhead is conservative for every real call.
+const WIDE_PAGE_FIELD: &str = "1000000..1027171";
+
+/// Render the page template as the quill build renders it: the page
+/// field inline, the content fill riding the placeholder line's own
+/// indent on every line after the first (empty lines empty) -
+/// liquid's verbatim-insertion semantics replicated, so a measured
+/// page and its built quill are the same bytes.
+fn render_page_template(
+    template: &str,
+    page_field: &str,
+    content: &str,
+) -> BiquestResult<String> {
+    let Some(placeholder_line) = template
+        .lines()
+        .find(|line| line.contains(CONTENT_PLACEHOLDER))
+    else {
+        snafu::whatever!("the page template carries no {CONTENT_PLACEHOLDER}");
+    };
+    snafu::ensure_whatever!(
+        template.contains(PAGE_PLACEHOLDER),
+        "the page template carries no {PAGE_PLACEHOLDER}"
+    );
+    let indent: String = placeholder_line
+        .chars()
+        .take_while(|c| *c == ' ')
+        .collect();
+    let mut fill = String::with_capacity(content.len() + content.len() / 8);
+    for (index, line) in content.lines().enumerate() {
+        if index > 0 {
+            fill.push('\n');
+            if !line.is_empty() {
+                fill.push_str(&indent);
+            }
+        }
+        fill.push_str(line);
+    }
+    Ok(template
+        .replace(PAGE_PLACEHOLDER, page_field)
+        .replace(CONTENT_PLACEHOLDER, &fill))
+}
+
+/// `biquest wiktionary railroad`: build the corpus into a railroad.
+/// One page per word document lands under
+/// corpus/derived/wikimedia/wiktionary (shards kept, empty documents
+/// skipped); pages.nuonl carries each page's wire measure through the
+/// rendered template frame, in page order; provenance carries the
+/// probed frame overhead and per-join cost the quill build packs
+/// with. The build commits as the railroad's next REV.
+pub(crate) fn wiktionary_railroad(args: &WiktionaryRailroadArgs) -> BiquestResult<()> {
+    let started = std::time::Instant::now();
+    let table = CharacterTable::embedded()?;
+    let buckets = BucketTable::new();
+    let admitted = match &args.words {
+        Some(path) => read_words_ordered(path)?,
+        None => crate::dictionary::embedded_words(),
+    };
+    let segmenter = Segmenter::new(&table, &buckets, &admitted);
+    let syntax = SyntaxTable::embedded()?;
+    let assembler = Assembler::new(&syntax, &segmenter, &table, &buckets, &admitted);
+    let template = fs::read_to_string(&args.page_template)?;
+
+    let measure = |content: &str| -> BiquestResult<usize> {
+        let framed = render_page_template(&template, WIDE_PAGE_FIELD, content)?;
+        Ok(assembler.encode(&framed)?.len())
+    };
+    let overhead = measure("")?;
+    // One more whole document in a call costs the blank separator
+    // line plus the indent the fill puts on its first line - probed
+    // through the real render rather than assumed.
+    let single = (measure("# x\n")? - overhead) as i64;
+    let joined = (measure("# x\n\n# x\n")? - overhead) as i64;
+    let join_cost = joined - single - single;
+    snafu::ensure_whatever!(
+        join_cost >= 0,
+        "the join probe measured negative ({join_cost}); the fill semantics drifted"
+    );
+    let join_cost = join_cost as usize;
+
+    let railroad = match &args.railroad {
+        Some(dir) => harness::railroad::Railroad::at(dir)?,
+        None => harness::railroad::Railroad::lay()?,
+    };
+    let target = railroad.dir().join("corpus/derived/wikimedia/wiktionary");
+    snafu::ensure_whatever!(
+        !target.exists(),
+        "{} is already occupied; build into a fresh railroad or clear it first",
+        target.display()
+    );
+    fs::create_dir_all(&target)?;
+
+    let mut shard_dirs: Vec<PathBuf> = fs::read_dir(&args.corpus)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_dir())
+        .collect();
+    shard_dirs.sort();
+
+    let engine_state = nu_protocol::engine::EngineState::new();
+    let mut pages_file =
+        io::BufWriter::new(fs::File::create(target.join("pages.nuonl"))?);
+    let mut page = 0usize;
+    let mut skipped_empty = 0usize;
+    let mut wire_total = 0usize;
+    let mut max_wire = 0usize;
+    for shard_dir in &shard_dirs {
+        let Some(shard) = shard_dir.file_name().and_then(|name| name.to_str())
+        else {
+            continue;
+        };
+        let mut files: Vec<PathBuf> = fs::read_dir(shard_dir)?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
+            .collect();
+        files.sort();
+        let mut shard_made = false;
+        for file in &files {
+            let Some(name) = file.file_name().and_then(|name| name.to_str())
+            else {
+                continue;
+            };
+            if name.ends_with(".empty.md") {
+                skipped_empty += 1;
+                continue;
+            }
+            let Some(word) = name.strip_suffix(".md") else { continue };
+            let text = fs::read_to_string(file)?;
+            let wire = measure(&text)? - overhead;
+            page += 1;
+            wire_total += wire;
+            max_wire = max_wire.max(wire);
+            if !shard_made {
+                fs::create_dir_all(target.join(shard))?;
+                shard_made = true;
+            }
+            fs::copy(file, target.join(shard).join(name))?;
+            let row = harness::nu::Value::record(
+                harness::nu::record! {
+                    "page" => v_int(page as i64),
+                    "word" => v_str(word),
+                    "shard" => v_str(shard),
+                    "file" => v_str(&format!("{shard}/{name}")),
+                    "wire_tokens" => v_int(wire as i64),
+                },
+                span(),
+            );
+            writeln!(
+                pages_file,
+                "{}",
+                crate::associations::condensed_line(&engine_state, &row)?
+            )?;
+            if page.is_multiple_of(100_000) {
+                eprintln!(
+                    "railroad: {page} pages, {:.0} s",
+                    started.elapsed().as_secs_f64()
+                );
+            }
+        }
+    }
+    pages_file.flush()?;
+    snafu::ensure_whatever!(page > 0, "the corpus yields no pages");
+
+    let corpus_provenance = harness::nu::from_nuon_text(&fs::read_to_string(
+        args.corpus.join("provenance.nuon"),
+    )?)?;
+    let provenance = harness::nu::Value::record(
+        harness::nu::record! {
+            "source" => v_str("Wiktionary"),
+            "pages" => v_int(page as i64),
+            "skipped_empty" => v_int(skipped_empty as i64),
+            "frame_overhead_wire" => v_int(overhead as i64),
+            "join_cost_wire" => v_int(join_cost as i64),
+            "page_field_probe" => v_str(WIDE_PAGE_FIELD),
+            "mean_page_wire" => v_int((wire_total / page) as i64),
+            "max_page_wire" => v_int(max_wire as i64),
+            "page_template" => v_str(&args.page_template.display().to_string()),
+            "corpus_dir" => v_str(&args.corpus.display().to_string()),
+            "corpus" => corpus_provenance,
+            "biquest_version" => v_str(env!("CARGO_PKG_VERSION")),
+            "built_at" => v_int(epoch_seconds()),
+        },
+        span(),
+    );
+    harness::nu::save_value(&target.join("provenance.nuon"), &provenance)?;
+    let rev = railroad.commit()?;
+
+    let summary = harness::nu::Value::record(
+        harness::nu::record! {
+            "railroad" => v_str(&railroad.dir().display().to_string()),
+            "nom" => v_str(railroad.nom().as_str()),
+            "rev" => v_int(rev as i64),
+            "pages" => v_int(page as i64),
+            "skipped_empty" => v_int(skipped_empty as i64),
+            "mean_page_wire" => v_int((wire_total / page) as i64),
+            "max_page_wire" => v_int(max_wire as i64),
+            "frame_overhead_wire" => v_int(overhead as i64),
+            "join_cost_wire" => v_int(join_cost as i64),
             "seconds" => v_float(started.elapsed().as_secs_f64()),
         },
         span(),

@@ -33,6 +33,7 @@ pub fn run() {
         Command::Wiktionary { command } => match command {
             WiktionaryCommand::Corpus(args) => wiktionary_corpus(args),
             WiktionaryCommand::Document(args) => wiktionary_document(args),
+            WiktionaryCommand::Railroad(args) => wiktionary_railroad(args),
         },
     };
     if let Err(error) = outcome {
