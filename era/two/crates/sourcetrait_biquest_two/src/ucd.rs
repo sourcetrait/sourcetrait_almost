@@ -86,6 +86,15 @@ fn data_lines(text: &str) -> Vec<&str> {
         .collect()
 }
 
+/// The embedded table as a process-wide static, for surfaces that
+/// cannot thread one through (the renderer's line cleaner).
+pub(crate) fn embedded_table() -> &'static CharacterTable {
+    static TABLE: std::sync::OnceLock<CharacterTable> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        CharacterTable::embedded().expect("the vendored UCD parses")
+    })
+}
+
 impl CharacterTable {
     /// The embedded Unicode 17 table; the only constructor in use.
     pub(crate) fn embedded() -> BiquestResult<Self> {

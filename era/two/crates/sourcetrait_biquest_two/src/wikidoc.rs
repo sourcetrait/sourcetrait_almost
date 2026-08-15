@@ -837,19 +837,39 @@ impl<'a> Renderer<'a> {
         }
     }
 
-    /// One document line's text with any embedded newline flattened
-    /// to a space, audited. Raw template positionals legally span
-    /// lines and several render paths take them without the inline
-    /// renderer; a line artifact must stay a line (the markdown and
-    /// the NUON-lines record are both line-structured).
+    /// One document line's text cleaned for the line-structured
+    /// artifacts: any embedded newline flattens to a space, and any
+    /// character with no vocabulary row (unassigned, or the excluded
+    /// private-use class) strips - both audited. Raw template
+    /// positionals legally span lines and several render paths take
+    /// them without the inline renderer, so the guard sits here, the
+    /// one point every pushed line shares. The corpus is controlled:
+    /// content the tokenizer refuses by design never enters it.
     fn flat_line(&mut self, text: String) -> String {
-        if !text.contains('\n') && !text.contains('\r') {
-            return text;
+        let mut text = text;
+        if text.contains('\n') || text.contains('\r') {
+            text = text.replace("\r\n", " ").replace(['\n', '\r'], " ");
+            let sample: String = text.chars().take(120).collect();
+            self.audit("line_embedded_newline", sample);
         }
-        let flat = text.replace("\r\n", " ").replace(['\n', '\r'], " ");
-        let sample: String = flat.chars().take(120).collect();
-        self.audit("line_embedded_newline", sample);
-        flat
+        if !text.is_ascii() {
+            let table = crate::ucd::embedded_table();
+            if text.chars().any(|c| table.index_of(c as u32).is_none()) {
+                let mut dropped: Vec<String> = text
+                    .chars()
+                    .filter(|c| table.index_of(*c as u32).is_none())
+                    .map(|c| format!("U+{:04X}", c as u32))
+                    .collect();
+                dropped.dedup();
+                dropped.truncate(16);
+                text = text
+                    .chars()
+                    .filter(|c| table.index_of(*c as u32).is_some())
+                    .collect();
+                self.audit("character_unlexable", dropped.join(" "));
+            }
+        }
+        text
     }
 
     /// One prose paragraph: a blank separator, the line, the node.
@@ -970,12 +990,10 @@ impl<'a> Renderer<'a> {
     }
 
     fn heading(&mut self, level: usize, text: &str) {
+        let text = self.flat_line(text.to_string());
         self.blank();
         self.lines.push(format!("{} {text}", "#".repeat(level)));
-        self.nodes.push(DocNode::Heading {
-            level,
-            name: text.to_string(),
-        });
+        self.nodes.push(DocNode::Heading { level, name: text });
     }
 
     /// Render inlines to markdown text: anchors, emphasis, templates
