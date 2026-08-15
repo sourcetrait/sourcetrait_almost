@@ -21,34 +21,10 @@ pub(crate) struct AuditRow {
     pub(crate) detail: String,
 }
 
-/// A rendered word document plus its audit trail and the structured
-/// node stream the markdown lines flattened from (data equals
-/// document: both come from the same render).
+/// A rendered word document plus its audit trail.
 pub(crate) struct Document {
     pub(crate) markdown: String,
     pub(crate) audit: Vec<AuditRow>,
-    pub(crate) nodes: Vec<DocNode>,
-}
-
-/// One structured document event, pushed beside its markdown line.
-/// The record assembler folds a stream of these into the page record;
-/// the markdown is the same stream rendered as lines.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DocNode {
-    /// A section (level 2) or subsection (level 3) heading.
-    Heading { level: usize, name: String },
-    /// A POS section's headword form (the h3 word line).
-    HeadWord { form: String },
-    /// The headword's inflection parenthetical line.
-    HeadLine { text: String },
-    /// One numbered gloss line at its nesting depth (1-based).
-    Sense { depth: usize, gloss: String },
-    /// A quotation or usage-example line attached to the last sense.
-    Quote { text: String },
-    /// One list item at its nesting depth (0-based), marker stripped.
-    Item { depth: usize, text: String },
-    /// One prose paragraph.
-    Prose { text: String },
 }
 
 /// The part-of-speech section names of the English section taxonomy.
@@ -801,8 +777,6 @@ struct Renderer<'a> {
     page_title: &'a str,
     lines: Vec<String>,
     audit: Vec<AuditRow>,
-    /// The structured twin of `lines`, one node per pushed line.
-    nodes: Vec<DocNode>,
     /// Every inflected form the head engines put in a parenthetical.
     forms: Vec<String>,
     /// (pos section name, rendered gloss) per numbered sense line.
@@ -811,26 +785,12 @@ struct Renderer<'a> {
     form_of_lemmas: Vec<String>,
 }
 
-/// The bare-anchor interior of a whole-item anchor (`[word]`), or
-/// None. The record form stores a pure anchor-list item as its word:
-/// the brackets are markdown presentation, and the structure already
-/// says the item is a reference (TheUser's ruling); a display anchor
-/// or mixed text stays intact.
-fn bare_anchor(text: &str) -> Option<&str> {
-    let inner = text.strip_prefix('[')?.strip_suffix(']')?;
-    if inner.is_empty() || inner.contains('[') || inner.contains(']') {
-        return None;
-    }
-    Some(inner)
-}
-
 impl<'a> Renderer<'a> {
     fn new(page_title: &'a str) -> Self {
         Self {
             page_title,
             lines: Vec::new(),
             audit: Vec::new(),
-            nodes: Vec::new(),
             forms: Vec::new(),
             senses: Vec::new(),
             form_of_lemmas: Vec::new(),
@@ -872,25 +832,18 @@ impl<'a> Renderer<'a> {
         text
     }
 
-    /// One prose paragraph: a blank separator, the line, the node.
+    /// One prose paragraph: a blank separator, then the line.
     fn push_prose(&mut self, text: String) {
         let text = self.flat_line(text);
         self.blank();
-        self.lines.push(text.clone());
-        self.nodes.push(DocNode::Prose { text });
+        self.lines.push(text);
     }
 
-    /// One list item at a nesting depth: the dash line, the node. A
-    /// whole-item bare anchor stores as its word in the node.
+    /// One list item at a nesting depth, as a dash line.
     fn push_item(&mut self, depth: usize, text: String) {
         let text = self.flat_line(text);
         self.lines
             .push(format!("{}- {text}", "  ".repeat(depth)));
-        let stored = match bare_anchor(&text) {
-            Some(word) => word.to_string(),
-            None => text,
-        };
-        self.nodes.push(DocNode::Item { depth, text: stored });
     }
 
     /// One numbered sense line at its 1-based depth.
@@ -898,7 +851,6 @@ impl<'a> Renderer<'a> {
         let gloss = self.flat_line(gloss);
         let indent = "   ".repeat(depth - 1);
         self.lines.push(format!("{indent}{number}. {gloss}"));
-        self.nodes.push(DocNode::Sense { depth, gloss });
     }
 
     /// One quotation or usage-example line under the last sense.
@@ -906,23 +858,20 @@ impl<'a> Renderer<'a> {
         let text = self.flat_line(text);
         let indent = "   ".repeat(depth);
         self.lines.push(format!("{indent}- {text}"));
-        self.nodes.push(DocNode::Quote { text });
     }
 
-    /// A POS section's headword line at its output level.
+    /// A POS section's word line at its output level.
     fn push_head_word(&mut self, level: usize, form: String) {
         let form = self.flat_line(form);
         self.lines
             .push(format!("{} {form}", "#".repeat(level)));
-        self.nodes.push(DocNode::HeadWord { form });
     }
 
-    /// The headword's parenthetical line plus its separator.
+    /// The word's parenthetical line plus its separator.
     fn push_head_line(&mut self, text: String) {
         let text = self.flat_line(text);
-        self.lines.push(text.clone());
+        self.lines.push(text);
         self.lines.push(String::new());
-        self.nodes.push(DocNode::HeadLine { text });
     }
 
     /// Record one presented inflected form, wikilinks flattened.
@@ -993,7 +942,6 @@ impl<'a> Renderer<'a> {
         let text = self.flat_line(text.to_string());
         self.blank();
         self.lines.push(format!("{} {text}", "#".repeat(level)));
-        self.nodes.push(DocNode::Heading { level, name: text });
     }
 
     /// Render inlines to markdown text: anchors, emphasis, templates
@@ -4698,7 +4646,6 @@ pub(crate) fn render_word_document(pages: &[WikiPage]) -> BiquestResult<Document
     snafu::ensure_whatever!(!pages.is_empty(), "no pages to render");
     let mut lines: Vec<String> = vec![format!("# {}", pages[0].title)];
     let mut audit: Vec<AuditRow> = Vec::new();
-    let mut nodes: Vec<DocNode> = Vec::new();
     for page in pages {
         let blocks = parse_blocks(&page.text)?;
         let mut page_renderer = Renderer::new(&page.title);
@@ -4710,239 +4657,8 @@ pub(crate) fn render_word_document(pages: &[WikiPage]) -> BiquestResult<Document
             lines.extend(page_renderer.lines);
         }
         audit.append(&mut page_renderer.audit);
-        nodes.append(&mut page_renderer.nodes);
     }
     let mut markdown = lines.join("\n");
     markdown.push('\n');
-    Ok(Document { markdown, audit, nodes })
-}
-
-/// One accumulating block row: kind (prose or item), depth, text.
-struct BlockAcc {
-    kind: &'static str,
-    depth: usize,
-    text: String,
-}
-
-/// One accumulating sense row.
-struct SenseAcc {
-    depth: usize,
-    gloss: String,
-    quotes: Vec<String>,
-}
-
-/// One accumulating section.
-struct SectionAcc {
-    name: String,
-    head: Option<String>,
-    head_line: Option<String>,
-    blocks: Vec<BlockAcc>,
-    senses: Vec<SenseAcc>,
-    subsections: Vec<(String, Vec<BlockAcc>)>,
-}
-
-impl SectionAcc {
-    fn new(name: String) -> Self {
-        Self {
-            name,
-            head: None,
-            head_line: None,
-            blocks: Vec::new(),
-            senses: Vec::new(),
-            subsections: Vec::new(),
-        }
-    }
-}
-
-fn blocks_value(blocks: &[BlockAcc]) -> harness::nu::Value {
-    harness::nu::Value::list(
-        blocks
-            .iter()
-            .map(|block| {
-                harness::nu::Value::record(
-                    harness::nu::record! {
-                        "kind" => v_str(block.kind),
-                        "depth" => v_int(block.depth as i64),
-                        "text" => v_str(&block.text),
-                    },
-                    span(),
-                )
-            })
-            .collect(),
-        span(),
-    )
-}
-
-fn optional_str(value: &Option<String>) -> harness::nu::Value {
-    match value {
-        Some(text) => v_str(text),
-        None => harness::nu::Value::nothing(span()),
-    }
-}
-
-/// Fold a document's node stream into its one page record - the
-/// structured twin of the markdown, same content, same order. Every
-/// field is present in every row (null where absent), keeping the
-/// tables uniform for the nu.model.
-pub(crate) fn assemble_record(
-    word: &str,
-    title: &str,
-    nodes: &[DocNode],
-) -> harness::nu::Value {
-    let mut sections: Vec<SectionAcc> = Vec::new();
-    let mut in_subsection = false;
-    for node in nodes {
-        match node {
-            DocNode::Heading { level, name } => {
-                if *level <= 2 || sections.is_empty() {
-                    sections.push(SectionAcc::new(name.clone()));
-                    in_subsection = false;
-                } else {
-                    let section = sections.last_mut().expect("non-empty");
-                    section.subsections.push((name.clone(), Vec::new()));
-                    in_subsection = true;
-                }
-            }
-            DocNode::HeadWord { form } => {
-                if sections.is_empty() {
-                    sections.push(SectionAcc::new(String::new()));
-                }
-                sections.last_mut().expect("non-empty").head = Some(form.clone());
-            }
-            DocNode::HeadLine { text } => {
-                if sections.is_empty() {
-                    sections.push(SectionAcc::new(String::new()));
-                }
-                sections.last_mut().expect("non-empty").head_line = Some(text.clone());
-            }
-            DocNode::Sense { depth, gloss } => {
-                if sections.is_empty() {
-                    sections.push(SectionAcc::new(String::new()));
-                }
-                sections.last_mut().expect("non-empty").senses.push(SenseAcc {
-                    depth: *depth,
-                    gloss: gloss.clone(),
-                    quotes: Vec::new(),
-                });
-            }
-            DocNode::Quote { text } => {
-                let section = match sections.last_mut() {
-                    Some(section) => section,
-                    None => continue,
-                };
-                match section.senses.last_mut() {
-                    Some(sense) => sense.quotes.push(text.clone()),
-                    // A quote with no sense cannot arise from the
-                    // renderer; keep totality as an item block.
-                    None => section.blocks.push(BlockAcc {
-                        kind: "item",
-                        depth: 0,
-                        text: text.clone(),
-                    }),
-                }
-            }
-            DocNode::Item { depth, text } => {
-                if sections.is_empty() {
-                    sections.push(SectionAcc::new(String::new()));
-                }
-                let section = sections.last_mut().expect("non-empty");
-                let row = BlockAcc { kind: "item", depth: *depth, text: text.clone() };
-                if in_subsection {
-                    section.subsections.last_mut().expect("open subsection").1.push(row);
-                } else {
-                    section.blocks.push(row);
-                }
-            }
-            DocNode::Prose { text } => {
-                if sections.is_empty() {
-                    sections.push(SectionAcc::new(String::new()));
-                }
-                let section = sections.last_mut().expect("non-empty");
-                let row = BlockAcc { kind: "prose", depth: 0, text: text.clone() };
-                if in_subsection {
-                    section.subsections.last_mut().expect("open subsection").1.push(row);
-                } else {
-                    section.blocks.push(row);
-                }
-            }
-        }
-    }
-    let section_rows: Vec<harness::nu::Value> = sections
-        .iter()
-        .map(|section| {
-            let senses = if section.senses.is_empty() {
-                harness::nu::Value::nothing(span())
-            } else {
-                harness::nu::Value::list(
-                    section
-                        .senses
-                        .iter()
-                        .map(|sense| {
-                            let quotes = if sense.quotes.is_empty() {
-                                harness::nu::Value::nothing(span())
-                            } else {
-                                harness::nu::Value::list(
-                                    sense.quotes.iter().map(|q| v_str(q)).collect(),
-                                    span(),
-                                )
-                            };
-                            harness::nu::Value::record(
-                                harness::nu::record! {
-                                    "depth" => v_int(sense.depth as i64),
-                                    "gloss" => v_str(&sense.gloss),
-                                    "quotes" => quotes,
-                                },
-                                span(),
-                            )
-                        })
-                        .collect(),
-                    span(),
-                )
-            };
-            let blocks = if section.blocks.is_empty() {
-                harness::nu::Value::nothing(span())
-            } else {
-                blocks_value(&section.blocks)
-            };
-            let subsections = if section.subsections.is_empty() {
-                harness::nu::Value::nothing(span())
-            } else {
-                harness::nu::Value::list(
-                    section
-                        .subsections
-                        .iter()
-                        .map(|(name, blocks)| {
-                            harness::nu::Value::record(
-                                harness::nu::record! {
-                                    "name" => v_str(name),
-                                    "blocks" => blocks_value(blocks),
-                                },
-                                span(),
-                            )
-                        })
-                        .collect(),
-                    span(),
-                )
-            };
-            harness::nu::Value::record(
-                harness::nu::record! {
-                    "name" => v_str(&section.name),
-                    "head" => optional_str(&section.head),
-                    "head_line" => optional_str(&section.head_line),
-                    "blocks" => blocks,
-                    "senses" => senses,
-                    "subsections" => subsections,
-                },
-                span(),
-            )
-        })
-        .collect();
-    harness::nu::Value::record(
-        harness::nu::record! {
-            "word" => v_str(word),
-            "title" => v_str(title),
-            "sections" => harness::nu::Value::list(section_rows, span()),
-        },
-        span(),
-    )
+    Ok(Document { markdown, audit })
 }

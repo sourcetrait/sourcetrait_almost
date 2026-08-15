@@ -26,12 +26,13 @@ pub fn run() {
             TrainerCommand::Train(args) => trainer_train(args),
         },
         Command::Wikimedia { command } => match command {
-            WikimediaCommand::Corpus(args) => wikimedia_corpus(args),
-            WikimediaCommand::Document(args) => wikimedia_document(args),
             WikimediaCommand::Normalize(args) => wikimedia_normalize(args),
             WikimediaCommand::Page(args) => wikimedia_page(args),
-            WikimediaCommand::Pages(args) => wikimedia_pages(args),
             WikimediaCommand::Parse(args) => wikimedia_parse(args),
+        },
+        Command::Wiktionary { command } => match command {
+            WiktionaryCommand::Corpus(args) => wiktionary_corpus(args),
+            WiktionaryCommand::Document(args) => wiktionary_document(args),
         },
     };
     if let Err(error) = outcome {

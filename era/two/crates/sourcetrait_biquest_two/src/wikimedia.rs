@@ -1,6 +1,6 @@
-//! The WikimediaDumpTool verbs: raw-source page access, the parse
-//! test surface, the ruled typography normalization filter, and the
-//! word-document renderer.
+//! The WikimediaDumpTool verbs - raw-source page access, the parse
+//! test surface, the typography normalization filter - plus the
+//! wiktionary word-document verb, which rides the same page plumbing.
 use crate::*;
 
 use crate::ucd::CharacterTable;
@@ -277,9 +277,9 @@ fn word_pages(
     Ok(pages)
 }
 
-/// `biquest wikimedia document`: the word's one markdown document on
+/// `biquest wiktionary document`: the word's one markdown document on
 /// stdout, audit rows as NUON lines on stderr.
-pub(crate) fn wikimedia_document(args: &WikimediaDocumentArgs) -> BiquestResult<()> {
+pub(crate) fn wiktionary_document(args: &WiktionaryDocumentArgs) -> BiquestResult<()> {
     let pages = word_pages(&args.word, &args.source, args.index.as_ref())?;
     snafu::ensure_whatever!(
         !pages.is_empty(),
