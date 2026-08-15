@@ -88,6 +88,17 @@ dispatch layer - measured), so the re-anchor is
 `old + (new - old)`: equal to the master within one rounding, and
 re-derived whole every step so rounding never compounds.
 
+## fn train
+
+Chunks cycle in pack order and never reshuffle: stage-zero corpus
+order is the curriculum - the genesis document first, then pages in
+reading order - so consuming the pack in sequence IS the training
+design, not a sampling default. The per-epoch Fisher-Yates reshuffle
+the SFT loop carries (its batch-1 neighbor-effect rationale) was
+present here and removed for exactly that reason; a multi-epoch run
+replays the same order by design. corpus_files upholds the other
+half of the contract: roots pack in argument order.
+
 ## fn save_checkpoint
 
 Writes the organism checkpoint format trainer_init established: the

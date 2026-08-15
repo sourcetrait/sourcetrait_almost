@@ -197,7 +197,8 @@ pub(crate) struct TrainerTrainArgs {
     /// The trained checkpoint directory (log and provenance beside).
     #[arg(long)]
     pub(crate) out: PathBuf,
-    /// Corpus files or trees, tokenized and packed in walk order.
+    /// Corpus files or trees, packed in the order given (a tree's own
+    /// walk sorts within it).
     #[arg(long, required = true, num_args = 1..)]
     pub(crate) roots: Vec<PathBuf>,
     /// A dictionary word file (file order = id order); absent = the
@@ -372,7 +373,8 @@ pub(crate) struct TokenizerLedgerArgs {
     /// The dictionary word file (file order = id order).
     #[arg(long)]
     pub(crate) words: PathBuf,
-    /// Corpus files or trees, walked sorted.
+    /// Corpus files or trees, in the order given (a tree's own walk
+    /// sorts within it).
     #[arg(long, required = true, num_args = 1..)]
     pub(crate) roots: Vec<PathBuf>,
     /// The ledger report (.nuon), per-file rows included.

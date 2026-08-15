@@ -13,8 +13,6 @@ type FloatTensor<B, const D: usize> = burn::tensor::Tensor<B, D>;
 const ADAM_BETA1: f64 = 0.9;
 const ADAM_BETA2: f64 = 0.95;
 const ADAM_EPS: f64 = 1e-8;
-/// The organism loop's per-epoch chunk reshuffle seed (deterministic).
-const CHUNK_SHUFFLE_SEED: u64 = 0x5EED_0002;
 
 /// The knobs the organism loop takes beyond the shared LoopOptions.
 pub struct OrganismLoopOptions {
@@ -1208,7 +1206,7 @@ impl<AD: AutodiffBackend> OrganismTrainer<AD> {
         Ok(())
     }
 
-    /// The stage loop: shuffled chunk cycling under warmup AdamW.
+    /// The stage loop: in-order chunk cycling under warmup AdamW.
     pub fn train(
         &mut self,
         chunks: &[Vec<u32>],
@@ -1219,8 +1217,6 @@ impl<AD: AutodiffBackend> OrganismTrainer<AD> {
         snafu::ensure_whatever!(!chunks.is_empty(), "no training chunks");
         let seq_len = chunks[0].len() - 1;
         let accumulate = options.accumulate.max(1);
-        let mut order: Vec<usize> = (0..chunks.len()).collect();
-        let mut order_epoch = usize::MAX;
         let mut first_loss = 0f32;
         let mut last_loss = 0f32;
         let mut trained_tokens = 0usize;
@@ -1233,16 +1229,10 @@ impl<AD: AutodiffBackend> OrganismTrainer<AD> {
             let mut batch_loss = 0f32;
             for slot in 0..accumulate {
                 let flat = step * accumulate + slot;
-                let epoch = flat / chunks.len();
-                if epoch != order_epoch {
-                    let mut rng = SplitMix64::new(CHUNK_SHUFFLE_SEED ^ epoch as u64);
-                    for high in (1..order.len()).rev() {
-                        let pick = rng.next_below(high + 1);
-                        order.swap(high, pick);
-                    }
-                    order_epoch = epoch;
-                }
-                let chunk = &chunks[order[flat % chunks.len()]];
+                // Chunks cycle in PACK order, never reshuffled: the
+                // corpus order is the curriculum (the genesis document
+                // first, then pages in reading order).
+                let chunk = &chunks[flat % chunks.len()];
                 snafu::ensure_whatever!(
                     chunk.len() == seq_len + 1,
                     "chunk {flat} carries {} ids for seq_len {seq_len}",

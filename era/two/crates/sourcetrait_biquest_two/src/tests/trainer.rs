@@ -3,6 +3,7 @@
 use crate::assembler::Assembler;
 use crate::assembler::SyntaxTable;
 use crate::bucket::BucketTable;
+use crate::corpus::corpus_files;
 use crate::lexer::Segmenter;
 use crate::trainer::OrganismSpec;
 use crate::trainer::pack_corpus;
@@ -135,6 +136,30 @@ fn pack_corpus_refuses_rather_than_skips() {
     assert!(
         error.to_string().contains("bad.txt"),
         "the refusal must name the file: {error}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Roots pack in the order GIVEN: a file root holds its argument
+/// position (the genesis-first contract) and only a tree root's own
+/// walk sorts - a lexically-late file root never re-sorts behind a
+/// tree.
+#[test]
+fn corpus_files_preserves_root_order() {
+    let dir = std::env::temp_dir().join(format!("biquest_order_{}", std::process::id()));
+    let tree = dir.join("tree");
+    std::fs::create_dir_all(&tree).expect("order fixture tree");
+    std::fs::write(dir.join("zz_first.txt"), "cat").expect("order fixture file");
+    std::fs::write(tree.join("b.txt"), "cat").expect("order fixture file");
+    std::fs::write(tree.join("a.txt"), "cat").expect("order fixture file");
+
+    let files =
+        corpus_files(&[dir.join("zz_first.txt"), tree.clone()]).expect("root walk");
+    assert_eq!(
+        files,
+        vec![dir.join("zz_first.txt"), tree.join("a.txt"), tree.join("b.txt")],
+        "the file root stays first; the tree walks sorted behind it"
     );
 
     std::fs::remove_dir_all(&dir).ok();

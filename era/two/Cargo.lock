@@ -7938,7 +7938,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_biquest_two"
-version = "0.0.0-18"
+version = "0.0.0-20"
 dependencies = [
  "bzip2 0.6.1",
  "clap",
@@ -8008,7 +8008,7 @@ dependencies = [
 
 [[package]]
 name = "sourcetrait_lib_quest_llm_two"
-version = "0.0.0-8"
+version = "0.0.0-9"
 dependencies = [
  "burn",
  "candle-core 0.11.0",

@@ -1,8 +1,10 @@
 //! Corpus file walking shared by the measuring and training verbs.
 use crate::*;
 
-/// Recursively collect the files under a root, sorted; a file passes
-/// through as itself.
+/// Collect corpus files IN ROOT ORDER: a file root holds its argument
+/// position and a directory root's own walk sorts within it, so the
+/// caller's root sequence is the pack sequence (a curriculum, never a
+/// set).
 pub(crate) fn corpus_files(roots: &[PathBuf]) -> BiquestResult<Vec<PathBuf>> {
     let mut files: Vec<PathBuf> = Vec::new();
     for root in roots {
@@ -15,6 +17,7 @@ pub(crate) fn corpus_files(roots: &[PathBuf]) -> BiquestResult<Vec<PathBuf>> {
             "corpus root {} is neither file nor directory",
             root.display()
         );
+        let mut walked: Vec<PathBuf> = Vec::new();
         let mut pending = vec![root.clone()];
         while let Some(dir) = pending.pop() {
             for entry in fs::read_dir(&dir)? {
@@ -22,12 +25,13 @@ pub(crate) fn corpus_files(roots: &[PathBuf]) -> BiquestResult<Vec<PathBuf>> {
                 if path.is_dir() {
                     pending.push(path);
                 } else {
-                    files.push(path);
+                    walked.push(path);
                 }
             }
         }
+        walked.sort();
+        files.extend(walked);
     }
-    files.sort();
     snafu::ensure_whatever!(!files.is_empty(), "no corpus files under the given roots");
     Ok(files)
 }
