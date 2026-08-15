@@ -30,6 +30,7 @@ pub fn run() {
             WikimediaCommand::Document(args) => wikimedia_document(args),
             WikimediaCommand::Normalize(args) => wikimedia_normalize(args),
             WikimediaCommand::Page(args) => wikimedia_page(args),
+            WikimediaCommand::Pages(args) => wikimedia_pages(args),
             WikimediaCommand::Parse(args) => wikimedia_parse(args),
         },
     };

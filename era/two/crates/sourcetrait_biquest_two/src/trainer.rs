@@ -1,6 +1,9 @@
 //! The BiquestTrainer: the organism's checkpoint init and training.
 use crate::*;
 
+use crate::assembler::Assembler;
+#[cfg(feature = "train")]
+use crate::assembler::SyntaxTable;
 #[cfg(feature = "train")]
 use crate::bucket::BucketTable;
 #[cfg(feature = "train")]
@@ -388,12 +391,15 @@ pub(crate) fn trainer_init(args: &TrainerInitArgs) -> BiquestResult<()> {
 
 /// Tokenize corpus files in walk order and pack the id stream into
 /// chunks of seq_len + 1 ids at stride seq_len, so the boundary token
-/// closes one chunk as target and opens the next as input. A file the
-/// lexer refuses fails the pack: training never silently drops
-/// content (measurement skips-and-reports; the trainer errors).
+/// closes one chunk as target and opens the next as input. A `.quill`
+/// file assembles to wire (framed training material); everything else
+/// content-tokenizes. A file the lexer or assembler refuses fails the
+/// pack: training never silently drops content (measurement
+/// skips-and-reports; the trainer errors).
 #[cfg_attr(not(feature = "train"), allow(dead_code))]
 pub(crate) fn pack_corpus(
     segmenter: &Segmenter<'_>,
+    assembler: &Assembler<'_>,
     files: &[PathBuf],
     seq_len: usize,
 ) -> BiquestResult<(Vec<Vec<u32>>, usize)> {
@@ -404,6 +410,13 @@ pub(crate) fn pack_corpus(
             Ok(text) => text,
             Err(e) => snafu::whatever!("read {} failed (corpus is utf-8): {e}", path.display()),
         };
+        if path.extension().is_some_and(|ext| ext == "quill") {
+            match assembler.encode(&text) {
+                Ok(wire) => stream.extend(wire),
+                Err(e) => snafu::whatever!("{}: {e}", path.display()),
+            }
+            continue;
+        }
         let tokens = match segmenter.segment(&text) {
             Ok(tokens) => tokens,
             Err(e) => snafu::whatever!("{}: {e}", path.display()),
@@ -447,8 +460,11 @@ pub(crate) fn trainer_train(args: &TrainerTrainArgs) -> BiquestResult<()> {
         None => crate::dictionary::embedded_words(),
     };
     let segmenter = Segmenter::new(&table, &buckets, &words);
+    let syntax = SyntaxTable::embedded()?;
+    let assembler = Assembler::new(&syntax, &segmenter, &table, &buckets, &words);
     let files = corpus_files(&args.roots)?;
-    let (chunks, corpus_tokens) = pack_corpus(&segmenter, &files, args.seq_len)?;
+    let (chunks, corpus_tokens) =
+        pack_corpus(&segmenter, &assembler, &files, args.seq_len)?;
 
     let mut trainer = llm::imagine_quest_train::OrganismTrainer::<TrainBack>::load(
         &args.organism,

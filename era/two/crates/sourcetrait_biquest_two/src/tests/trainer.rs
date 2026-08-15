@@ -1,5 +1,7 @@
 //! Organism-spec locks: geometry derivation, the layer cycle, the
 //! config both loaders read, and the corpus packer's contract.
+use crate::assembler::Assembler;
+use crate::assembler::SyntaxTable;
 use crate::bucket::BucketTable;
 use crate::lexer::Segmenter;
 use crate::trainer::OrganismSpec;
@@ -7,6 +9,17 @@ use crate::trainer::pack_corpus;
 use crate::ucd::CharClass;
 use crate::ucd::CharRow;
 use crate::ucd::CharacterTable;
+
+/// The minimal binding table the packer's assembler rides on.
+fn test_syntax() -> SyntaxTable {
+    SyntaxTable::from_names(
+        ["NULL", "OPEN", "CLOSE", "BEGIN", "END", "TEXT"]
+            .iter()
+            .map(|name| String::from(*name))
+            .collect(),
+    )
+    .expect("test syntax binds")
+}
 
 #[test]
 fn geometry_derives_the_hybrid_ratios() {
@@ -84,7 +97,9 @@ fn pack_corpus_strides_and_shares_boundaries() {
         .expect("pack fixture file");
 
     let files = vec![dir.join("a.txt")];
-    let (chunks, total) = pack_corpus(&segmenter, &files, 4).expect("pack");
+    let syntax = test_syntax();
+    let assembler = Assembler::new(&syntax, &segmenter, &table, &buckets, &words);
+    let (chunks, total) = pack_corpus(&segmenter, &assembler, &files, 4).expect("pack");
     // dog, sp, cat, sp, dog, sp, cat, sp, 1 = 9 tokens.
     assert_eq!(total, 9);
     assert_eq!(chunks.len(), 2, "floor((9 - 1) / 4) chunks");
@@ -113,11 +128,42 @@ fn pack_corpus_refuses_rather_than_skips() {
     std::fs::write(dir.join("bad.txt"), "cat Zebra").expect("refuse fixture file");
 
     let files = vec![dir.join("bad.txt")];
-    let error = pack_corpus(&segmenter, &files, 4).expect_err("uppercase must refuse");
+    let syntax = test_syntax();
+    let assembler = Assembler::new(&syntax, &segmenter, &table, &buckets, &words);
+    let error = pack_corpus(&segmenter, &assembler, &files, 4)
+        .expect_err("uppercase must refuse");
     assert!(
         error.to_string().contains("bad.txt"),
         "the refusal must name the file: {error}"
     );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A `.quill` file assembles to wire in the pack; its keyword tokens
+/// ride the stream beside content tokenization.
+#[test]
+fn pack_corpus_assembles_quill_files() {
+    let table = ascii_table();
+    let buckets = BucketTable::new();
+    let words = vec![String::from("cat")];
+    let segmenter = Segmenter::new(&table, &buckets, &words);
+    let syntax = test_syntax();
+    let assembler = Assembler::new(&syntax, &segmenter, &table, &buckets, &words);
+
+    let dir = std::env::temp_dir().join(format!("biquest_quill_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("quill fixture dir");
+    std::fs::write(
+        dir.join("a.quill"),
+        "OPEN TEXT\n  BEGIN TEXT\n    cat\n  END TEXT\nCLOSE TEXT\n",
+    )
+    .expect("quill fixture file");
+
+    let files = vec![dir.join("a.quill")];
+    // OPEN TEXT BEGIN TEXT cat END TEXT CLOSE TEXT = 9 wire tokens.
+    let (chunks, total) = pack_corpus(&segmenter, &assembler, &files, 4).expect("pack");
+    assert_eq!(total, 9);
+    assert_eq!(chunks.len(), 2);
 
     std::fs::remove_dir_all(&dir).ok();
 }

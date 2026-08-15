@@ -9,6 +9,7 @@ use std::io::Write;
 
 use crate::dictionary::read_words_ordered;
 use crate::ucd::CharacterTable;
+use crate::wikidoc::assemble_record;
 use crate::wikidoc::order_word_pages;
 use crate::wikidoc::render_word_document;
 use crate::wikixml::index_matches;
@@ -120,6 +121,9 @@ pub(crate) fn wikimedia_corpus(args: &WikimediaCorpusArgs) -> BiquestResult<()> 
     let mut pages_rendered = 0usize;
     let mut render_failures = 0usize;
     let mut audit_rows = 0usize;
+    // Word-keyed so the stream writes word-sorted whatever order the
+    // offset-ordered walk visits.
+    let mut record_lines: BTreeMap<String, String> = BTreeMap::new();
     for word in by_offset.values() {
         if let Some(limit) = args.limit
             && words_rendered >= limit
@@ -167,6 +171,13 @@ pub(crate) fn wikimedia_corpus(args: &WikimediaCorpusArgs) -> BiquestResult<()> 
             .lines()
             .skip(1)
             .any(|line| !line.trim().is_empty());
+        if has_content && args.nuonl.is_some() {
+            let record = assemble_record(word, &pages[0].title, &document.nodes);
+            record_lines.insert(
+                (*word).to_string(),
+                crate::associations::condensed_line(&engine_state, &record)?,
+            );
+        }
         let filename = if has_content {
             format!("{word}.md")
         } else {
@@ -219,6 +230,21 @@ pub(crate) fn wikimedia_corpus(args: &WikimediaCorpusArgs) -> BiquestResult<()> 
     }
     audit_file.flush()?;
 
+    if let Some(path) = &args.nuonl {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)?;
+        }
+        let file = fs::File::create(path)?;
+        let mut writer = io::BufWriter::with_capacity(1 << 20, file);
+        for line in record_lines.values() {
+            writer.write_all(line.as_bytes())?;
+            writer.write_all(b"\n")?;
+        }
+        writer.flush()?;
+    }
+
     // The empty tails, measured: vocabulary words with no page. The
     // list is the word-keyed Wikipedia stage's target input.
     let missing: Vec<&str> = words
@@ -247,6 +273,11 @@ pub(crate) fn wikimedia_corpus(args: &WikimediaCorpusArgs) -> BiquestResult<()> 
             "render_failures" => v_int(render_failures as i64),
             "audit_rows" => v_int(audit_rows as i64),
             "blocks_read" => v_int(blocks_read as i64),
+            "nuonl" => match &args.nuonl {
+                Some(path) => v_str(&path.display().to_string()),
+                None => harness::nu::Value::nothing(span()),
+            },
+            "nuonl_rows" => v_int(record_lines.len() as i64),
             "limit" => match args.limit {
                 Some(limit) => v_int(limit as i64),
                 None => harness::nu::Value::nothing(span()),
@@ -267,6 +298,7 @@ pub(crate) fn wikimedia_corpus(args: &WikimediaCorpusArgs) -> BiquestResult<()> 
             "render_failures" => v_int(render_failures as i64),
             "audit_rows" => v_int(audit_rows as i64),
             "blocks_read" => v_int(blocks_read as i64),
+            "nuonl_rows" => v_int(record_lines.len() as i64),
             "out" => v_str(&args.out.display().to_string()),
             "seconds" => v_float(started.elapsed().as_secs_f64()),
         },

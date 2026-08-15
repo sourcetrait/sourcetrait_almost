@@ -70,6 +70,8 @@ pub(crate) enum WikimediaCommand {
     Normalize(WikimediaNormalizeArgs),
     /// One page's wikitext from an export save or a dump.
     Page(WikimediaPageArgs),
+    /// The record stream chunked into training-sized page tables.
+    Pages(WikimediaPagesArgs),
     /// One page's parsed block tree, as a NUON table.
     Parse(WikimediaParseArgs),
 }
@@ -86,6 +88,10 @@ pub(crate) struct WikimediaCorpusArgs {
     /// missing_words.txt, and provenance.nuon.
     #[arg(long)]
     pub(crate) out: PathBuf,
+    /// Also emit the global record stream here (.nuonl): one NUON
+    /// line per content word, word-sorted, from the same walk.
+    #[arg(long)]
+    pub(crate) nuonl: Option<PathBuf>,
     /// A dictionary word file (file order = id order); absent = the
     /// embedded full English set.
     #[arg(long)]
@@ -93,6 +99,28 @@ pub(crate) struct WikimediaCorpusArgs {
     /// Render at most this many words (a smoke lever).
     #[arg(long)]
     pub(crate) limit: Option<usize>,
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct WikimediaPagesArgs {
+    /// The global record stream (.nuonl) the pages chunk from.
+    #[arg(long)]
+    pub(crate) nuonl: PathBuf,
+    /// The page-table tree: pages/page_NNNNNN.nuon plus
+    /// provenance.nuon.
+    #[arg(long)]
+    pub(crate) out: PathBuf,
+    /// The training-chunk budget each framed page must fit, in wire
+    /// tokens (the trainer's seq_len).
+    #[arg(long, default_value_t = 2048)]
+    pub(crate) seq_len: usize,
+    /// A keyword-page binding table; absent = the embedded default.
+    #[arg(long)]
+    pub(crate) syntax: Option<PathBuf>,
+    /// A dictionary word file (file order = id order); absent = the
+    /// embedded full English set.
+    #[arg(long)]
+    pub(crate) words: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]

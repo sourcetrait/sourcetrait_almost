@@ -16,6 +16,7 @@ pub(crate) mod value;
 pub(crate) mod wikicorpus;
 pub(crate) mod wikiderive;
 pub(crate) mod wikidoc;
+pub(crate) mod wikipages;
 pub(crate) mod wikivocab;
 pub(crate) mod wikimedia;
 pub(crate) mod wikitext;
@@ -67,6 +68,7 @@ pub(crate) use crate::cli::{
     WikimediaDocumentArgs,
     WikimediaNormalizeArgs,
     WikimediaPageArgs,
+    WikimediaPagesArgs,
     WikimediaParseArgs,
 };
 pub(crate) use crate::dictionary::tokenizer_dictionary;
@@ -88,6 +90,7 @@ pub(crate) use crate::wikimedia::{
     wikimedia_page,
     wikimedia_parse,
 };
+pub(crate) use crate::wikipages::wikimedia_pages;
 pub(crate) use crate::wikivocab::{
     indefinite_article,
     language_table,
