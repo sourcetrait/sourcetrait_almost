@@ -25,6 +25,8 @@
   [ 'NUON'     'NUON data format']
   [ 'LIQUID'   'Liquid template data format']
   [ 'NU'       'Nu language']
+  [ 'TYPEDEF'  'Serialized type definition, followed by a language or format']
+  [ 'MODEL'    'Serialized documentation of a type definition contract, followed by a language or format']
   [ 'TRAIN'    'Encloses training syntax']
   [ 'PAGES'    'Encloses training pages definition syntax']
   [ 'PAGE'     'Encloses training page content syntax']
